@@ -182,3 +182,32 @@ def test_key_extraction():
     assert extract_keys("i think it is fine. so do it.") == []
     cleaned = clean_for_storage("Here:\n```python\nprint(1)\n```\ndone <memory-context>secret</memory-context>", 100)
     assert "print" not in cleaned and "secret" not in cleaned and "[code omitted]" in cleaned
+
+
+def test_package_loads_and_registers_without_numpy():
+    """Hermes only lists providers whose package imports; numpy is installed after selection."""
+    if not HAVE_HERMES: return
+    import subprocess
+    hermes = next(p for p in sys.path if (Path(p) / "agent" / "memory_provider.py").exists())
+    code = f"""
+import importlib.abc, importlib.util, sys, types
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("numpy", "threadpoolctl"):
+            raise ImportError("blocked: " + name)
+sys.meta_path.insert(0, Block())
+sys.path.insert(0, {hermes!r})
+sys.modules["hermes_user_plugins"] = types.ModuleType("hermes_user_plugins"); sys.modules["hermes_user_plugins"].__path__ = []
+name = "hermes_user_plugins.holonomic__source_x"
+spec = importlib.util.spec_from_file_location(name, {str(ROOT / "__init__.py")!r}, submodule_search_locations=[{str(ROOT)!r}])
+mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod)
+got = []
+mod.register(type("Ctx", (), {{"register_memory_provider": lambda self, p: got.append(p)}})())
+p = got[0]
+assert p.name == "holonomic" and p.is_available() is False and "numpy" in p.unavailable_reason()
+assert len(p.get_config_schema()) == 2 and p.get_tool_schemas()
+assert "numpy" not in sys.modules
+print("ok")
+"""
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.stdout.strip() == "ok", out.stderr[-800:]

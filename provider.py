@@ -212,7 +212,8 @@ class HolonomicMemoryProvider(MemoryProvider):
             return False
 
     def unavailable_reason(self) -> str:
-        return "numpy is not installed in Hermes' Python environment (the holonomic provider needs numpy and threadpoolctl)."
+        return ("numpy is not installed in Hermes' Python environment. Run `hermes memory setup` and choose "
+                "holonomic to install the provider's dependencies (numpy, threadpoolctl), then restart Hermes.")
 
     def initialize(self, session_id: str, **kwargs) -> None:
         home = kwargs.get("hermes_home")

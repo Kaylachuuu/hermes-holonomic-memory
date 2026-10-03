@@ -32,8 +32,9 @@ Everything is local: one SQLite file and one projection matrix under `$HERMES_HO
 2. Run `hermes memory setup`, choose `holonomic`, and enter the Ollama address and embedding model.
 3. Start Hermes. `hermes memory status` should show the provider as active.
 
-Requirements: Python 3.10+, `numpy`, `threadpoolctl` (declared in `plugin.yaml`), and an Ollama server
-with an embedding model pulled.
+Requirements: Python 3.10+ and an Ollama server
+with an embedding model pulled. `numpy` and `threadpoolctl` are declared in `plugin.yaml`; the setup wizard
+installs them after you choose the provider, and Hermes needs a restart afterwards.
 
 ## Configuration
 
