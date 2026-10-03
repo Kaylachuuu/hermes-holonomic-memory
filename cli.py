@@ -3,7 +3,7 @@
     hermes holonomic stats
     hermes holonomic list [-n 20]
     hermes holonomic recall "what is my name" [-k 10]
-    hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run]
+    hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--think]
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -141,6 +141,8 @@ def _reflect(engine, cfg, args) -> None:
     from .reflect import ReflectionError, pending, reflect_config, reflect_once
     rc = reflect_config(cfg)
     if args.reflect_action == "now":
+        if args.think:
+            cfg = dict(cfg, reflect_think=True)
         try:
             t0 = time.perf_counter()
             from hermes_constants import get_hermes_home
@@ -195,6 +197,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")
     ref.add_argument("--host", help="Ollama server for that model, if different from the embedding server (with 'on')")
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
+    ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (slower)")
     prof = subs.add_parser("profile", help="Show the profiles written by reflection")
     prof.add_argument("--history", action="store_true", help="Show earlier versions too")
     prof.add_argument("--set", nargs=2, metavar=("WHO", "TEXT"), help="Write a profile yourself: user, self or us")

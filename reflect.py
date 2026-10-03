@@ -93,9 +93,12 @@ it grows within. Never restate or summarise it, and never write anything about t
 What you write about the assistant is what it has become beyond the foundation, through these conversations.
 
 Write:
-- user_facts: durable facts about the user: who they are, what they do, what they want, what they prefer, what is \
-going on in their life. One standalone sentence each, in the third person, using the user's name if it is known. \
-Skip small talk and anything that only mattered in the moment. At most 8.
+- user_facts: durable facts about the user as a person: their history, work, skills, projects, family, tastes, \
+plans, what is going on in their life. One standalone sentence each, in the third person, using the user's name \
+if it is known. Be specific and keep the details: write "Kayla started writing an operating system in x86 assembly \
+years ago and wants to finish it", not "Kayla has a project". Write a fact for every concrete thing the user \
+revealed about themselves. Do not write facts about the conversation itself: that the user said hello, is excited \
+to talk, or asked a question is not a fact about them. At most 8.
 - self_notes: what the assistant should remember about itself, written in the first person ("I ..."): commitments \
 it made, how it responded and whether that went well, tastes and opinions it has formed. At most 4.
 - relationship_notes: what matters about the two of them together, written from the assistant's side ("We ..."): \
@@ -105,12 +108,14 @@ shared plans, running jokes, trust, friction, how they work together. At most 3.
 memories. Give "fact" (its number), "replacement" (the fact that is true now, one sentence) and "sources" (the \
 USER memories that say so). People rarely change: a bad day, a one-off exception, a joke, or anything the \
 ASSISTANT said is not a contradiction. This list is usually empty.
-- user_profile: the user profile rewritten to include what is new. Keep everything already in it unless a memory \
-contradicts it. Plain prose, at most 150 words.
-- self_profile: the assistant's description of who it has become, first person, rewritten the same way. \
-At most 120 words.
-- relationship_profile: the state of the relationship, from the assistant's side, rewritten the same way. \
-At most 100 words.
+- user_profile: a portrait of the user as a person, rewritten to include what is new. Describe the person, not \
+the conversation, and never call them "a user". Keep everything already in it unless a memory contradicts it. \
+Plain prose, at most 150 words.
+- self_profile: who the assistant has become beyond the FOUNDATION, first person, rewritten the same way. Leave out \
+its name, its role and anything else the FOUNDATION already says. If these memories show nothing new about the \
+assistant, repeat the current self profile exactly, or return an empty string if there is none. At most 120 words.
+- relationship_profile: the state of the relationship, from the assistant's side, rewritten the same way. If it is \
+too early to say anything specific, repeat the current one exactly, or return an empty string. At most 100 words.
 
 For every item give "sources": the numbers of the memories that support it. If the memories contain nothing worth \
 keeping, return empty lists and repeat the current profiles unchanged. Do not guess, do not flatter, do not pad."""
@@ -237,7 +242,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
             raise ReflectionError("No reflection model is set. Run: hermes holonomic reflect on --model NAME")
         llm = lambda system, user: ollama_chat(rc["reflect_host"], rc["reflect_model"], system, user,   # noqa: E731
                                                timeout=float(rc["reflect_timeout"]), temperature=float(rc["reflect_temperature"]),
-                                               max_tokens=int(rc["reflect_max_tokens"]), think=bool(rc["reflect_think"]))
+                                               # thinking is counted against the same limit as the reply
+                                               max_tokens=int(rc["reflect_max_tokens"]) * (4 if rc["reflect_think"] else 1),
+                                               think=bool(rc["reflect_think"]))
     last = int(engine.kv_get(WATERMARK, "0") or 0)
     batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS)
     report: Dict[str, Any] = {"read": len(batch), "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run}
