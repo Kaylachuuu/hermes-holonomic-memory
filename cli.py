@@ -126,6 +126,8 @@ def _reflect_toggle(args) -> None:
             values["reflect_model"] = args.model
         if args.host:
             values["reflect_host"] = args.host.rstrip("/")
+        if args.depth:
+            values["reflect_depth"] = args.depth
         if not (args.model or load_config(home).get("reflect_model")):
             print("Reflection needs a model. Run: hermes holonomic reflect on --model NAME   (a name from `ollama list`)")
             return
@@ -143,6 +145,8 @@ def _reflect(engine, cfg, args) -> None:
     if args.reflect_action == "now":
         if args.think or args.no_think:
             cfg = dict(cfg, reflect_think=bool(args.think))
+        if args.depth:
+            cfg = dict(cfg, reflect_depth=args.depth)
         try:
             t0 = time.perf_counter()
             from hermes_constants import get_hermes_home
@@ -153,15 +157,20 @@ def _reflect(engine, cfg, args) -> None:
             from .reflect import LAST_CALL
             print(f"Reflection failed: {exc}")
             if LAST_CALL:
-                print(f"  model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
+                print(f"  last model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
                       f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
             return
-        from .reflect import LAST_CALL
-        print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s"
+        print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s at depth {report['depth']}"
               + (" (dry run: nothing stored)" if args.dry_run else ""))
-        if LAST_CALL:
-            print(f"  model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
-                  f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
+        for c in report["calls"]:
+            print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
+                  f"reply {c.get('reply_tokens')} tokens, thinking {'on' if c.get('think') else 'off'}, "
+                  f"finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+        for c in report.get("checked") or []:
+            if c["verdict"] == "drop":
+                print(f"  CHECK dropped ({c['kind']}): {c['was']}")
+            else:
+                print(f"  CHECK rewrote ({c['kind']}): {c['was']}\n             ->  {c['now']}")
         for kind, items in (report.get("proposed") or {}).items():
             for item in items:
                 print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
@@ -179,6 +188,8 @@ def _reflect(engine, cfg, args) -> None:
     last_run = engine.kv_get("reflect:last_run")
     print(f"  enabled: {rc['reflect_enabled']}")
     print(f"  model: {rc['reflect_model'] or '(not set)'} at {rc['reflect_host']}")
+    print(f"  depth: {rc['reflect_depth']} (1 facts only, 2 everything unchecked, 3 everything checked); "
+          f"thinking {'on' if rc['reflect_think'] else 'off'}")
     print(f"  runs when: {rc['reflect_min_new']} new memories and {rc['reflect_idle_seconds']} s of quiet")
     print(f"  memories waiting: {pending(engine)}")
     print(f"  last run: {_when(float(last_run)) if last_run else 'never'}")
@@ -198,6 +209,8 @@ def register_cli(subparser) -> None:
     ref.add_argument("reflect_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")
     ref.add_argument("--host", help="Ollama server for that model, if different from the embedding server (with 'on')")
+    ref.add_argument("--depth", type=int, choices=[1, 2, 3],
+                     help="1 facts and user profile only; 2 everything, unchecked; 3 everything, each item checked (default)")
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
     ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (the default)")
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (faster, shallower)")

@@ -34,13 +34,17 @@ def test_reflection_stores_linked_facts_and_profiles(tmp_path):
     from holonomic.reflect import reflect_once, pending, FACT, SELF_NOTE
     m, ids = seeded(tmp_path)
     seen = {}
-    def llm(system, user):
-        seen["prompt"] = user
+    def llm(system, user, step):
+        seen[step] = user
         return answer(ids)
     assert pending(m) == 4
     dry = reflect_once(m, {}, llm=llm, dry_run=True)
     assert dry["read"] == 4 and m.stats()["memories"] == 4 and pending(m) == 4 and m.profile("user") == ""
-    assert f"[{ids['name']}] USER: Hello! My name is Kayla" in seen["prompt"] and "ASSISTANT: It is a pleasure" in seen["prompt"]
+    assert f"[{ids['name']}] USER: Hello! My name is Kayla" in seen["propose"] and "ASSISTANT: It is a pleasure" in seen["propose"]
+    assert list(seen) == ["propose", "check", "profiles"] and dry["depth"] == 3
+    # the checker sees each statement with only the lines it cites; the profile writer sees no conversation at all
+    assert "STATEMENT 1 (fact about the user): Kayla works in IT." in seen["check"] and "What should we build first?" not in seen["check"]
+    assert "(fact about the user) Kayla works in IT." in seen["profiles"] and "USER:" not in seen["profiles"]
     report = reflect_once(m, {}, llm=llm)
     assert len(report["stored"]) == 3 and report["profiles_updated"] == ["user", "self"] and pending(m) == 0
     kinds = {r["text"]: r["kind"] for r in m.recent(10)}
@@ -168,19 +172,23 @@ def test_foundation_and_relationship(tmp_path):
     from holonomic.reflect import reflect_once, BOND_NOTE
     m, ids = seeded(tmp_path)
     seen = {}
-    def llm(system, user):
-        seen["prompt"] = user
+    def llm(system, user, step):
+        seen[step] = user
         return answer(ids, relationship_notes=[{"text": "We have agreed to build an operating system together.", "sources": [ids["os"]]}],
                       relationship_profile="We have just met and plan to build an operating system together.")
     report = reflect_once(m, {}, llm=llm, foundation="You are Athena. Be curious, direct and kind.")
-    assert "FOUNDATION:\nYou are Athena. Be curious, direct and kind." in seen["prompt"]
-    assert "CURRENT RELATIONSHIP PROFILE:\n(empty)" in seen["prompt"]
+    assert "FOUNDATION:\nYou are Athena. Be curious, direct and kind." in seen["propose"]
+    assert "FOUNDATION:\nYou are Athena. Be curious, direct and kind." in seen["profiles"] and "FOUNDATION" not in seen["check"]
+    assert "CURRENT RELATIONSHIP PROFILE:\n(empty)" in seen["profiles"]
     assert report["profiles_updated"] == ["user", "self", "us"] and m.profile("us").startswith("We have just met")
     assert {r["text"]: r["kind"] for r in m.recent(10)}["We have agreed to build an operating system together."] == BOND_NOTE
     # without a SOUL.md the prompt says so instead of leaving a gap
     m.remember("One more thing worth noting about tomorrow", kind="said_user", session="s2")
     reflect_once(m, {}, llm=llm)
-    assert "FOUNDATION:\n(none)" in seen["prompt"] and "CURRENT RELATIONSHIP PROFILE:\nWe have just met" in seen["prompt"]
+    assert "FOUNDATION:\n(none)" in seen["propose"]
+    from holonomic.reflect import build_profile_prompt
+    prompt = build_profile_prompt([], [], {"us": m.profile("us")}, "")
+    assert "CURRENT RELATIONSHIP PROFILE:\nWe have just met" in prompt and "FOUNDATION:\n(none)" in prompt
 
 
 def test_subject_recall_and_relationship_in_system_prompt(tmp_path):
@@ -214,8 +222,8 @@ def test_a_fact_is_retired_only_when_the_user_contradicts_it(tmp_path):
     said = m.remember("Kayla works as a sailing instructor now, I left the IT job last month", kind="said_user", session="s3")[0]
     reply = m.remember("That is a big change from working in IT, congratulations", kind="said_assistant", session="s3")[0]
     seen = {}
-    def llm(system, user):
-        seen["prompt"] = user
+    def llm(system, user, step):
+        seen[step] = user
         return json.dumps({"user_facts": [], "self_notes": [], "relationship_notes": [], "insights": [],
             "superseded": [{"fact": old, "replacement": "Kayla works as a sailing instructor.", "sources": [said]},
                            {"fact": other, "replacement": "Kayla has given up on the operating system.", "sources": [reply]},  # only the assistant said so
@@ -223,8 +231,9 @@ def test_a_fact_is_retired_only_when_the_user_contradicts_it(tmp_path):
             "user_profile": "Kayla works as a sailing instructor and is writing an operating system in x86 assembly.",
             "self_profile": "", "relationship_profile": ""})
     report = reflect_once(m, {}, llm=llm)
-    assert f"[{old}] Kayla works in IT." in seen["prompt"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
+    assert f"[{old}] Kayla works in IT." in seen["propose"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
     assert [s["fact"] for s in report["superseded"]] == [old]
+    assert "(no longer true) Kayla works in IT.  Now: Kayla works as a sailing instructor." in seen["profiles"]
     new = next(r["id"] for r in m.recent(20) if r["text"] == "Kayla works as a sailing instructor.")
     assert m.get(old)["trust"] == 0.0 and m.get(old)["meta"]["superseded_by"] == new and m.get(other)["trust"] == 0.6
     # the old fact leaves ordinary recall but is still on record, linked to what replaced it
@@ -234,7 +243,7 @@ def test_a_fact_is_retired_only_when_the_user_contradicts_it(tmp_path):
     # and it is no longer offered to the model as an existing fact
     m.remember("Sailing lessons start again in the spring", kind="said_user", session="s4")
     reflect_once(m, {}, llm=llm)
-    assert f"[{old}]" not in seen["prompt"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
+    assert f"[{old}]" not in seen["propose"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
 
 
 def test_facts_about_the_user_are_exempt_from_fading(tmp_path):
@@ -289,3 +298,73 @@ def test_a_fact_resting_only_on_the_assistants_words_is_dropped(tmp_path):
     report = reflect_once(m, {}, llm=lambda s, u: out, dry_run=True)
     assert report["dropped_assistant_only"] == ["Kayla values meticulous minimalism above all."]
     assert [f["text"] for f in report["proposed"]["fact"]] == ["Kayla is writing an operating system in x86 assembly."]
+
+
+def test_the_check_step_drops_and_rewrites(tmp_path):
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    proposal = json.dumps({"user_facts": [{"text": "Kayla works in IT.", "sources": [ids["name"]]},
+                                          {"text": "Kayla is a highly skilled developer writing an operating system.", "sources": [ids["os"]]},
+                                          {"text": "Kayla values meticulous minimalism in code.", "sources": [ids["name"], ids["hi"]]}],
+                           "self_notes": [{"text": "I should remember that Kayla is impressive.", "sources": [ids["hi"]]}],
+                           "relationship_notes": [], "insights": [], "superseded": []})
+    verdicts = json.dumps({"verdicts": [{"item": 2, "verdict": "rewrite", "text": "Kayla is writing an operating system in x86 assembly."},
+                                        {"item": 3, "verdict": "drop", "text": ""},
+                                        {"item": 4, "verdict": "drop", "text": ""},
+                                        {"item": 99, "verdict": "drop", "text": ""}]})      # no such item; item 1 gets no verdict
+    profiles = json.dumps({"user_profile": "Kayla works in IT and is writing an operating system in x86 assembly.",
+                           "self_profile": "", "relationship_profile": ""})
+    seen = {}
+    def llm(system, user, step):
+        seen[step] = user
+        return {"propose": proposal, "check": verdicts, "profiles": profiles}[step]
+    report = reflect_once(m, {}, llm=llm)
+    stored = {r["text"]: r["kind"] for r in m.recent(20) if r["kind"] in ("fact", "self_note")}
+    assert stored == {"Kayla works in IT.": "fact", "Kayla is writing an operating system in x86 assembly.": "fact"}
+    assert [(c["verdict"], c["kind"]) for c in report["checked"]] == [("rewrite", "fact"), ("drop", "fact"), ("drop", "self_note")]
+    accepted = seen["profiles"].split("NEWLY ACCEPTED STATEMENTS:")[1]
+    assert "meticulous minimalism" not in accepted and "highly skilled" not in accepted and "x86 assembly" in accepted
+    assert report["profiles_updated"] == ["user"] and m.profile("self") == ""
+
+
+def test_depth_levels(tmp_path):
+    from holonomic.reflect import reflect_once, reflect_config
+    assert reflect_config({})["reflect_depth"] == 3 and reflect_config({"reflect_depth": 9})["reflect_depth"] == 3
+    m, ids = seeded(tmp_path)
+    steps = []
+    def llm(system, user, step):
+        steps.append((step, user))
+        return answer(ids)
+    one = reflect_once(m, {"reflect_depth": 1}, llm=llm, dry_run=True)
+    assert [s for s, _ in steps] == ["propose", "profiles"] and "FOUNDATION" not in steps[0][1] and "self_notes" not in steps[0][1]
+    assert one["proposed"]["self_note"] == [] and len(one["proposed"]["fact"]) == 2
+    assert one["profiles"]["user"].startswith("Kayla works in IT") and one["profiles"]["self"] == ""
+    steps.clear()
+    two = reflect_once(m, {"reflect_depth": 2}, llm=llm, dry_run=True)
+    assert [s for s, _ in steps] == ["propose", "profiles"] and len(two["proposed"]["self_note"]) == 1 and two["profiles"]["self"]
+    steps.clear()
+    reflect_once(m, {"reflect_depth": 3}, llm=llm, dry_run=True)
+    assert [s for s, _ in steps] == ["propose", "check", "profiles"]
+
+
+def test_runaway_thinking_is_repeated_without_thinking(tmp_path):
+    from holonomic import reflect
+    m, ids = seeded(tmp_path)
+    calls = []
+    def fake(host, model, system, user, *, timeout, temperature, max_tokens, think, schema):
+        calls.append((think, max_tokens, sorted(schema["properties"])))
+        reflect.LAST_CALL.clear(); reflect.LAST_CALL.update({"seconds": 1.0, "prompt_tokens": 10, "reply_tokens": max_tokens if think else 50,
+                                                             "done_reason": "length" if think else "stop", "think": think})
+        if think and len(calls) == 1:
+            raise reflect.ReflectionError(f"The model hit the {max_tokens}-token reply limit without finishing. Its reply began: ''")
+        return answer(ids)
+    real = reflect.ollama_chat
+    reflect.ollama_chat = fake
+    try:
+        report = reflect.reflect_once(m, {"reflect_model": "gemma", "reflect_max_tokens": 1000}, dry_run=True)
+    finally:
+        reflect.ollama_chat = real
+    assert calls[0][:2] == (True, 4000) and calls[1][:2] == (False, 1000)          # same step, repeated plainly
+    assert [c["step"] for c in report["calls"]] == ["propose", "propose (repeated without thinking)", "check", "profiles"]
+    assert "failed" in report["calls"][0] and calls[2][2] == ["verdicts"] and "user_profile" in calls[3][2]
+    assert len(report["proposed"]["fact"]) == 2

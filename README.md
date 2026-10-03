@@ -121,13 +121,26 @@ it, never to restate or contradict it, and this plugin never writes to it. The s
 the agent has become beyond that foundation. You can write any profile yourself as a starting point,
 and the agent can search one subject at a time through its memory tool (`subject`: `user`, `self`, `us`).
 
+A pass is up to three small model calls, each with one job: propose items from the new memories; check
+each item against only the lines it cites, keeping, rewriting or dropping it; then rewrite the profiles
+from the items that survived, never from the raw conversation. `reflect_depth` sets how much of that runs:
+
+| Depth | What a pass does |
+|---|---|
+| 1 | Facts about the user and the user profile only |
+| 2 | Everything, proposed and stored unchecked |
+| 3 (default) | Everything, with each item checked before it is stored |
+
+If a reasoning model uses up its token budget thinking without answering, that step is repeated once
+without thinking.
+
 It runs in the background once enough new memories exist and the conversation has been quiet for a
 while, so it does not compete with a reply for the GPU. Items that cite no real memory are discarded,
 a conclusion reached twice strengthens the existing memory instead of duplicating it, and every
 version of a profile is kept.
 
 ```
-hermes holonomic reflect on --model NAME      # NAME as shown by `ollama list`; add --host URL for another server
+hermes holonomic reflect on --model NAME      # NAME as shown by `ollama list`; also --host URL, --depth 1|2|3
 hermes holonomic reflect off
 hermes holonomic reflect                      # status: on or off, memories waiting, last run
 hermes holonomic reflect now --dry-run        # run once and show the result without storing it
@@ -141,6 +154,7 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 | `reflect_enabled` | `false` | The toggle |
 | `reflect_model` | (none) | Ollama model that does the reflecting |
 | `reflect_host` | same as `ollama_host` | Ollama server for that model |
+| `reflect_depth` | `3` | How much each pass does (see above) |
 | `reflect_min_new` | `12` | New memories needed before a pass |
 | `reflect_idle_seconds` | `300` | Quiet time needed before a pass |
 | `reflect_batch` | `60` | Memories read per pass |
