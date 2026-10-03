@@ -44,7 +44,9 @@ REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_min_new": 12,            # wait until this many new memories exist
     "reflect_idle_seconds": 300,      # and the conversation has been quiet this long
     "reflect_batch": 60,              # memories read per pass
-    "reflect_timeout": 600.0,
+    "reflect_timeout": 300.0,
+    "reflect_max_tokens": 2000,       # hard cap on the model's reply; without one a model can generate until its context is full
+    "reflect_think": False,           # let a reasoning model think first (much slower)
     "reflect_temperature": 0.3,
     "profile_max_chars": 1200,
 }
@@ -125,19 +127,49 @@ def reflect_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float, temperature: float) -> str:
-    payload = {"model": model, "stream": False, "format": _SCHEMA, "options": {"temperature": temperature},
+LAST_CALL: Dict[str, Any] = {}      # timing and token counts of the most recent model call, for diagnostics
+
+
+def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float, temperature: float,
+                max_tokens: int = 2000, think: bool = False) -> str:
+    payload = {"model": model, "stream": False, "format": _SCHEMA, "think": think,
+               "options": {"temperature": temperature, "num_predict": int(max_tokens)},
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-    req = urllib.request.Request(host + "/api/chat", data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
-    try:
+
+    def post(body: dict) -> dict:
+        req = urllib.request.Request(host + "/api/chat", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())["message"]["content"]
+            return json.loads(resp.read())
+
+    started = time.time()
+    try:
+        try:
+            data = post(payload)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:300]
+            if exc.code == 400 and "think" in detail.lower():      # model has no thinking switch
+                payload.pop("think")
+                data = post(payload)
+            else:
+                raise ReflectionError(f"Ollama returned {exc.code} for model '{model}': {detail}") from exc
+    except TimeoutError as exc:
+        raise ReflectionError(f"Model '{model}' did not finish within {timeout:.0f} s") from exc
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:300]
-        raise ReflectionError(f"Ollama returned {exc.code} for model '{model}': {detail}") from exc
-    except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+        raise ReflectionError(f"Ollama returned {exc.code} for model '{model}': {exc.read().decode(errors='replace')[:300]}") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        if "timed out" in str(exc).lower():
+            raise ReflectionError(f"Model '{model}' did not finish within {timeout:.0f} s") from exc
         raise ReflectionError(f"Could not reach model '{model}' at {host}: {exc}") from exc
+    content = (data.get("message") or {}).get("content") or ""
+    LAST_CALL.clear()
+    LAST_CALL.update({"seconds": time.time() - started, "prompt_tokens": data.get("prompt_eval_count"),
+                      "reply_tokens": data.get("eval_count"), "done_reason": data.get("done_reason"),
+                      "reply_chars": len(content)})
+    if data.get("done_reason") == "length":
+        raise ReflectionError(f"The model hit the {max_tokens}-token reply limit without finishing. "
+                              f"Its reply began: {content[:300]!r}")
+    return content
 
 
 def _parse(raw: str) -> Dict[str, Any]:
@@ -150,7 +182,7 @@ def _parse(raw: str) -> Dict[str, Any]:
                 return json.loads(match.group(0))
             except ValueError:
                 pass
-    raise ReflectionError("The model did not return valid JSON")
+    raise ReflectionError(f"The model did not return valid JSON. Its reply began: {(raw or '')[:300]!r}")
 
 
 def _speaker(kind: str) -> str:
@@ -204,7 +236,8 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
         if not rc["reflect_model"]:
             raise ReflectionError("No reflection model is set. Run: hermes holonomic reflect on --model NAME")
         llm = lambda system, user: ollama_chat(rc["reflect_host"], rc["reflect_model"], system, user,   # noqa: E731
-                                               timeout=float(rc["reflect_timeout"]), temperature=float(rc["reflect_temperature"]))
+                                               timeout=float(rc["reflect_timeout"]), temperature=float(rc["reflect_temperature"]),
+                                               max_tokens=int(rc["reflect_max_tokens"]), think=bool(rc["reflect_think"]))
     last = int(engine.kv_get(WATERMARK, "0") or 0)
     batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS)
     report: Dict[str, Any] = {"read": len(batch), "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run}

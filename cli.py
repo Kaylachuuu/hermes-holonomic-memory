@@ -148,10 +148,18 @@ def _reflect(engine, cfg, args) -> None:
             report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
                                   foundation=read_foundation(get_hermes_home()))
         except ReflectionError as exc:
+            from .reflect import LAST_CALL
             print(f"Reflection failed: {exc}")
+            if LAST_CALL:
+                print(f"  model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
+                      f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
             return
+        from .reflect import LAST_CALL
         print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s"
               + (" (dry run: nothing stored)" if args.dry_run else ""))
+        if LAST_CALL:
+            print(f"  model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
+                  f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
         for kind, items in (report.get("proposed") or {}).items():
             for item in items:
                 print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")

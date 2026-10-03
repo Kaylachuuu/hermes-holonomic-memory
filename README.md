@@ -142,6 +142,9 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 | `reflect_idle_seconds` | `300` | Quiet time needed before a pass |
 | `reflect_batch` | `60` | Memories read per pass |
 | `reflect_temperature` | `0.3` | Sampling temperature |
+| `reflect_max_tokens` | `2000` | Hard cap on the model's reply |
+| `reflect_think` | `false` | Let a reasoning model think first (much slower) |
+| `reflect_timeout` | `300` | Seconds before a pass is abandoned |
 | `profile_max_chars` | `1200` | Size limit of each profile |
 
 Background reflection only runs while a Hermes process is alive (the desktop app or gateway). A

@@ -243,3 +243,38 @@ def test_facts_about_the_user_are_exempt_from_fading(tmp_path):
     for _ in range(50):
         m.decay(0.9, exempt_kinds=("fact",))
     assert m.get(fact)["strength"] == pytest.approx(1.0) and m.get(ids["os"])["strength"] == pytest.approx(0.1)
+
+
+def test_ollama_chat_caps_output_and_reports_runaway():
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from holonomic import reflect
+    seen, mode = [], {"v": "ok"}
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(body)
+            if mode["v"] == "nothink" and "think" in body:
+                out, code = json.dumps({"error": "this model does not support think"}).encode(), 400
+            elif mode["v"] == "runaway":
+                out, code = json.dumps({"message": {"content": "{ \n \n \n"}, "done_reason": "length", "eval_count": 2000}).encode(), 200
+            else:
+                out, code = json.dumps({"message": {"content": "{}"}, "done_reason": "stop", "eval_count": 2, "prompt_eval_count": 9}).encode(), 200
+            self.send_response(code); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
+        def log_message(self, *a): pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3, max_tokens=123) == "{}"
+        assert seen[-1]["options"]["num_predict"] == 123 and seen[-1]["think"] is False and seen[-1]["stream"] is False
+        assert reflect.LAST_CALL["reply_tokens"] == 2 and reflect.LAST_CALL["done_reason"] == "stop"
+        mode["v"] = "nothink"
+        assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3) == "{}" and "think" not in seen[-1]
+        mode["v"] = "runaway"
+        with pytest.raises(reflect.ReflectionError):
+            reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3)
+    finally:
+        srv.shutdown()
