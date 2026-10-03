@@ -215,7 +215,7 @@ print("ok")
 
 def test_top_folder_only_holds_modules_that_are_safe_to_execute():
     """Hermes executes every top-level .py when it loads the plugin, before __init__.py."""
-    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "embed.py", "engine.py", "provider.py", "vsa.py"]
+    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "cli.py", "embed.py", "engine.py", "provider.py", "vsa.py"]
 
 
 def test_failed_first_open_releases_the_database_file(tmp_path):
@@ -244,3 +244,27 @@ def test_hermes_real_plugin_loader_loads_the_folder():
     got = []
     mod.register(type("Ctx", (), {"register_memory_provider": lambda self, prov: got.append(prov)})())
     assert got and got[0].name == "holonomic"
+
+
+def test_cli_commands(tmp_path, capsys=None):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io, types
+    p = make(tmp_path)
+    p.sync_turn("My name is Kayla and I build memory systems for fun", "Nice to meet you, Kayla.", session_id="s1")
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        real = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *a, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for argv in (["stats"], ["list", "-n", "5"], ["recall", "what is my name Kayla", "-k", "3"], []):
+                args = parser.parse_args(argv); args.func(args)
+        text = out.getvalue()
+        assert "memories: 2" in text and "[#1]" in text and "My name is Kayla" in text and "similar" in text and "Usage:" in text
+    finally:
+        embed.OllamaEmbedder = real
+        sys.modules.pop("hermes_constants", None)

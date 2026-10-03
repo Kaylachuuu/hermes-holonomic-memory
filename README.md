@@ -89,6 +89,16 @@ With real `nomic-embed-text` vectors on a small scripted test (`selftest.py`): 8
 Recall time without embedding, two CPU cores: 5 ms at 2,000 memories, 10 ms at 20,000, 32 ms at
 100,000. Disk at 100,000 memories: about 210 MB of plates and 155 MB of cleanup vectors.
 
+## Inspecting the store
+
+```
+hermes holonomic stats
+hermes holonomic list -n 20
+hermes holonomic recall "what is my name"
+```
+
+`recall` prints every candidate with its scores and whether it would have been injected.
+
 ## Testing
 
 ```
