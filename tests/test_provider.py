@@ -1,0 +1,184 @@
+"""Provider tests.  They need the Hermes source for the real MemoryProvider base class:
+set HERMES_SRC, or keep a checkout next to this folder, or run inside Hermes' environment."""
+import importlib.util, json, os, sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+for cand in (os.environ.get("HERMES_SRC"), ROOT.parent / "hermes-agent"):
+    if cand and (Path(cand) / "agent" / "memory_provider.py").exists():
+        sys.path.insert(0, str(cand))
+        break
+try:
+    from agent.memory_provider import MemoryProvider
+    HAVE_HERMES = True
+except Exception:
+    HAVE_HERMES = False
+
+from holonomic import HolonomicMemory, HashEmbedder
+
+
+def make(tmp_path, **kwargs):
+    from holonomic.provider import HolonomicMemoryProvider
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    (home / "holonomic.json").write_text(json.dumps({"embedder": "hash", "min_score": 0.3}))
+    p = HolonomicMemoryProvider()
+    p.initialize(kwargs.pop("session_id", "s1"), hermes_home=str(home), platform="cli", **kwargs)
+    return p
+
+
+def tool(p, **args):
+    return json.loads(p.handle_tool_call("holonomic_memory", args))
+
+
+def test_loads_the_way_hermes_loads_it():
+    if not HAVE_HERMES: return
+    assert "register_memory_provider" in (ROOT / "__init__.py").read_text()
+    name = "hermes_user_plugins.holonomic__source_test"
+    import types
+    sys.modules.setdefault("hermes_user_plugins", types.ModuleType("hermes_user_plugins")).__path__ = []
+    spec = importlib.util.spec_from_file_location(name, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)])
+    mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod)
+    got = []
+    mod.register(type("Ctx", (), {"register_memory_provider": lambda self, prov: got.append(prov)})())
+    assert isinstance(got[0], MemoryProvider) and got[0].name == "holonomic" and got[0].is_available()
+    assert got[0].get_tool_schemas()[0]["name"] == "holonomic_memory"
+    assert {f["key"] for f in got[0].get_config_schema()} == {"ollama_host", "embed_model"}
+
+
+def test_turns_are_stored_and_recalled_in_a_later_session(tmp_path):
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    p.sync_turn("My sister Mara moved to Lisbon last spring", "That sounds like a big change for Mara and for you.", session_id="s1")
+    p.sync_turn("Shellfish gives her a dangerous allergic reaction", "Understood, I will keep the allergy in mind.", session_id="s1")
+    p.sync_turn("ok", "Sure.", session_id="s1")                       # trivial prompt: not stored
+    assert json.loads(p.handle_tool_call("holonomic_memory", {"action": "stats"}))["memories"] == 4
+    # same session: those turns are still in the context window, so nothing is injected
+    assert p.prefetch("where did Mara move to, was it Lisbon?", session_id="s1") == "" and p.recall_status() is None
+    # a later session recalls them, including the linked allergy turn
+    block = p.prefetch("where did Mara move to, was it Lisbon?", session_id="s2")
+    assert "Mara moved to Lisbon" in block and "Shellfish" in block and "linked" in block and "[#1]" in block
+    assert p.recall_status().count >= 2
+    assert p.prefetch("thanks!", session_id="s2") == ""
+    # after compression the same session may recall its own older turns again
+    p.on_pre_compress([])
+    assert "Lisbon" in p.prefetch("where did Mara move to, was it Lisbon?", session_id="s1")
+    assert "Holonomic Memory" in p.system_prompt_block() and "4 memories" in p.system_prompt_block()
+    p.shutdown()
+
+
+def test_tool_actions(tmp_path):
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    r = tool(p, action="remember", content="Kayla runs Gemma on a V100 in the hermes-ollama VM", about=["Kayla"], importance=3)
+    mid = r["stored"][0]
+    assert "Kayla" in r["filed_under"]
+    assert tool(p, action="recall", query="which GPU does Gemma run on, the V100?")["results"][0]["id"] == mid
+    assert [h["id"] for h in tool(p, action="related", entity="kayla")["results"]] == [mid]
+    assert tool(p, action="feedback", memory_id=mid, rating="helpful")["trust"] == 0.9
+    assert tool(p, action="feedback", memory_id=mid, rating="wrong")["trust"] == 0.7
+    assert tool(p, action="forget", memory_id=mid) == {"forgotten": True}
+    assert tool(p, action="recall", query="which GPU does Gemma run on, the V100?")["count"] == 0
+    for bad in ({"action": "recall"}, {"action": "nope"}, {"action": "forget", "memory_id": 999}, {"action": "related"}):
+        assert "error" in tool(p, **bad)
+    assert "error" in json.loads(p.handle_tool_call("other_tool", {}))
+    p.shutdown()
+
+
+def test_builtin_memory_writes_are_mirrored(tmp_path):
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    p.on_memory_write("add", "user", "Prefers concise answers without filler")
+    p.on_memory_write("add", "user", "Prefers concise answers without filler")          # no duplicate
+    assert tool(p, action="stats")["memories"] == 1
+    p.on_memory_write("replace", "user", "Prefers concise answers with examples",
+                      {"previous_content": "Prefers concise answers without filler"})
+    hits = tool(p, action="recall", query="concise answers preference")["results"]
+    assert [h["text"] for h in hits] == ["Prefers concise answers with examples"] and hits[0]["kind"] == "core"
+    p.on_memory_write("remove", "user", "", {"previous_content": "Prefers concise answers with examples"})
+    assert tool(p, action="stats")["memories"] == 0
+    p.shutdown()
+
+
+def test_subagents_read_but_do_not_write(tmp_path):
+    if not HAVE_HERMES: return
+    main = make(tmp_path)
+    main.sync_turn("The deploy script lives in the tools folder of the infra repo", "Noted, tools folder of the infra repo.", session_id="s1")
+    sub = make(tmp_path, session_id="child", agent_context="subagent")
+    assert sub._engine is main._engine                                 # one shared engine per data directory
+    sub.sync_turn("Subagent chatter that should not be remembered at all", "Indeed it should not be stored.", session_id="child")
+    assert tool(main, action="stats")["memories"] == 2
+    assert "deploy script" in sub.prefetch("where does the deploy script live in the infra repo?", session_id="child")
+    sub.shutdown()
+    assert tool(main, action="stats")["memories"] == 2                 # still open for the main agent
+    main.shutdown()
+
+
+def test_failed_writes_are_retried(tmp_path):
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    real = p._engine.remember
+    calls = {"n": 0}
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("embedding server down")
+        return real(*a, **k)
+    p._engine.remember = flaky
+    p.sync_turn("First message about the violin lesson on Tuesday", "Got it, violin lesson on Tuesday.", session_id="s1")
+    assert len(p._backlog) == 1 and tool(p, action="stats")["memories"] == 0
+    p.sync_turn("Second message about the cello recital in spring", "Got it, cello recital in spring.", session_id="s1")
+    assert not p._backlog and tool(p, action="stats")["memories"] == 4
+    p._engine.remember = real
+    p.shutdown()
+
+
+def test_unreachable_embedding_server_degrades_quietly(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.provider import HolonomicMemoryProvider
+    home = tmp_path / "home"; home.mkdir()
+    (home / "holonomic.json").write_text(json.dumps({"ollama_host": "http://127.0.0.1:9", "embed_timeout": 1}))
+    p = HolonomicMemoryProvider()
+    p.initialize("s1", hermes_home=str(home), platform="cli")
+    assert p._engine is None and "unreachable" in p.system_prompt_block()
+    assert p.prefetch("what do you remember about the server?") == ""
+    p.sync_turn("Something worth keeping about the server rack", "Acknowledged, noted about the server rack.", session_id="s1")
+    assert len(p._backlog) == 1 and "error" in tool(p, action="stats")
+    p.shutdown()
+
+
+def test_config_roundtrip(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.provider import HolonomicMemoryProvider, load_config
+    home = tmp_path / "home"; home.mkdir()
+    (home / "holonomic.json").write_text(json.dumps({"recall_k": 9}))
+    HolonomicMemoryProvider().save_config({"ollama_host": "http://10.0.0.5:11434", "embed_model": ""}, str(home))
+    cfg = load_config(home)
+    assert cfg["ollama_host"] == "http://10.0.0.5:11434" and cfg["recall_k"] == 9 and cfg["embed_model"] == "nomic-embed-text"
+
+
+def test_two_processes_do_not_overwrite_each_others_plates(tmp_path):
+    a = HolonomicMemory(tmp_path / "m", HashEmbedder())
+    b = HolonomicMemory(tmp_path / "m", HashEmbedder())               # stands in for a second process
+    a.remember("Alpha observatory opened on the mountain ridge", session="a")
+    ta = a.remember("Its telescope mirror was polished for two years", session="a")[0]
+    b.remember("Bravo bakery started selling cardamom buns downtown", session="b")
+    tb = b.remember("The queue reaches around the corner every Saturday", session="b")[0]
+    a.remember("Charlie the cat sleeps on the warm router", session="c")
+    for eng in (a, b):
+        assert eng.stats()["memories"] == 5
+        assert ta in {h.id for h in eng.recall("Alpha observatory mountain ridge opened", k=4) if h.assoc > 0.3}
+        assert tb in {h.id for h in eng.recall("Bravo bakery cardamom buns downtown", k=4) if h.assoc > 0.3}
+    a.close(); b.close()
+
+
+def test_key_extraction():
+    if not HAVE_HERMES: return
+    from holonomic.provider import extract_keys, clean_for_storage
+    keys = extract_keys("Yesterday Mara Oliveira flew to Lisbon. The flight used `TAP 204` and Mara loved it.")
+    assert "Mara Oliveira" in keys and "Lisbon" in keys and "TAP 204" in keys and "The" not in keys and "Yesterday" not in keys
+    assert extract_keys("i think it is fine. so do it.") == []
+    cleaned = clean_for_storage("Here:\n```python\nprint(1)\n```\ndone <memory-context>secret</memory-context>", 100)
+    assert "print" not in cleaned and "secret" not in cleaned and "[code omitted]" in cleaned

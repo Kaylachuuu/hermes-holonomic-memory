@@ -1,0 +1,10 @@
+name: holonomic
+version: 0.2.0
+description: "Holonomic memory: local associative memory that stores links between memories as superposed interference patterns. Embeddings via Ollama."
+python_dependencies:
+  - numpy>=1.26
+  - threadpoolctl>=3.1
+hooks:
+  - on_pre_compress
+  - on_memory_write
+  - on_session_switch
