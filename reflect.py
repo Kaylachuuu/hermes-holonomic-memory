@@ -34,7 +34,7 @@ FACT, SELF_NOTE, BOND_NOTE, INSIGHT = "fact", "self_note", "bond_note", "insight
 DERIVED_KINDS = (FACT, SELF_NOTE, BOND_NOTE, INSIGHT, "dream")
 # Subjects the agent can ask its memory about, and the profile and kind that belong to each.
 SUBJECTS = {"user": FACT, "self": SELF_NOTE, "us": BOND_NOTE}
-FOUNDATION_MAX_CHARS = 6000
+FOUNDATION_MAX_CHARS = 20000      # a real SOUL.md ran to 10,000 characters; 6,000 cut it off mid-section
 WATERMARK = "reflect:last_id"
 
 REFLECT_DEFAULTS: Dict[str, Any] = {
