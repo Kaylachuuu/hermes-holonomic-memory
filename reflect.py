@@ -44,9 +44,11 @@ REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_min_new": 12,            # wait until this many new memories exist
     "reflect_idle_seconds": 300,      # and the conversation has been quiet this long
     "reflect_batch": 60,              # memories read per pass
-    "reflect_timeout": 300.0,
+    "reflect_timeout": 600.0,
     "reflect_max_tokens": 2000,       # hard cap on the model's reply; without one a model can generate until its context is full
-    "reflect_think": False,           # let a reasoning model think first (much slower)
+    # Let a reasoning model think first.  On a real 43-memory batch this took 98 s instead of 24 s and
+    # found 8 well-separated facts instead of 3; reflection runs in the background, so the time is cheap.
+    "reflect_think": True,
     "reflect_temperature": 0.3,
     "profile_max_chars": 1200,
 }
@@ -92,15 +94,25 @@ The FOUNDATION was written by the user. It is fixed: it defines who the assistan
 it grows within. Never restate or summarise it, and never write anything about the assistant that contradicts it. \
 What you write about the assistant is what it has become beyond the foundation, through these conversations.
 
+Words and ideas belong to whoever said them. A phrase the ASSISTANT coined, a suggestion it made or a judgement it \
+offered is not the user's value, plan or opinion unless a USER line takes it up. Never put the assistant's phrases \
+in quotation marks as though the user had said them.
+
+State what is, not how admirable it is. No praise and no flattering adjectives about either of them ("highly \
+skilled", "dedicated", "ambitious", "nuanced", "keen"), and no conclusions the memories do not state.
+
 Write:
 - user_facts: durable facts about the user as a person: their history, work, skills, projects, family, tastes, \
 plans, what is going on in their life. One standalone sentence each, in the third person, using the user's name \
 if it is known. Be specific and keep the details: write "Kayla started writing an operating system in x86 assembly \
 years ago and wants to finish it", not "Kayla has a project". Write a fact for every concrete thing the user \
-revealed about themselves. Do not write facts about the conversation itself: that the user said hello, is excited \
-to talk, or asked a question is not a fact about them. At most 8.
-- self_notes: what the assistant should remember about itself, written in the first person ("I ..."): commitments \
-it made, how it responded and whether that went well, tastes and opinions it has formed. At most 4.
+revealed about themselves. Every fact must rest on at least one USER line. Do not write facts about the \
+conversation itself: that the user said hello, is excited to talk, or asked a question is not a fact about them. \
+At most 10.
+- self_notes: what the assistant learned about itself, written in the first person ("I ..."): an opinion or taste \
+of its own that it voiced, something it found interesting, a commitment it made, a mistake or something that went \
+well. Not a log of what it said, and not anything about the user. If there is nothing of that kind, leave it \
+empty. At most 4.
 - relationship_notes: what matters about the two of them together, written from the assistant's side ("We ..."): \
 shared plans, running jokes, trust, friction, how they work together. At most 3.
 - insights: connections or patterns across several memories that no single memory states. At most 3.
@@ -111,9 +123,11 @@ ASSISTANT said is not a contradiction. This list is usually empty.
 - user_profile: a portrait of the user as a person, rewritten to include what is new. Describe the person, not \
 the conversation, and never call them "a user". Keep everything already in it unless a memory contradicts it. \
 Plain prose, at most 150 words.
-- self_profile: who the assistant has become beyond the FOUNDATION, first person, rewritten the same way. Leave out \
-its name, its role and anything else the FOUNDATION already says. If these memories show nothing new about the \
-assistant, repeat the current self profile exactly, or return an empty string if there is none. At most 120 words.
+- self_profile: who the assistant has become beyond the FOUNDATION, first person, rewritten the same way: its own \
+opinions, tastes, interests, humour and habits, as they actually showed up. Leave out its name, its role and \
+anything else the FOUNDATION already says. Do not describe the assistant by what it understands about the user or \
+how it supports the user; that belongs in the other profiles. If these memories show nothing of its own, repeat \
+the current self profile exactly, or return an empty string if there is none. At most 120 words.
 - relationship_profile: the state of the relationship, from the assistant's side, rewritten the same way. If it is \
 too early to say anything specific, repeat the current one exactly, or return an empty string. At most 100 words.
 
@@ -243,7 +257,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
         llm = lambda system, user: ollama_chat(rc["reflect_host"], rc["reflect_model"], system, user,   # noqa: E731
                                                timeout=float(rc["reflect_timeout"]), temperature=float(rc["reflect_temperature"]),
                                                # thinking is counted against the same limit as the reply
-                                               max_tokens=int(rc["reflect_max_tokens"]) * (4 if rc["reflect_think"] else 1),
+                                               max_tokens=int(rc["reflect_max_tokens"]) * (6 if rc["reflect_think"] else 1),
                                                think=bool(rc["reflect_think"]))
     last = int(engine.kv_get(WATERMARK, "0") or 0)
     batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS)
@@ -267,7 +281,12 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
             superseded.append({"fact": int(item["fact"]), "was": shown[int(item["fact"])], "replacement": replacement,
                                "sources": list(dict.fromkeys(sources))[:4]})
     report["superseded"] = superseded
-    groups = ((FACT, _clean_items(data.get("user_facts"), valid, 8)),
+    # A fact about the user must rest on something that did not come from the assistant's own mouth.
+    not_assistant = {m["id"] for m in batch if m["kind"] != "said_assistant"}
+    facts = _clean_items(data.get("user_facts"), valid, 10)
+    report["dropped_assistant_only"] = [f["text"] for f in facts if not set(f["sources"]) & not_assistant]
+    facts = [f for f in facts if set(f["sources"]) & not_assistant]
+    groups = ((FACT, facts),
               (SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4)),
               (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3)),
               (INSIGHT, _clean_items(data.get("insights"), valid, 3)))

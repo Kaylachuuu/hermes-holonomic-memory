@@ -108,6 +108,9 @@ Off by default. When on, a language model periodically reads the memories stored
 - three short profiles: the user, itself, and the two together. These go into the system prompt, so
   who the user is never depends on a search matching.
 
+A fact about the user must cite at least one thing that was not said by the agent itself; facts resting
+only on the agent's own words are dropped.
+
 Facts about the user change by contradiction, not by time. When the user plainly says something that
 makes a stored fact untrue, reflection stores the new fact and marks the old one superseded: it leaves
 recall but stays on record, linked to what replaced it. Only the user's own words can do this. Nothing
@@ -143,8 +146,8 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 | `reflect_batch` | `60` | Memories read per pass |
 | `reflect_temperature` | `0.3` | Sampling temperature |
 | `reflect_max_tokens` | `2000` | Hard cap on the model's reply |
-| `reflect_think` | `false` | Let a reasoning model think first (much slower) |
-| `reflect_timeout` | `300` | Seconds before a pass is abandoned |
+| `reflect_think` | `true` | Let a reasoning model think first (slower, noticeably better) |
+| `reflect_timeout` | `600` | Seconds before a pass is abandoned |
 | `profile_max_chars` | `1200` | Size limit of each profile |
 
 Background reflection only runs while a Hermes process is alive (the desktop app or gateway). A

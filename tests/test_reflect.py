@@ -270,6 +270,7 @@ def test_ollama_chat_caps_output_and_reports_runaway():
     try:
         assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3, max_tokens=123) == "{}"
         assert seen[-1]["options"]["num_predict"] == 123 and seen[-1]["think"] is False and seen[-1]["stream"] is False
+        assert reflect.reflect_config({})["reflect_think"] is True
         assert reflect.LAST_CALL["reply_tokens"] == 2 and reflect.LAST_CALL["done_reason"] == "stop"
         mode["v"] = "nothink"
         assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3) == "{}" and "think" not in seen[-1]
@@ -278,3 +279,13 @@ def test_ollama_chat_caps_output_and_reports_runaway():
             reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3)
     finally:
         srv.shutdown()
+
+
+def test_a_fact_resting_only_on_the_assistants_words_is_dropped(tmp_path):
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    out = answer(ids, user_facts=[{"text": "Kayla values meticulous minimalism above all.", "sources": [ids["hi"]]},      # assistant line only
+                                  {"text": "Kayla is writing an operating system in x86 assembly.", "sources": [ids["hi"], ids["os"]]}])
+    report = reflect_once(m, {}, llm=lambda s, u: out, dry_run=True)
+    assert report["dropped_assistant_only"] == ["Kayla values meticulous minimalism above all."]
+    assert [f["text"] for f in report["proposed"]["fact"]] == ["Kayla is writing an operating system in x86 assembly."]
