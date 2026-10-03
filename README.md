@@ -108,6 +108,11 @@ Off by default. When on, a language model periodically reads the memories stored
 - three short profiles: the user, itself, and the two together. These go into the system prompt, so
   who the user is never depends on a search matching.
 
+Facts about the user change by contradiction, not by time. When the user plainly says something that
+makes a stored fact untrue, reflection stores the new fact and marks the old one superseded: it leaves
+recall but stays on record, linked to what replaced it. Only the user's own words can do this. Nothing
+fades yet; when fading is added, facts about the user are exempt from it.
+
 Hermes' `SOUL.md` is the fixed foundation. Reflection is shown it on every pass and told to grow within
 it, never to restate or contradict it, and this plugin never writes to it. The self profile is only what
 the agent has become beyond that foundation. You can write any profile yourself as a starting point,

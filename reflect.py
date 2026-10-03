@@ -64,12 +64,16 @@ _SCHEMA = {
         "insights": {"type": "array", "items": {"type": "object", "properties": {
             "text": {"type": "string"}, "sources": {"type": "array", "items": {"type": "integer"}}},
             "required": ["text", "sources"]}},
+        "superseded": {"type": "array", "items": {"type": "object", "properties": {
+            "fact": {"type": "integer"}, "replacement": {"type": "string"},
+            "sources": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["fact", "replacement", "sources"]}},
         "user_profile": {"type": "string"},
         "self_profile": {"type": "string"},
         "relationship_profile": {"type": "string"},
     },
-    "required": ["user_facts", "self_notes", "relationship_notes", "insights", "user_profile", "self_profile",
-                 "relationship_profile"],
+    "required": ["user_facts", "self_notes", "relationship_notes", "insights", "superseded", "user_profile",
+                 "self_profile", "relationship_profile"],
 }
 
 _SYSTEM = (
@@ -95,6 +99,10 @@ it made, how it responded and whether that went well, tastes and opinions it has
 - relationship_notes: what matters about the two of them together, written from the assistant's side ("We ..."): \
 shared plans, running jokes, trust, friction, how they work together. At most 3.
 - insights: connections or patterns across several memories that no single memory states. At most 3.
+- superseded: facts from EXISTING FACTS that are no longer true because the USER has plainly said so in these \
+memories. Give "fact" (its number), "replacement" (the fact that is true now, one sentence) and "sources" (the \
+USER memories that say so). People rarely change: a bad day, a one-off exception, a joke, or anything the \
+ASSISTANT said is not a contradiction. This list is usually empty.
 - user_profile: the user profile rewritten to include what is new. Keep everything already in it unless a memory \
 contradicts it. Plain prose, at most 150 words.
 - self_profile: the assistant's description of who it has become, first person, rewritten the same way. \
@@ -149,12 +157,16 @@ def _speaker(kind: str) -> str:
     return {"said_user": "USER", "asked_user": "USER", "said_assistant": "ASSISTANT"}.get(kind, "NOTE")
 
 
-def build_prompt(memories: List[dict], profiles: Dict[str, str], foundation: str = "") -> str:
+def build_prompt(memories: List[dict], profiles: Dict[str, str], foundation: str = "",
+                 existing_facts: Optional[List[dict]] = None) -> str:
     lines = [f"[{m['id']}] {_speaker(m['kind'])}: {' '.join(m['text'].split())}" for m in memories]
+    facts = "\n".join(f"[{f['id']}] {' '.join(f['text'].split())}" for f in existing_facts or []) or "(none)"
     return (f"{_INSTRUCTIONS}\n\nFOUNDATION:\n{foundation.strip()[:FOUNDATION_MAX_CHARS] or '(none)'}\n\n"
             f"CURRENT USER PROFILE:\n{profiles.get('user') or '(empty)'}\n\n"
             f"CURRENT SELF PROFILE:\n{profiles.get('self') or '(empty)'}\n\n"
-            f"CURRENT RELATIONSHIP PROFILE:\n{profiles.get('us') or '(empty)'}\n\nMEMORIES:\n" + "\n".join(lines))
+            f"CURRENT RELATIONSHIP PROFILE:\n{profiles.get('us') or '(empty)'}\n\n"
+            f"EXISTING FACTS ABOUT THE USER (already stored; related to these memories):\n{facts}\n\n"
+            "MEMORIES:\n" + "\n".join(lines))
 
 
 def read_foundation(hermes_home) -> str:
@@ -199,8 +211,22 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
     if not batch:
         return report
     current = {who: engine.profile(who) for who in SUBJECTS}
-    data = _parse(llm(_SYSTEM, build_prompt(batch, current, foundation)))
+    user_said = {m["id"] for m in batch if m["kind"] == "said_user"}
+    existing = engine.related_of_kind(sorted(user_said), FACT)
+    data = _parse(llm(_SYSTEM, build_prompt(batch, current, foundation, existing)))
     valid = {m["id"] for m in batch}
+    # A stored fact is retired only by something the user said, and only if it was actually shown.
+    shown = {f["id"]: f["text"] for f in existing}
+    superseded = []
+    for item in data.get("superseded") if isinstance(data.get("superseded"), list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("fact"), (int, float)) or int(item["fact"]) not in shown:
+            continue
+        sources = [int(s) for s in item.get("sources") or [] if isinstance(s, (int, float)) and int(s) in user_said]
+        replacement = " ".join(str(item.get("replacement") or "").split())
+        if sources and 15 <= len(replacement) <= 400:
+            superseded.append({"fact": int(item["fact"]), "was": shown[int(item["fact"])], "replacement": replacement,
+                               "sources": list(dict.fromkeys(sources))[:4]})
+    report["superseded"] = superseded
     groups = ((FACT, _clean_items(data.get("user_facts"), valid, 8)),
               (SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4)),
               (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3)),
@@ -225,6 +251,12 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
                                   keys=key_fn(item["text"]) if key_fn else [], trust=0.6, salience=1.1,
                                   meta={"sources": item["sources"]})
             report["stored"].extend(ids)
+    for item in superseded:
+        new_ids = engine.remember(item["replacement"], kind=FACT, session="reflection", chain=False,
+                                  links=item["sources"] + [item["fact"]], keys=key_fn(item["replacement"]) if key_fn else [],
+                                  trust=0.6, salience=1.1, meta={"sources": item["sources"], "replaces": item["fact"]})
+        engine.supersede(item["fact"], new_ids[0] if new_ids else None, reason=item["replacement"])
+        report["stored"].extend(new_ids)
     for who, text in new_profiles.items():
         if len(text) >= 20 and text != current[who]:
             engine.set_profile(who, text)

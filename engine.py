@@ -637,7 +637,7 @@ class HolonomicMemory:
                exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None,
                dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = (), lexical: float = 0.0,
                kind_weights: dict[str, float] | None = None,
-               only_kinds: tuple[str, ...] | list[str] = ()) -> list[Recollection]:
+               only_kinds: tuple[str, ...] | list[str] = (), min_trust: float = 0.0) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -680,6 +680,8 @@ class HolonomicMemory:
                 mask &= ~np.isin(self._kind.v, skip_codes)
             if only_kinds:
                 mask &= np.isin(self._kind.v, [self._kind_codes[kind] for kind in only_kinds if kind in self._kind_codes])
+            if min_trust > 0:
+                mask &= self._trust.v >= min_trust       # superseded and repeatedly-wrong memories stay out
             self._last_parts, self._last_lex, self._last_lex_weight = None, {}, lexical
 
             def dither(cue: np.ndarray) -> np.ndarray:
@@ -809,6 +811,47 @@ class HolonomicMemory:
         with self._lock:
             return int(self._db.execute(sql, params).fetchone()["n"])
 
+    def related_of_kind(self, memory_ids: list[int], kind: str, *, per_memory: int = 3, min_similarity: float = 0.2,
+                        limit: int = 20, min_trust: float = 0.15) -> list[dict]:
+        """Existing memories of `kind` that resemble any of the given memories, using the
+        vectors already stored (no embedding calls).  Used to show reflection the facts a
+        new statement might contradict."""
+        with self._lock, _single_threaded():
+            self._sync()
+            code = self._kind_codes.get(kind)
+            rows = [self._row[m] for m in memory_ids if m in self._row]
+            if code is None or not rows:
+                return []
+            pool = np.nonzero((self._kind.v == code) & (self._trust.v >= min_trust))[0]
+            if pool.size == 0:
+                return []
+            sims = self._X.a[rows] @ self._X.a[pool].T
+            best: dict[int, float] = {}
+            for i in range(len(rows)):
+                for j in np.argsort(-sims[i])[:per_memory]:
+                    if sims[i, j] >= min_similarity:
+                        best[int(pool[j])] = max(best.get(int(pool[j]), 0.0), float(sims[i, j]))
+            ids = [int(self._ids.a[r]) for r, _ in sorted(best.items(), key=lambda kv: -kv[1])[:limit]]
+            if not ids:
+                return []
+            found = {r["id"]: dict(r) for r in self._db.execute(
+                f"SELECT id, text, kind FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
+            return [found[i] for i in ids if i in found]
+
+    def supersede(self, old_id: int, new_id: int | None = None, reason: str = "") -> bool:
+        """Retire a memory without deleting it: it leaves recall but stays on record,
+        so the agent can still know that something used to be true."""
+        with self._lock:
+            row = self._row.get(old_id)
+            if row is None:
+                return False
+            current = self._db.execute("SELECT meta FROM memories WHERE id = ?", (old_id,)).fetchone()
+            meta = json.loads(current["meta"] or "{}")
+            meta.update({"superseded_by": new_id, "superseded_at": time.time(), "superseded_reason": reason[:300]})
+            self._trust.a[row] = 0.0
+            self._db.execute("UPDATE memories SET trust = 0, meta = ? WHERE id = ?", (json.dumps(meta), old_id))
+            return True
+
     def profile(self, who: str) -> str:
         with self._lock:
             row = self._db.execute("SELECT text FROM profiles WHERE who = ? ORDER BY id DESC LIMIT 1", (who,)).fetchone()
@@ -860,11 +903,18 @@ class HolonomicMemory:
             return True
 
     @_locked
-    def decay(self, factor: float = 0.98, *, floor: float = 0.1) -> None:
-        """Let every memory fade a little.  Reinforced memories fade from a higher start."""
+    def decay(self, factor: float = 0.98, *, floor: float = 0.1, exempt_kinds: tuple[str, ...] | list[str] = ()) -> None:
+        """Let memories fade a little, except the exempt kinds.  Reinforced memories fade
+        from a higher start.  Nothing calls this yet; when fading is switched on, what the
+        agent knows about the user is exempt: those facts change by contradiction, not by time."""
         with self._lock:
-            self._strength.v[:] = np.maximum(self._strength.v * factor, floor)
-            self._db.execute("UPDATE memories SET strength = MAX(strength * ?, ?) WHERE forgotten = 0", (factor, floor))
+            keep = np.isin(self._kind.v, [self._kind_codes[k] for k in exempt_kinds if k in self._kind_codes])
+            self._strength.v[~keep] = np.maximum(self._strength.v[~keep] * factor, floor)
+            sql, params = "UPDATE memories SET strength = MAX(strength * ?, ?) WHERE forgotten = 0", [factor, floor]
+            if exempt_kinds:
+                sql += f" AND kind NOT IN ({','.join('?' * len(exempt_kinds))})"
+                params += list(exempt_kinds)
+            self._db.execute(sql, params)
 
     @_locked
     def forget(self, memory_id: int) -> bool:

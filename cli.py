@@ -155,6 +155,9 @@ def _reflect(engine, cfg, args) -> None:
         for kind, items in (report.get("proposed") or {}).items():
             for item in items:
                 print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
+        for item in report.get("superseded") or []:
+            print(f"  REPLACES  [#{item['fact']}] {item['was']}\n        ->  {item['replacement']}   <- "
+                  f"{', '.join('#' + str(s) for s in item['sources'])}")
         for who, text in (report.get("profiles") or {}).items():
             print(f"  profile ({who}): {text or '(empty)'}")
         if not args.dry_run:

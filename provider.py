@@ -169,7 +169,7 @@ def select_for_injection(hits: list, cfg: Dict[str, Any]) -> list:
 
 
 def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    return {"dual": bool(cfg.get("dual_query", False)), "skip_kinds": (QUESTION_KIND,),
+    return {"dual": bool(cfg.get("dual_query", False)), "skip_kinds": (QUESTION_KIND,), "min_trust": 0.15,
             "lexical": float(cfg.get("lexical_weight", 0.2)),
             "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75))}}
 

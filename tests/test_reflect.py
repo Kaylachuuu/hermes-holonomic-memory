@@ -203,3 +203,43 @@ def test_subject_recall_and_relationship_in_system_prompt(tmp_path):
     assert [h["kind"] for h in about_us["results"]] == ["bond_note"] and about_us["profile"].startswith("We have just met")
     assert "error" in tool(p, action="recall", query="x", subject="them")
     p.shutdown()
+
+
+def test_a_fact_is_retired_only_when_the_user_contradicts_it(tmp_path):
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    reflect_once(m, {}, llm=lambda s, u: answer(ids))
+    old = next(r["id"] for r in m.recent(20) if r["text"] == "Kayla works in IT.")
+    other = next(r["id"] for r in m.recent(20) if r["text"].startswith("Kayla is writing"))
+    said = m.remember("Kayla works as a sailing instructor now, I left the IT job last month", kind="said_user", session="s3")[0]
+    reply = m.remember("That is a big change from working in IT, congratulations", kind="said_assistant", session="s3")[0]
+    seen = {}
+    def llm(system, user):
+        seen["prompt"] = user
+        return json.dumps({"user_facts": [], "self_notes": [], "relationship_notes": [], "insights": [],
+            "superseded": [{"fact": old, "replacement": "Kayla works as a sailing instructor.", "sources": [said]},
+                           {"fact": other, "replacement": "Kayla has given up on the operating system.", "sources": [reply]},  # only the assistant said so
+                           {"fact": 4242, "replacement": "Kayla lives on the moon these days.", "sources": [said]}],            # never shown
+            "user_profile": "Kayla works as a sailing instructor and is writing an operating system in x86 assembly.",
+            "self_profile": "", "relationship_profile": ""})
+    report = reflect_once(m, {}, llm=llm)
+    assert f"[{old}] Kayla works in IT." in seen["prompt"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
+    assert [s["fact"] for s in report["superseded"]] == [old]
+    new = next(r["id"] for r in m.recent(20) if r["text"] == "Kayla works as a sailing instructor.")
+    assert m.get(old)["trust"] == 0.0 and m.get(old)["meta"]["superseded_by"] == new and m.get(other)["trust"] == 0.6
+    # the old fact leaves ordinary recall but is still on record, linked to what replaced it
+    assert old not in {h.id for h in m.recall("where does Kayla work, in IT?", k=10, min_score=0.0, min_trust=0.15)}
+    assert old in {h.id for h in m.recall("where does Kayla work, in IT?", k=10, min_score=0.0)}
+    assert old in {h.id for h in m.associates(new)}
+    # and it is no longer offered to the model as an existing fact
+    m.remember("Sailing lessons start again in the spring", kind="said_user", session="s4")
+    reflect_once(m, {}, llm=llm)
+    assert f"[{old}]" not in seen["prompt"].split("EXISTING FACTS ABOUT THE USER")[1].split("MEMORIES:")[0]
+
+
+def test_facts_about_the_user_are_exempt_from_fading(tmp_path):
+    m, ids = seeded(tmp_path)
+    fact = m.remember("Computers have been a lifelong passion of Kayla's", kind="fact", session="reflection", chain=False)[0]
+    for _ in range(50):
+        m.decay(0.9, exempt_kinds=("fact",))
+    assert m.get(fact)["strength"] == pytest.approx(1.0) and m.get(ids["os"])["strength"] == pytest.approx(0.1)
