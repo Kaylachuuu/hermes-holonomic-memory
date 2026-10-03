@@ -5,6 +5,7 @@
     hermes holonomic recall "what is my name" [-k 10]
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run]
     hermes holonomic profile [--history]
+    hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
 Only stdlib imports at module level: Hermes imports this file while building its
 command line, before any provider dependency is needed.
@@ -60,7 +61,21 @@ def holonomic_command(args) -> None:
         if action == "reflect":
             _reflect(engine, cfg, args)
         elif action == "profile":
-            for who, title in (("user", "About the user"), ("self", "About herself")):
+            if args.set:
+                who, text = args.set
+                if who not in ("user", "self", "us") or len(text.strip()) < 3:
+                    print('Usage: hermes holonomic profile --set user|self|us "text"')
+                    return
+                engine.set_profile(who, text)
+                print(f"Profile '{who}' set. Earlier versions are kept (see --history). "
+                      "Reflection will build on this text from now on.")
+                return
+            from hermes_constants import get_hermes_home
+            from .reflect import read_foundation
+            soul = read_foundation(get_hermes_home()).strip()
+            print(f"Foundation (SOUL.md, written by you, never changed by this plugin): "
+                  f"{str(len(soul)) + ' characters' if soul else 'not found'}")
+            for who, title in (("user", "About the user"), ("self", "About herself"), ("us", "About the two of you")):
                 history = engine.profile_history(who, 10 if args.history else 1)
                 print(f"{title}:" if history else f"{title}: (none yet)")
                 for entry in history:
@@ -128,7 +143,10 @@ def _reflect(engine, cfg, args) -> None:
     if args.reflect_action == "now":
         try:
             t0 = time.perf_counter()
-            report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys)
+            from hermes_constants import get_hermes_home
+            from .reflect import read_foundation
+            report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
+                                  foundation=read_foundation(get_hermes_home()))
         except ReflectionError as exc:
             print(f"Reflection failed: {exc}")
             return
@@ -168,4 +186,5 @@ def register_cli(subparser) -> None:
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
     prof = subs.add_parser("profile", help="Show the profiles written by reflection")
     prof.add_argument("--history", action="store_true", help="Show earlier versions too")
+    prof.add_argument("--set", nargs=2, metavar=("WHO", "TEXT"), help="Write a profile yourself: user, self or us")
     subparser.set_defaults(func=holonomic_command)

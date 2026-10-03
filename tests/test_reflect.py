@@ -116,7 +116,7 @@ def test_profiles_reach_the_system_prompt_and_reflections_are_recalled(tmp_path)
     ids = {"name": rows["Hello! My name is Kayla and I work in IT."], "hi": max(rows.values()), "os": 1}
     reflect_once(p._engine, p._cfg, llm=lambda s, u: answer(ids))
     block = p.system_prompt_block()
-    assert "What you know about the user" in block and "Kayla works in IT" in block and "How you understand yourself" in block
+    assert "What you know about the user" in block and "Kayla works in IT" in block and "Who you have become" in block
     recalled = p.prefetch("where does Kayla work, is it in IT?", session_id="s2")
     assert "learned about the user) Kayla works in IT." in recalled
     assert p._cfg["reflect_enabled"] is False
@@ -151,7 +151,55 @@ def test_cli_toggle_status_and_profile(tmp_path):
         assert "enabled: True" in status and "memories waiting: 2" in status and "last run: never" in status
         assert "Reflection is OFF" in run("reflect", "off") and load_config(home)["reflect_model"] == "gemma4-64k"
         assert "Kayla works in IT." in run("profile") and "About herself: (none yet)" in run("profile")
+        assert "Foundation (SOUL.md" in run("profile") and "not found" in run("profile")
+        (home / "SOUL.md").write_text("You are Athena. Be curious, direct and kind.", encoding="utf-8")
+        assert "44 characters" in run("profile")
+        assert "Profile 'us' set" in run("profile", "--set", "us", "We are just getting started on an operating system together.")
+        assert "Usage:" in run("profile", "--set", "them", "nope")
+        shown = run("profile", "--history")
+        assert "About the two of you:" in shown and "getting started on an operating system" in shown
         assert "Reflection failed" in run("reflect", "now")                    # no Ollama server here
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
+
+
+def test_foundation_and_relationship(tmp_path):
+    from holonomic.reflect import reflect_once, BOND_NOTE
+    m, ids = seeded(tmp_path)
+    seen = {}
+    def llm(system, user):
+        seen["prompt"] = user
+        return answer(ids, relationship_notes=[{"text": "We have agreed to build an operating system together.", "sources": [ids["os"]]}],
+                      relationship_profile="We have just met and plan to build an operating system together.")
+    report = reflect_once(m, {}, llm=llm, foundation="You are Athena. Be curious, direct and kind.")
+    assert "FOUNDATION:\nYou are Athena. Be curious, direct and kind." in seen["prompt"]
+    assert "CURRENT RELATIONSHIP PROFILE:\n(empty)" in seen["prompt"]
+    assert report["profiles_updated"] == ["user", "self", "us"] and m.profile("us").startswith("We have just met")
+    assert {r["text"]: r["kind"] for r in m.recent(10)}["We have agreed to build an operating system together."] == BOND_NOTE
+    # without a SOUL.md the prompt says so instead of leaving a gap
+    m.remember("One more thing worth noting about tomorrow", kind="said_user", session="s2")
+    reflect_once(m, {}, llm=llm)
+    assert "FOUNDATION:\n(none)" in seen["prompt"] and "CURRENT RELATIONSHIP PROFILE:\nWe have just met" in seen["prompt"]
+
+
+def test_subject_recall_and_relationship_in_system_prompt(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.reflect import reflect_once
+    p = make(tmp_path)
+    p.sync_turn("Hello! My name is Kayla and I work in IT.", "It is a pleasure to meet you, Kayla, and to start working together.", session_id="s1")
+    rows = {r["text"]: r["id"] for r in p._engine.recent(10)}
+    ids = {"name": rows["Hello! My name is Kayla and I work in IT."], "hi": max(rows.values()), "os": 1}
+    (tmp_path / "home" / "SOUL.md").write_text("You are Athena.", encoding="utf-8")
+    reflect_once(p._engine, p._cfg, llm=lambda s, u: answer(
+        ids, relationship_notes=[{"text": "We greeted each other warmly on the first day.", "sources": [ids["hi"]]}],
+        relationship_profile="We have just met and are getting to know each other."))
+    block = p.system_prompt_block()
+    assert "Your relationship with the user" in block and "We have just met" in block and "Who you have become" in block
+    assert "You are Athena" not in block                                  # the foundation is Hermes' job, not ours
+    about_user = tool(p, action="recall", query="what does she do for work", subject="user")
+    assert about_user["profile"].startswith("Kayla works in IT") and {h["kind"] for h in about_user["results"]} == {"fact"}
+    about_us = tool(p, action="recall", query="how did we start out", subject="us")
+    assert [h["kind"] for h in about_us["results"]] == ["bond_note"] and about_us["profile"].startswith("We have just met")
+    assert "error" in tool(p, action="recall", query="x", subject="them")
+    p.shutdown()

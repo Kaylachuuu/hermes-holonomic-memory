@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
 
-from .reflect import REFLECT_DEFAULTS, IdleReflector
+from .reflect import REFLECT_DEFAULTS, SUBJECTS, IdleReflector, read_foundation
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,9 @@ TOOL_SCHEMA = {
         "Long-term associative memory. Relevant memories are recalled automatically every turn; use this tool "
         "to dig deeper or to manage memories.\n"
         "ACTIONS:\n"
-        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those.\n"
+        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those. Set "
+        "`subject` to search only what you have concluded about the user ('user'), about yourself ('self') or "
+        "about the two of you ('us').\n"
         "- remember: store `content` as a durable fact, preference or note. Use for things worth keeping that "
         "might not be obvious from the conversation alone. Optional `about` (names/topics) and `importance` 1-3.\n"
         "- related: what is linked to a memory (`memory_id`) or filed under a name/topic (`entity`).\n"
@@ -64,6 +66,8 @@ TOOL_SCHEMA = {
         "properties": {
             "action": {"type": "string", "enum": ["recall", "remember", "related", "feedback", "forget", "stats"]},
             "query": {"type": "string", "description": "What to search for (recall)."},
+            "subject": {"type": "string", "enum": ["user", "self", "us"],
+                        "description": "Limit recall to your own conclusions about this subject."},
             "content": {"type": "string", "description": "What to store (remember)."},
             "about": {"type": "array", "items": {"type": "string"}, "description": "Names or topics this concerns (remember)."},
             "importance": {"type": "integer", "minimum": 1, "maximum": 3, "description": "1 minor, 2 normal, 3 vital (remember)."},
@@ -76,7 +80,8 @@ TOOL_SCHEMA = {
     },
 }
 
-_KIND_LABEL = {"fact": "learned about the user", "self_note": "your own note", "insight": "insight",
+_KIND_LABEL = {"fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
+               "insight": "insight",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
 
@@ -220,7 +225,8 @@ def _acquire_engine(data_dir: Path, cfg: Dict[str, Any]):
             engine = HolonomicMemory(data_dir, embedder, dim=int(cfg["dim"]), plate_capacity=float(cfg["plate_capacity"]))
             home = data_dir.parent
             reflector = IdleReflector(engine, lambda: load_config(home), key_fn=extract_keys,
-                                      spawn=lambda target, name: spawn_context_thread(target, name=name))
+                                      spawn=lambda target, name: spawn_context_thread(target, name=name),
+                                      foundation_fn=lambda: read_foundation(home))
             entry = _ENGINES[key] = [engine, 0, reflector]
         entry[1] += 1
         return entry[0]
@@ -336,14 +342,16 @@ class HolonomicMemoryProvider(MemoryProvider):
     def _profile_block(engine) -> str:
         """Profiles written by reflection.  Always in view, so who the user is never depends on a search."""
         try:
-            user, me = engine.profile("user"), engine.profile("self")
+            user, me, us = engine.profile("user"), engine.profile("self"), engine.profile("us")
         except Exception:
             return ""
         out = ""
         if user:
             out += f"\n\n## What you know about the user (from your own reflection on past conversations)\n{user}"
         if me:
-            out += f"\n\n## How you understand yourself (from your own reflection)\n{me}"
+            out += f"\n\n## Who you have become (from your own reflection; your core identity is defined elsewhere)\n{me}"
+        if us:
+            out += f"\n\n## Your relationship with the user (from your own reflection)\n{us}"
         return out
 
     def _touch(self) -> None:
@@ -507,7 +515,14 @@ class HolonomicMemoryProvider(MemoryProvider):
                 query = (args.get("query") or "").strip()
                 if not query:
                     return _error("recall needs 'query'")
-                hits = engine.recall(query, k=limit, min_score=0.15, **recall_options(self._cfg))
+                subject = args.get("subject")
+                if subject and subject not in SUBJECTS:
+                    return _error("subject must be 'user', 'self' or 'us'")
+                only = {"only_kinds": (SUBJECTS[subject],)} if subject else {}
+                hits = engine.recall(query, k=limit, min_score=0.0 if subject else 0.15, **recall_options(self._cfg), **only)
+                if subject:
+                    return json.dumps({"profile": engine.profile(subject), "results": [self._hit_json(h) for h in hits],
+                                       "count": len(hits)})
                 return json.dumps({"results": [self._hit_json(h) for h in hits], "count": len(hits)})
             if action == "remember":
                 content = clean_for_storage(args.get("content") or "", 4000)

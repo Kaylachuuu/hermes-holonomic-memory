@@ -102,10 +102,16 @@ Recall time without embedding, two CPU cores: 5 ms at 2,000 memories, 10 ms at 2
 
 Off by default. When on, a language model periodically reads the memories stored since its last pass and writes:
 
-- facts about the user, notes about itself, and insights connecting several memories. Each is stored as
-  a memory linked through the plates to the memories it came from, so recalling either surfaces the other.
-- a short profile of the user and one of itself. These go into the system prompt, so who the user is
-  never depends on a search matching.
+- facts about the user, notes about itself, notes about the relationship, and insights connecting
+  several memories. Each is stored as a memory linked through the plates to the memories it came from,
+  so recalling either surfaces the other.
+- three short profiles: the user, itself, and the two together. These go into the system prompt, so
+  who the user is never depends on a search matching.
+
+Hermes' `SOUL.md` is the fixed foundation. Reflection is shown it on every pass and told to grow within
+it, never to restate or contradict it, and this plugin never writes to it. The self profile is only what
+the agent has become beyond that foundation. You can write any profile yourself as a starting point,
+and the agent can search one subject at a time through its memory tool (`subject`: `user`, `self`, `us`).
 
 It runs in the background once enough new memories exist and the conversation has been quiet for a
 while, so it does not compete with a reply for the GPU. Items that cite no real memory are discarded,
@@ -119,6 +125,7 @@ hermes holonomic reflect                      # status: on or off, memories wait
 hermes holonomic reflect now --dry-run        # run once and show the result without storing it
 hermes holonomic reflect now                  # run once now, whether or not it is switched on
 hermes holonomic profile --history
+hermes holonomic profile --set user "Kayla is ..."     # write a starting profile: user, self or us
 ```
 
 | Key | Default | Meaning |
@@ -163,6 +170,7 @@ this folder.
 - Associations are one step deep per recall.
 - Forgetting removes a memory's text and vector. Its traces stay in the plates as faint noise.
 - Changing the embedding model, plate dimension or capacity requires a new store.
+- One user. Everyone who talks to the agent is treated as the same person.
 - Tested against Hermes Agent v0.21.5 (commit bd0affe5).
 
 ## Roadmap

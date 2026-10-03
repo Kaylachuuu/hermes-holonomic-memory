@@ -5,8 +5,12 @@ One pass takes the memories stored since the last pass and produces
   * the agent's notes about itself,
   * insights connecting several memories,
 each stored as a memory linked (through the plates) to the memories it came from,
-plus a rewritten short profile of the user and of the agent.  The profiles are
-always in view (system prompt), so identity never depends on a search matching.
+plus notes about the relationship, and a rewritten short profile of the user, of
+the agent and of the two together.  The profiles are always in view (system prompt),
+so identity never depends on a search matching.
+
+The user's SOUL.md is shown to the model as a fixed foundation: the agent's view
+of itself grows within it and never rewrites it.
 
 Off by default.  Enable with `hermes holonomic reflect on --model NAME`.
 Only stdlib imports here: Hermes executes this file when it loads the plugin.
@@ -26,8 +30,11 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Kinds produced by reflection.  They are never fed back in as input.
-FACT, SELF_NOTE, INSIGHT = "fact", "self_note", "insight"
-DERIVED_KINDS = (FACT, SELF_NOTE, INSIGHT, "dream")
+FACT, SELF_NOTE, BOND_NOTE, INSIGHT = "fact", "self_note", "bond_note", "insight"
+DERIVED_KINDS = (FACT, SELF_NOTE, BOND_NOTE, INSIGHT, "dream")
+# Subjects the agent can ask its memory about, and the profile and kind that belong to each.
+SUBJECTS = {"user": FACT, "self": SELF_NOTE, "us": BOND_NOTE}
+FOUNDATION_MAX_CHARS = 6000
 WATERMARK = "reflect:last_id"
 
 REFLECT_DEFAULTS: Dict[str, Any] = {
@@ -51,13 +58,18 @@ _SCHEMA = {
         "self_notes": {"type": "array", "items": {"type": "object", "properties": {
             "text": {"type": "string"}, "sources": {"type": "array", "items": {"type": "integer"}}},
             "required": ["text", "sources"]}},
+        "relationship_notes": {"type": "array", "items": {"type": "object", "properties": {
+            "text": {"type": "string"}, "sources": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["text", "sources"]}},
         "insights": {"type": "array", "items": {"type": "object", "properties": {
             "text": {"type": "string"}, "sources": {"type": "array", "items": {"type": "integer"}}},
             "required": ["text", "sources"]}},
         "user_profile": {"type": "string"},
         "self_profile": {"type": "string"},
+        "relationship_profile": {"type": "string"},
     },
-    "required": ["user_facts", "self_notes", "insights", "user_profile", "self_profile"],
+    "required": ["user_facts", "self_notes", "relationship_notes", "insights", "user_profile", "self_profile",
+                 "relationship_profile"],
 }
 
 _SYSTEM = (
@@ -67,19 +79,28 @@ _SYSTEM = (
 )
 
 _INSTRUCTIONS = """\
-Below are the current profiles and the newest memories, oldest first. Lines marked USER were said by the user, \
-ASSISTANT by the assistant itself, NOTE were stored deliberately.
+Below are the assistant's foundation, the current profiles and the newest memories, oldest first. Lines marked \
+USER were said by the user, ASSISTANT by the assistant itself, NOTE were stored deliberately.
+
+The FOUNDATION was written by the user. It is fixed: it defines who the assistant is at its core and the guidelines \
+it grows within. Never restate or summarise it, and never write anything about the assistant that contradicts it. \
+What you write about the assistant is what it has become beyond the foundation, through these conversations.
 
 Write:
 - user_facts: durable facts about the user: who they are, what they do, what they want, what they prefer, what is \
 going on in their life. One standalone sentence each, in the third person, using the user's name if it is known. \
 Skip small talk and anything that only mattered in the moment. At most 8.
 - self_notes: what the assistant should remember about itself, written in the first person ("I ..."): commitments \
-it made, how it responded and whether that went well, how the relationship with the user is developing. At most 4.
+it made, how it responded and whether that went well, tastes and opinions it has formed. At most 4.
+- relationship_notes: what matters about the two of them together, written from the assistant's side ("We ..."): \
+shared plans, running jokes, trust, friction, how they work together. At most 3.
 - insights: connections or patterns across several memories that no single memory states. At most 3.
 - user_profile: the user profile rewritten to include what is new. Keep everything already in it unless a memory \
 contradicts it. Plain prose, at most 150 words.
-- self_profile: the assistant's description of itself, first person, rewritten the same way. At most 120 words.
+- self_profile: the assistant's description of who it has become, first person, rewritten the same way. \
+At most 120 words.
+- relationship_profile: the state of the relationship, from the assistant's side, rewritten the same way. \
+At most 100 words.
 
 For every item give "sources": the numbers of the memories that support it. If the memories contain nothing worth \
 keeping, return empty lists and repeat the current profiles unchanged. Do not guess, do not flatter, do not pad."""
@@ -128,10 +149,21 @@ def _speaker(kind: str) -> str:
     return {"said_user": "USER", "asked_user": "USER", "said_assistant": "ASSISTANT"}.get(kind, "NOTE")
 
 
-def build_prompt(memories: List[dict], user_profile: str, self_profile: str) -> str:
+def build_prompt(memories: List[dict], profiles: Dict[str, str], foundation: str = "") -> str:
     lines = [f"[{m['id']}] {_speaker(m['kind'])}: {' '.join(m['text'].split())}" for m in memories]
-    return (f"{_INSTRUCTIONS}\n\nCURRENT USER PROFILE:\n{user_profile or '(empty)'}\n\n"
-            f"CURRENT SELF PROFILE:\n{self_profile or '(empty)'}\n\nMEMORIES:\n" + "\n".join(lines))
+    return (f"{_INSTRUCTIONS}\n\nFOUNDATION:\n{foundation.strip()[:FOUNDATION_MAX_CHARS] or '(none)'}\n\n"
+            f"CURRENT USER PROFILE:\n{profiles.get('user') or '(empty)'}\n\n"
+            f"CURRENT SELF PROFILE:\n{profiles.get('self') or '(empty)'}\n\n"
+            f"CURRENT RELATIONSHIP PROFILE:\n{profiles.get('us') or '(empty)'}\n\nMEMORIES:\n" + "\n".join(lines))
+
+
+def read_foundation(hermes_home) -> str:
+    """The user's SOUL.md: the fixed identity Hermes loads into every session.  Read-only here."""
+    try:
+        from pathlib import Path
+        return (Path(str(hermes_home)) / "SOUL.md").read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
 
 
 def _clean_items(items: Any, valid_ids: set, limit: int) -> List[dict]:
@@ -152,7 +184,8 @@ def _clean_items(items: Any, valid_ids: set, limit: int) -> List[dict]:
 
 
 def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, str], str]] = None,
-                 dry_run: bool = False, key_fn: Optional[Callable[[str], List[str]]] = None) -> Dict[str, Any]:
+                 dry_run: bool = False, key_fn: Optional[Callable[[str], List[str]]] = None,
+                 foundation: str = "") -> Dict[str, Any]:
     """One reflection pass.  Returns a report; stores nothing when dry_run is set."""
     rc = reflect_config(cfg)
     if llm is None:
@@ -165,16 +198,18 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
     report: Dict[str, Any] = {"read": len(batch), "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run}
     if not batch:
         return report
-    user_profile, self_profile = engine.profile("user"), engine.profile("self")
-    data = _parse(llm(_SYSTEM, build_prompt(batch, user_profile, self_profile)))
+    current = {who: engine.profile(who) for who in SUBJECTS}
+    data = _parse(llm(_SYSTEM, build_prompt(batch, current, foundation)))
     valid = {m["id"] for m in batch}
     groups = ((FACT, _clean_items(data.get("user_facts"), valid, 8)),
               (SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4)),
+              (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3)),
               (INSIGHT, _clean_items(data.get("insights"), valid, 3)))
     report["proposed"] = {kind: items for kind, items in groups}
     limit = int(rc["profile_max_chars"])
     new_profiles = {"user": " ".join(str(data.get("user_profile") or "").split())[:limit],
-                    "self": " ".join(str(data.get("self_profile") or "").split())[:limit]}
+                    "self": " ".join(str(data.get("self_profile") or "").split())[:limit],
+                    "us": " ".join(str(data.get("relationship_profile") or "").split())[:limit]}
     report["profiles"] = new_profiles
     if dry_run:
         return report
@@ -191,7 +226,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[[str, st
                                   meta={"sources": item["sources"]})
             report["stored"].extend(ids)
     for who, text in new_profiles.items():
-        if len(text) >= 20 and text != engine.profile(who):
+        if len(text) >= 20 and text != current[who]:
             engine.set_profile(who, text)
             report["profiles_updated"].append(who)
     engine.kv_set(WATERMARK, str(batch[-1]["id"]))
@@ -208,8 +243,10 @@ class IdleReflector:
     the conversation has gone quiet, so it does not compete with a reply for the GPU."""
 
     def __init__(self, engine, load_cfg: Callable[[], Dict[str, Any]], key_fn: Optional[Callable[[str], List[str]]] = None,
-                 spawn: Optional[Callable[..., threading.Thread]] = None, poll_seconds: float = 30.0):
+                 spawn: Optional[Callable[..., threading.Thread]] = None, poll_seconds: float = 30.0,
+                 foundation_fn: Optional[Callable[[], str]] = None):
         self.engine, self.load_cfg, self.key_fn = engine, load_cfg, key_fn
+        self.foundation_fn = foundation_fn or (lambda: "")
         self.poll_seconds = poll_seconds
         self.last_activity = time.time()
         self.last_error = ""
@@ -236,7 +273,7 @@ class IdleReflector:
         if not self.due(cfg) or not self._busy.acquire(blocking=False):
             return None
         try:
-            report = reflect_once(self.engine, cfg, key_fn=self.key_fn)
+            report = reflect_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
             self.last_error = ""
             logger.info("holonomic: reflection read %d memories, stored %d", report["read"], len(report["stored"]))
             return report
