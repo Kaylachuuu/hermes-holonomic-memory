@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS plates (
     trace      BLOB,
     gate       BLOB
 );
+CREATE TABLE IF NOT EXISTS profiles (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    who        TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS plate_members (
     plate_id  INTEGER NOT NULL,
     memory_id INTEGER NOT NULL,
@@ -603,8 +609,9 @@ class HolonomicMemory:
                 out[int(row)] = max(out.get(int(row), 0.0), float(sc) * gain)
         return out
 
-    def _lexical(self, query: str) -> dict[int, float]:
-        """{row: 0..1} for memories sharing content words with the query, best match = 1."""
+    def _lexical(self, query: str, mask: np.ndarray) -> dict[int, float]:
+        """{row: 0..1} for memories sharing content words with the query, best match = 1.
+        Only memories that can be returned count, so an excluded one cannot be the yardstick."""
         terms = content_terms(query) if self._fts else []
         if not terms:
             return {}
@@ -614,10 +621,11 @@ class HolonomicMemory:
                                      "ORDER BY b LIMIT 40", (match,)).fetchall()
         except sqlite3.OperationalError:
             return {}
-        if not found:
+        scores = {self._row[r["rowid"]]: r["b"] for r in found if r["rowid"] in self._row and mask[self._row[r["rowid"]]]}
+        if not scores:
             return {}
-        best = min(r["b"] for r in found) or -1e-9
-        return {self._row[r["rowid"]]: max(0.0, min(1.0, r["b"] / best)) for r in found if r["rowid"] in self._row}
+        best = min(scores.values()) or -1e-9
+        return {row: max(0.0, min(1.0, b / best)) for row, b in scores.items()}
 
     def _alive_mask(self, realm_codes: list[int]) -> np.ndarray:
         return np.isin(self._realm.v, realm_codes) & (self._trust.v >= 0)   # trust < 0 marks forgotten rows
@@ -628,7 +636,8 @@ class HolonomicMemory:
                aperture: float = 1.0, blur: float = 0.0, fuzzy: bool = False, reinforce: bool = False,
                exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None,
                dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = (), lexical: float = 0.0,
-               kind_weights: dict[str, float] | None = None) -> list[Recollection]:
+               kind_weights: dict[str, float] | None = None,
+               only_kinds: tuple[str, ...] | list[str] = ()) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -669,6 +678,8 @@ class HolonomicMemory:
             skip_codes = [self._kind_codes[kind] for kind in skip_kinds if kind in self._kind_codes]
             if skip_codes:
                 mask &= ~np.isin(self._kind.v, skip_codes)
+            if only_kinds:
+                mask &= np.isin(self._kind.v, [self._kind_codes[kind] for kind in only_kinds if kind in self._kind_codes])
             self._last_parts, self._last_lex, self._last_lex_weight = None, {}, lexical
 
             def dither(cue: np.ndarray) -> np.ndarray:
@@ -687,7 +698,7 @@ class HolonomicMemory:
                     self._last_parts = (direct.copy(), alt)
                     direct = np.maximum(direct, alt)
                 if lexical > 0 and query:
-                    self._last_lex = self._lexical(query)
+                    self._last_lex = self._lexical(query, mask)
                     for row, share in self._last_lex.items():
                         direct[row] += lexical * share
                 direct[~mask] = -1.0
@@ -766,6 +777,52 @@ class HolonomicMemory:
             found = self._probe(self._cue(self._phasor_of(row)), codes, aperture=aperture)
             assoc = {r: min(1.0, sc) for r, sc in found.items() if r != row}
             return self._rank(np.zeros(self._X.n, dtype=np.float32), assoc, mask, 1.0, 1.0, k, min_score, False)
+
+    # ------------------------------------------------- reflection support
+
+    def kv_get(self, key: str, default: str | None = None) -> str | None:
+        with self._lock:
+            value = self._meta_get("kv:" + key)
+        return default if value is None else (value.decode() if isinstance(value, bytes) else str(value))
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self._lock:
+            self._meta_set("kv:" + key, str(value))
+
+    def memories_after(self, after_id: int, limit: int = 60, *, realm: str = "waking",
+                       exclude_kinds: tuple[str, ...] | list[str] = ()) -> list[dict]:
+        """Memories with id greater than `after_id`, oldest first."""
+        sql = "SELECT id, text, kind, session, created_at FROM memories WHERE forgotten = 0 AND realm = ? AND id > ?"
+        params: list = [realm, after_id]
+        if exclude_kinds:
+            sql += f" AND kind NOT IN ({','.join('?' * len(exclude_kinds))})"
+            params += list(exclude_kinds)
+        with self._lock:
+            return [dict(r) for r in self._db.execute(sql + " ORDER BY id LIMIT ?", params + [limit])]
+
+    def count_after(self, after_id: int, *, realm: str = "waking", exclude_kinds: tuple[str, ...] | list[str] = ()) -> int:
+        sql = "SELECT COUNT(*) AS n FROM memories WHERE forgotten = 0 AND realm = ? AND id > ?"
+        params: list = [realm, after_id]
+        if exclude_kinds:
+            sql += f" AND kind NOT IN ({','.join('?' * len(exclude_kinds))})"
+            params += list(exclude_kinds)
+        with self._lock:
+            return int(self._db.execute(sql, params).fetchone()["n"])
+
+    def profile(self, who: str) -> str:
+        with self._lock:
+            row = self._db.execute("SELECT text FROM profiles WHERE who = ? ORDER BY id DESC LIMIT 1", (who,)).fetchone()
+        return row["text"] if row else ""
+
+    def set_profile(self, who: str, text: str) -> None:
+        """Profiles are append-only so that drift can be inspected and undone."""
+        with self._lock:
+            self._db.execute("INSERT INTO profiles (who, text, created_at) VALUES (?, ?, ?)", (who, text.strip(), time.time()))
+
+    def profile_history(self, who: str, limit: int = 10) -> list[dict]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute(
+                "SELECT id, text, created_at FROM profiles WHERE who = ? ORDER BY id DESC LIMIT ?", (who, limit))]
 
     def get(self, memory_id: int) -> dict | None:
         r = self._db.execute("SELECT id, text, kind, realm, session, created_at, strength, trust, recalls, meta "

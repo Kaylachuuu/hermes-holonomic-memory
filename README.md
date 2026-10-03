@@ -5,7 +5,7 @@ inspired by the holonomic brain theory. Links between memories are not stored in
 superposed as interference patterns on fixed-size complex vectors ("plates") and recovered by
 resonance with a cue.
 
-Status: storage, recall and Hermes integration work. Reflection and dreaming are planned, not built.
+Status: storage, recall and Hermes integration work. Reflection is built and off by default. Dreaming is planned.
 
 ## How it works
 
@@ -98,6 +98,43 @@ With real `nomic-embed-text` vectors on a small scripted test (`selftest.py`): 8
 Recall time without embedding, two CPU cores: 5 ms at 2,000 memories, 10 ms at 20,000, 32 ms at
 100,000. Disk at 100,000 memories: about 210 MB of plates and 155 MB of cleanup vectors.
 
+## Reflection
+
+Off by default. When on, a language model periodically reads the memories stored since its last pass and writes:
+
+- facts about the user, notes about itself, and insights connecting several memories. Each is stored as
+  a memory linked through the plates to the memories it came from, so recalling either surfaces the other.
+- a short profile of the user and one of itself. These go into the system prompt, so who the user is
+  never depends on a search matching.
+
+It runs in the background once enough new memories exist and the conversation has been quiet for a
+while, so it does not compete with a reply for the GPU. Items that cite no real memory are discarded,
+a conclusion reached twice strengthens the existing memory instead of duplicating it, and every
+version of a profile is kept.
+
+```
+hermes holonomic reflect on --model NAME      # NAME as shown by `ollama list`; add --host URL for another server
+hermes holonomic reflect off
+hermes holonomic reflect                      # status: on or off, memories waiting, last run
+hermes holonomic reflect now --dry-run        # run once and show the result without storing it
+hermes holonomic reflect now                  # run once now, whether or not it is switched on
+hermes holonomic profile --history
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `reflect_enabled` | `false` | The toggle |
+| `reflect_model` | (none) | Ollama model that does the reflecting |
+| `reflect_host` | same as `ollama_host` | Ollama server for that model |
+| `reflect_min_new` | `12` | New memories needed before a pass |
+| `reflect_idle_seconds` | `300` | Quiet time needed before a pass |
+| `reflect_batch` | `60` | Memories read per pass |
+| `reflect_temperature` | `0.3` | Sampling temperature |
+| `profile_max_chars` | `1200` | Size limit of each profile |
+
+Background reflection only runs while a Hermes process is alive (the desktop app or gateway). A
+terminal session that exits straight away never goes quiet for long enough; use `reflect now` there.
+
 ## Inspecting the store
 
 ```
@@ -130,11 +167,9 @@ this folder.
 
 ## Roadmap
 
-- Reflection: during idle time a language model reads recent memories and writes conclusions about
-  the user and about itself, stored as linked memories.
 - Dreaming: loose, blurred cues pull distant memories together into a narrative, kept in the `dream`
   realm and never mixed into factual recall.
-- Separate, configurable model and endpoint for each of those, independent of the conversation model.
+- A separate, configurable model and endpoint for dreaming, as reflection already has.
 - Consolidation of old plates and gradual decay.
 
 ## Licence

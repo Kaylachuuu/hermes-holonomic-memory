@@ -19,7 +19,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt
+from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
+
+from .reflect import REFLECT_DEFAULTS, IdleReflector
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,8 @@ DEFAULTS: Dict[str, Any] = {
     "dim": 4096,                  # plate dimension (fixed once the store exists)
     "plate_capacity": 128.0,      # plate energy at which a plate is sealed (fixed once the store exists)
 }
+
+DEFAULTS.update(REFLECT_DEFAULTS)
 
 TOOL_SCHEMA = {
     "name": "holonomic_memory",
@@ -72,7 +76,8 @@ TOOL_SCHEMA = {
     },
 }
 
-_KIND_LABEL = {"said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
+_KIND_LABEL = {"fact": "learned about the user", "self_note": "your own note", "insight": "insight",
+               "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
 
 _STOP = {"I", "I'm", "I've", "I'll", "I'd", "The", "A", "An", "It", "It's", "This", "That", "These", "Those", "We",
@@ -213,9 +218,17 @@ def _acquire_engine(data_dir: Path, cfg: Dict[str, Any]):
             else:
                 embedder = OllamaEmbedder(cfg["embed_model"], cfg["ollama_host"], timeout=float(cfg["embed_timeout"]))
             engine = HolonomicMemory(data_dir, embedder, dim=int(cfg["dim"]), plate_capacity=float(cfg["plate_capacity"]))
-            entry = _ENGINES[key] = [engine, 0]
+            home = data_dir.parent
+            reflector = IdleReflector(engine, lambda: load_config(home), key_fn=extract_keys,
+                                      spawn=lambda target, name: spawn_context_thread(target, name=name))
+            entry = _ENGINES[key] = [engine, 0, reflector]
         entry[1] += 1
         return entry[0]
+
+
+def reflector_for(engine) -> Optional[IdleReflector]:
+    with _ENGINES_LOCK:
+        return next((entry[2] for entry in _ENGINES.values() if entry[0] is engine), None)
 
 
 def _release_engine(engine) -> None:
@@ -225,6 +238,7 @@ def _release_engine(engine) -> None:
                 entry[1] -= 1
                 if entry[1] <= 0:
                     del _ENGINES[key]
+                    entry[2].stop()
                     try:
                         engine.close()
                     except Exception as exc:
@@ -315,7 +329,27 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "automatically and shown with ids like [#42]; items marked 'linked' were not similar to the message but "
                 "are associated with something that was. Recalled memories can be incomplete or out of date: weigh them, "
                 "don't recite them. Use the holonomic_memory tool to search deeper, to store something important "
-                "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'.")
+                "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'."
+                + self._profile_block(engine))
+
+    @staticmethod
+    def _profile_block(engine) -> str:
+        """Profiles written by reflection.  Always in view, so who the user is never depends on a search."""
+        try:
+            user, me = engine.profile("user"), engine.profile("self")
+        except Exception:
+            return ""
+        out = ""
+        if user:
+            out += f"\n\n## What you know about the user (from your own reflection on past conversations)\n{user}"
+        if me:
+            out += f"\n\n## How you understand yourself (from your own reflection)\n{me}"
+        return out
+
+    def _touch(self) -> None:
+        reflector = reflector_for(self._engine) if self._engine is not None else None
+        if reflector is not None:
+            reflector.touch()
 
     # ---------------------------------------------------------------- recall
 
@@ -328,7 +362,8 @@ class HolonomicMemoryProvider(MemoryProvider):
     def _line(self, hit, max_chars: int) -> str:
         when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at))
         label = _KIND_LABEL.get(hit.kind, hit.kind)
-        linked = ", linked" if hit.assoc > hit.direct else ""
+        # "linked" = it came through an association, not because it resembles the message.
+        linked = ", linked" if hit.assoc > 0 and hit.direct < 0.3 else ""
         text = " ".join(hit.text.split())
         if len(text) > max_chars:
             text = text[:max_chars].rsplit(" ", 1)[0] + "…"
@@ -342,6 +377,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         if engine is None:
             return ""
         sid = session_id or self._session_id
+        self._touch()
         try:
             k = int(self._cfg["recall_k"])
             hits = engine.recall(query[:2000], k=k * 3, min_score=float(self._cfg["min_score"]), **recall_options(self._cfg))
@@ -410,6 +446,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             return
         sid = session_id or self._session_id
         engine = self._ensure_engine()
+        self._touch()
         try:
             if engine is None:
                 raise RuntimeError(self._last_error or "memory unavailable")

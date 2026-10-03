@@ -3,6 +3,8 @@
     hermes holonomic stats
     hermes holonomic list [-n 20]
     hermes holonomic recall "what is my name" [-k 10]
+    hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run]
+    hermes holonomic profile [--history]
 
 Only stdlib imports at module level: Hermes imports this file while building its
 command line, before any provider dependency is needed.
@@ -44,14 +46,26 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall"):
-        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N]')
+    if action not in ("stats", "list", "recall", "reflect", "profile"):
+        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] | '
+              'reflect status|on|off|now | profile [--history]')
+        return
+    if action == "reflect" and args.reflect_action in ("on", "off"):
+        _reflect_toggle(args)
         return
     engine, cfg = _open()
     if engine is None:
         return
     try:
-        if action == "stats":
+        if action == "reflect":
+            _reflect(engine, cfg, args)
+        elif action == "profile":
+            for who, title in (("user", "About the user"), ("self", "About herself")):
+                history = engine.profile_history(who, 10 if args.history else 1)
+                print(f"{title}:" if history else f"{title}: (none yet)")
+                for entry in history:
+                    print(f"  [{_when(entry['created_at'])}] {entry['text']}")
+        elif action == "stats":
             for key, value in engine.stats().items():
                 print(f"  {key}: {value}")
             for key in ("min_score", "score_band", "lexical_weight", "assistant_weight", "recall_k"):
@@ -87,6 +101,56 @@ def holonomic_command(args) -> None:
         engine.close()
 
 
+def _reflect_toggle(args) -> None:
+    from hermes_constants import get_hermes_home
+    from .provider import load_config, write_config
+    home = get_hermes_home()
+    values = {"reflect_enabled": args.reflect_action == "on"}
+    if args.reflect_action == "on":
+        if args.model:
+            values["reflect_model"] = args.model
+        if args.host:
+            values["reflect_host"] = args.host.rstrip("/")
+        if not (args.model or load_config(home).get("reflect_model")):
+            print("Reflection needs a model. Run: hermes holonomic reflect on --model NAME   (a name from `ollama list`)")
+            return
+    write_config(home, values)
+    cfg = load_config(home)
+    print(f"Reflection is {'ON' if cfg['reflect_enabled'] else 'OFF'}"
+          + (f" (model {cfg['reflect_model']})" if cfg["reflect_model"] else "")
+          + ". Restart Hermes for a running session to pick this up.")
+
+
+def _reflect(engine, cfg, args) -> None:
+    from .provider import extract_keys
+    from .reflect import ReflectionError, pending, reflect_config, reflect_once
+    rc = reflect_config(cfg)
+    if args.reflect_action == "now":
+        try:
+            t0 = time.perf_counter()
+            report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys)
+        except ReflectionError as exc:
+            print(f"Reflection failed: {exc}")
+            return
+        print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s"
+              + (" (dry run: nothing stored)" if args.dry_run else ""))
+        for kind, items in (report.get("proposed") or {}).items():
+            for item in items:
+                print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
+        for who, text in (report.get("profiles") or {}).items():
+            print(f"  profile ({who}): {text or '(empty)'}")
+        if not args.dry_run:
+            print(f"Stored {len(report['stored'])} new, reinforced {len(report['reinforced'])} existing, "
+                  f"profiles updated: {', '.join(report['profiles_updated']) or 'none'}")
+        return
+    last_run = engine.kv_get("reflect:last_run")
+    print(f"  enabled: {rc['reflect_enabled']}")
+    print(f"  model: {rc['reflect_model'] or '(not set)'} at {rc['reflect_host']}")
+    print(f"  runs when: {rc['reflect_min_new']} new memories and {rc['reflect_idle_seconds']} s of quiet")
+    print(f"  memories waiting: {pending(engine)}")
+    print(f"  last run: {_when(float(last_run)) if last_run else 'never'}")
+
+
 def register_cli(subparser) -> None:
     subs = subparser.add_subparsers(dest="holonomic_action")
     subs.add_parser("stats", help="Size of the memory store")
@@ -97,4 +161,11 @@ def register_cli(subparser) -> None:
     rec.add_argument("query")
     rec.add_argument("-k", type=int, default=10, help="How many results (default 10)")
     rec.add_argument("--width", type=int, default=100, help="Characters of text to show")
+    ref = subs.add_parser("reflect", help="Reflection: turn on or off, check, or run once now")
+    ref.add_argument("reflect_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
+    ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")
+    ref.add_argument("--host", help="Ollama server for that model, if different from the embedding server (with 'on')")
+    ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
+    prof = subs.add_parser("profile", help="Show the profiles written by reflection")
+    prof.add_argument("--history", action="store_true", help="Show earlier versions too")
     subparser.set_defaults(func=holonomic_command)
