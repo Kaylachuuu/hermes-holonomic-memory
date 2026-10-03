@@ -14,7 +14,8 @@ Status: storage, recall and Hermes integration work. Reflection and dreaming are
 - An association is written as `plate += cue * target`. Many associations share one plate. A memory is
   associated with the message before it in the session, with the user's previous message, with any
   memory it is explicitly linked to, and with the names and topics it mentions.
-- Recall has two steps. First, memories similar to the query are found by ordinary vector similarity.
+- Recall has two steps. First, memories similar to the query are found by vector similarity plus a
+  bonus for shared content words (a question and the statement that answers it are far apart as vectors).
   Then the best matches are used as cues on the plates, which returns memories that are *linked* to
   them even when they share no words or meaning with the query.
 - A plate returns a noisy blend. A cleanup step resolves the blend against the memories known to be
@@ -46,10 +47,13 @@ installs them after you choose the provider, and Hermes needs a restart afterwar
 | `embed_model` | `nomic-embed-text` | Embedding model. Changing it later invalidates the store |
 | `embed_timeout` | `10` | Seconds before an embedding call is abandoned |
 | `recall_k` | `6` | Memories injected per turn |
-| `min_score` | `0.35` | Minimum score for a memory to be injected |
+| `min_score` | `0.2` | Floor: a memory scoring below this is never injected |
+| `score_band` | `0.25` | A memory must also score within this much of the best match |
+| `lexical_weight` | `0.2` | How much sharing content words with the message adds to similarity |
+| `assistant_weight` | `0.75` | Ranking weight of the agent's own past statements |
 | `max_context_chars` | `2400` | Size budget of the injected block |
 | `max_item_chars` | `420` | Each recalled memory is trimmed to this |
-| `dual_query` | `true` | Match each message both as a question and as a statement |
+| `dual_query` | `false` | Also match each message as a statement (a second embedding call) |
 | `store_assistant` | `true` | Also remember the agent's own replies |
 | `max_turn_chars` | `4000` | Longer messages are cut before storing |
 | `dim` | `4096` | Plate dimension. Fixed once the store exists |
@@ -70,7 +74,7 @@ It also gets one tool, `holonomic_memory`, with the actions `recall`, `remember`
 
 User messages are stored one sentence per memory, so each fact is separately findable. Questions
 are stored to keep the conversation chain intact but are never recalled. Sentences in which the model
-says it has no memory are not stored.
+says it has no memory, or does not know something, are not stored; nor are short replies to bare questions.
 
 Memories from the current session are not injected while they are still in the context window; they
 become eligible again after Hermes compresses the context. Writes to Hermes' built-in memory are

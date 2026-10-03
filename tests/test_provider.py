@@ -264,7 +264,7 @@ def test_cli_commands(tmp_path, capsys=None):
             for argv in (["stats"], ["list", "-n", "5"], ["recall", "what is my name Kayla", "-k", "3"], []):
                 args = parser.parse_args(argv); args.func(args)
         text = out.getvalue()
-        assert "memories: 2" in text and "[#1]" in text and "My name is Kayla" in text and "as-statement" in text and "Usage:" in text
+        assert "memories: 2" in text and "[#1]" in text and "My name is Kayla" in text and "content words: name, kayla" in text and "Usage:" in text
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
@@ -276,17 +276,58 @@ def test_sentences_questions_and_denials(tmp_path):
     assert strip_memory_denials("I do not have access to your personal identity or your name.") == ""
     assert strip_memory_denials("I don't have a persistent memory of our past conversations. Each session is independent, "
                                 "so I only know this chat. Your OS project sounds great.") == "Your OS project sounds great."
-    assert strip_memory_denials("I can't find the file. No config was loaded.") == "I can't find the file. No config was loaded."
+    assert strip_memory_denials("I don't know your name.") == ""
+    assert strip_memory_denials("I can't open that port. No config was loaded.") == "I can't open that port. No config was loaded."
     p = make(tmp_path)
     p.sync_turn("Okay! My name is Kayla. I'm a 45 year old woman, mother of 5 children. What should we build first?",
                 "It's a pleasure to meet you, Kayla.", session_id="s1")
     p.sync_turn("What is my name?", "I do not have access to your personal identity or your name.", session_id="s1")
+    p.sync_turn("What is my name?", "It is not something we have discussed yet.", session_id="s1")   # short reply to a bare question
     rows = p._engine.recent(10)
     kinds = {r["text"]: r["kind"] for r in rows}
     assert kinds["Okay! My name is Kayla."] == "said_user" and kinds["What is my name?"] == "asked_user"
-    assert kinds["What should we build first?"] == "asked_user" and len(rows) == 5       # the denial was not stored
+    assert kinds["What should we build first?"] == "asked_user" and len(rows) == 6       # neither reply was stored
     block = p.prefetch("What is my name?", session_id="s2")
     assert "My name is Kayla" in block and "What is my name?" not in block and "asked" not in block
     hits = tool(p, action="recall", query="What is my name?")["results"]
     assert hits[0]["text"] == "Okay! My name is Kayla." and all(h["kind"] != "asked_user" for h in hits)
     p.shutdown()
+
+
+def test_a_question_finds_its_answer_through_shared_words(tmp_path):
+    """From a real session: "what is my name" vs "Hello! My name is Kayla..." scored 0.24 as vectors."""
+    if not HAVE_HERMES: return
+    from holonomic.provider import select_for_injection
+    p = make(tmp_path)
+    p.sync_turn("Hello! My name is Kayla, I'm excited to start working with you!", "Hello, Kayla. I'm Hermes, an assistant built to help.", session_id="s1")
+    p.sync_turn("The project I'm most looking forward to is an operating system written in assembly.",
+                "That is a significant undertaking. Should we start by mapping out the architecture?", session_id="s1")
+    plain = p._engine.recall("what is my name", k=5, min_score=0.0)
+    boosted = p._engine.recall("what is my name", k=5, min_score=0.0, lexical=0.2)
+    assert boosted[0].text.startswith("Hello! My name is Kayla") and boosted[0].lexical == pytest.approx(0.2)
+    assert boosted[0].direct == pytest.approx(next(h for h in plain if h.id == boosted[0].id).direct + 0.2, abs=1e-3)
+    assert "My name is Kayla" in p.prefetch("What is my name?", session_id="s2")
+    # the band keeps a clear winner from dragging weak matches in with it
+    class H:  # minimal stand-in
+        def __init__(self, s): self.score = s
+    band = {"min_score": 0.2, "score_band": 0.25}
+    kept = select_for_injection([H(0.61), H(0.50), H(0.28), H(0.21)], band)
+    assert [h.score for h in kept] == [0.61, 0.50]
+    kept = select_for_injection([H(0.28), H(0.24), H(0.03)], band)
+    assert [h.score for h in kept] == [0.28, 0.24]
+    p.shutdown()
+
+
+def test_old_store_gains_word_matching_on_open(tmp_path):
+    import sqlite3
+    m = HolonomicMemory(tmp_path / "m", HashEmbedder())
+    m.remember("The telescope mirror was polished for two years", session="a")
+    m.close()
+    db = sqlite3.connect(tmp_path / "m" / "holonomic.db")
+    db.executescript("DROP TRIGGER memories_fts_ai; DROP TRIGGER memories_fts_ad; DROP TRIGGER memories_fts_au; DROP TABLE memories_fts;")
+    db.close()
+    m = HolonomicMemory(tmp_path / "m", HashEmbedder())
+    assert m.recall("telescope", k=1, min_score=0.0, lexical=0.2)[0].lexical == pytest.approx(0.2)
+    mid = m.remember("A second note about the telescope dome", session="a")[0]
+    assert m.forget(mid) and all(h.id != mid for h in m.recall("dome", k=5, min_score=0.0, lexical=0.2))
+    m.close()

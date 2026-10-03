@@ -149,6 +149,40 @@ _CALIBRATION = [
     "I'm proud of how much you've grown this year.",
 ]
 
+_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+    USING fts5(text, content=memories, content_rowid=id, tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF text ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+END;
+"""
+
+# Words that carry no topic.  What remains of a query is matched against the text
+# of the memories, so "what is my name" can find "my name is Kayla" through the
+# word they share even though, as vectors, a question and its answer are far apart.
+_STOPWORDS = frozenset("""a about after again all also am an and any are as at be because been before being but by can
+could did do does doing don down each few for from further had has have having he her here hers him his how i if in
+into is it its just me more most my no nor not now of off on once only or other our out over own same she should so
+some such than that the their them then there these they this those through to too under until up very was we were
+what when where which while who whom why will with would you your yours tell said say know remember recall think
+please thing things something anything really got get like want going one ever us im ive id""".split())
+
+
+def content_terms(text: str, limit: int = 12) -> list[str]:
+    seen: dict[str, None] = {}
+    for tok in re.findall(r"[a-z0-9]+", text.lower().replace("'", "")):
+        if len(tok) > 1 and tok not in _STOPWORDS:
+            seen.setdefault(tok)
+    return list(seen)[:limit]
+
+
 ROLE_ASSOC = "role:assoc"
 _CUE_PERM = "cue"
 
@@ -167,6 +201,7 @@ class Recollection:
     created_at: float
     session: str = ""
     meta: dict = field(default_factory=dict)
+    lexical: float = 0.0       # share of the score that came from matching words
     as_query: float = 0.0      # similarity when the query is embedded as a search query
     as_statement: float = 0.0  # similarity when the query is embedded as a statement
 
@@ -273,6 +308,14 @@ class HolonomicMemory:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; avoids a disk flush per write
             self._db.executescript(_SCHEMA)
+            try:
+                had_fts = bool(self._db.execute("SELECT 1 FROM sqlite_master WHERE name = 'memories_fts'").fetchone())
+                self._db.executescript(_FTS_SCHEMA)
+                if not had_fts:                              # store created before word matching existed
+                    self._db.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+                self._fts = True
+            except sqlite3.OperationalError:                 # SQLite built without FTS5
+                self._fts = False
             self._init_meta(dim, plate_capacity)
             self._load()
         except BaseException:
@@ -560,6 +603,22 @@ class HolonomicMemory:
                 out[int(row)] = max(out.get(int(row), 0.0), float(sc) * gain)
         return out
 
+    def _lexical(self, query: str) -> dict[int, float]:
+        """{row: 0..1} for memories sharing content words with the query, best match = 1."""
+        terms = content_terms(query) if self._fts else []
+        if not terms:
+            return {}
+        match = " OR ".join(f'"{t}"' for t in terms)
+        try:
+            found = self._db.execute("SELECT rowid, bm25(memories_fts) AS b FROM memories_fts WHERE memories_fts MATCH ? "
+                                     "ORDER BY b LIMIT 40", (match,)).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        if not found:
+            return {}
+        best = min(r["b"] for r in found) or -1e-9
+        return {self._row[r["rowid"]]: max(0.0, min(1.0, r["b"] / best)) for r in found if r["rowid"] in self._row}
+
     def _alive_mask(self, realm_codes: list[int]) -> np.ndarray:
         return np.isin(self._realm.v, realm_codes) & (self._trust.v >= 0)   # trust < 0 marks forgotten rows
 
@@ -568,7 +627,8 @@ class HolonomicMemory:
                hop_min: float = 0.3, hop_ratio: float = 0.75, gamma: float = 0.85, min_score: float = 0.2,
                aperture: float = 1.0, blur: float = 0.0, fuzzy: bool = False, reinforce: bool = False,
                exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None,
-               dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = ()) -> list[Recollection]:
+               dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = (), lexical: float = 0.0,
+               kind_weights: dict[str, float] | None = None) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -584,6 +644,8 @@ class HolonomicMemory:
         takes the better match: "what is my name" resembles "my name is Kayla" far
         more as a statement than as a search query.
         skip_kinds leaves memories of those kinds out entirely.
+        lexical adds up to that much to the similarity of memories sharing content
+        words with a text query.  kind_weights scales the final score by kind.
         """
         x = x_alt = None
         if vector is not None:
@@ -607,7 +669,7 @@ class HolonomicMemory:
             skip_codes = [self._kind_codes[kind] for kind in skip_kinds if kind in self._kind_codes]
             if skip_codes:
                 mask &= ~np.isin(self._kind.v, skip_codes)
-            self._last_parts = None
+            self._last_parts, self._last_lex, self._last_lex_weight = None, {}, lexical
 
             def dither(cue: np.ndarray) -> np.ndarray:
                 if blur <= 0:
@@ -624,6 +686,10 @@ class HolonomicMemory:
                     alt = self._X.v @ x_alt
                     self._last_parts = (direct.copy(), alt)
                     direct = np.maximum(direct, alt)
+                if lexical > 0 and query:
+                    self._last_lex = self._lexical(query)
+                    for row, share in self._last_lex.items():
+                        direct[row] += lexical * share
                 direct[~mask] = -1.0
                 order = [int(r) for r in np.argsort(-direct)[:max(hops, 0)]]
                 d_top = float(direct[order[0]]) if order else 0.0
@@ -645,11 +711,12 @@ class HolonomicMemory:
                 kcue = np.sum([self._key_atom(key) for key in norm_keys], axis=0)
                 for row, sc in self._probe(kcue, codes, aperture=aperture).items():
                     assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc / len(norm_keys)))
-            return self._rank(direct, assoc, mask, anchor, gamma, k, min_score, reinforce)
+            return self._rank(direct, assoc, mask, anchor, gamma, k, min_score, reinforce, kind_weights)
 
     def _rank(self, direct: np.ndarray, assoc: dict[int, float], mask: np.ndarray, anchor: float, gamma: float,
-              k: int, min_score: float, reinforce: bool) -> list[Recollection]:
+              k: int, min_score: float, reinforce: bool, kind_weights: dict[str, float] | None = None) -> list[Recollection]:
         parts = getattr(self, "_last_parts", None)
+        lex, lex_weight = getattr(self, "_last_lex", {}), getattr(self, "_last_lex_weight", 0.0)
         d = np.maximum(direct, 0.0)
         via = np.zeros_like(d)
         for row, sc in assoc.items():
@@ -657,6 +724,9 @@ class HolonomicMemory:
         base = np.maximum(d, via) + 0.15 * np.minimum(d, via)
         base[~mask] = 0.0
         final = base * (0.7 + 0.3 * np.tanh(self._strength.v)) * (0.75 + 0.5 * np.clip(self._trust.v, 0, 1))
+        for kind, weight in (kind_weights or {}).items():
+            if kind in self._kind_codes:
+                final[self._kind.v == self._kind_codes[kind]] *= weight
         # A strongly linked memory passes whenever the match that led to it would pass.
         strong = np.zeros(len(d), dtype=bool)
         if anchor >= min_score:
@@ -673,7 +743,8 @@ class HolonomicMemory:
                             strength=float(self._strength.a[r]), trust=float(self._trust.a[r]),
                             created_at=rows[mid]["created_at"], session=rows[mid]["session"],
                             meta=json.loads(rows[mid]["meta"] or "{}"),
-                            as_query=float(parts[0][r]) if parts else float(d[r]),
+                            lexical=float(lex_weight * lex.get(r, 0.0)),
+                            as_query=float(parts[0][r]) if parts else float(d[r] - lex_weight * lex.get(r, 0.0)),
                             as_statement=float(parts[1][r]) if parts else 0.0)
                for r, mid in zip(top, ids) if mid in rows]
         if reinforce:
@@ -691,7 +762,7 @@ class HolonomicMemory:
                 return []
             mask = self._alive_mask(codes)
             mask[row] = False
-            self._last_parts = None
+            self._last_parts, self._last_lex, self._last_lex_weight = None, {}, 0.0
             found = self._probe(self._cue(self._phasor_of(row)), codes, aperture=aperture)
             assoc = {r: min(1.0, sc) for r, sc in found.items() if r != row}
             return self._rank(np.zeros(self._X.n, dtype=np.float32), assoc, mask, 1.0, 1.0, k, min_score, False)

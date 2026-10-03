@@ -28,10 +28,13 @@ DEFAULTS: Dict[str, Any] = {
     "embed_model": "nomic-embed-text",
     "embed_timeout": 10.0,        # seconds; a hung embedding call must not stall a turn
     "recall_k": 6,                # memories injected per turn
-    "min_score": 0.35,            # below this a memory is not worth injecting
+    "min_score": 0.2,             # floor: below this a memory is never injected
+    "score_band": 0.25,           # and it must also score within this much of the best match
+    "lexical_weight": 0.2,        # how much sharing content words with the message adds to similarity
+    "assistant_weight": 0.75,     # the agent's own past statements rank below the user's
     "max_context_chars": 2400,    # budget for the injected block
     "max_item_chars": 420,        # each recalled memory is trimmed to this
-    "dual_query": True,           # match the message both as a question and as a statement
+    "dual_query": False,          # also match the message as a statement (a second embedding call; rarely helps)
     "store_assistant": True,      # also remember the agent's own replies
     "max_turn_chars": 4000,       # longer messages are cut before storing
     "dim": 4096,                  # plate dimension (fixed once the store exists)
@@ -123,10 +126,12 @@ def clean_for_storage(text: str, max_chars: int) -> str:
 # same question asked again, crowding out the memory that answers it.
 QUESTION_KIND = "asked_user"
 
-# Replies in which the model says it has no memory.  Storing these teaches the agent,
-# through its own recall, that it cannot remember.
+# Replies in which the model says it has no memory or does not know something.  Storing
+# these teaches the agent, through its own recall, that it cannot remember: "I don't know
+# your name" is the best possible match for "what is my name?" the next time it is asked.
 _DENIAL_RE = re.compile(
-    r"\b(?:do not|don't|does not|doesn't|cannot|can't|unable to|no)\b[^.!?\n]{0,60}"
+    r"\bI(?: am|'m)? (?:do not|don't|cannot|can't|unable to|not able to) (?:\w+ly )?(?:know|have|recall|remember|retain|see|find|access)\b"
+    r"|\b(?:do not|don't|does not|doesn't|cannot|can't|unable to|no)\b[^.!?\n]{0,60}"
     r"\b(?:memory|memories|remember|recall|retain|access to your|persistent|previous (?:conversations?|sessions?)|"
     r"past (?:conversations?|sessions?)|personal identity)\b"
     r"|\beach (?:session|conversation) is independent\b",
@@ -140,6 +145,23 @@ def is_question(text: str) -> bool:
 def strip_memory_denials(text: str) -> str:
     from .engine import split_sentences
     return " ".join(s for s in split_sentences(text, max_chars=2000) if not _DENIAL_RE.search(s))
+
+
+def select_for_injection(hits: list, cfg: Dict[str, Any]) -> list:
+    """Hits worth putting in front of the model: above the floor and within a band of
+    the best one.  A fixed threshold alone does not work: a question and the statement
+    that answers it can score 0.25 while an unrelated memory scores 0.28, so what
+    matters is how a memory compares with the best match for this particular message."""
+    if not hits:
+        return []
+    cut = max(float(cfg["min_score"]), max(h.score for h in hits) - float(cfg["score_band"]))
+    return [h for h in hits if h.score >= cut]
+
+
+def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {"dual": bool(cfg.get("dual_query", False)), "skip_kinds": (QUESTION_KIND,),
+            "lexical": float(cfg.get("lexical_weight", 0.2)),
+            "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75))}}
 
 
 def _error(message: str) -> str:
@@ -322,8 +344,8 @@ class HolonomicMemoryProvider(MemoryProvider):
         sid = session_id or self._session_id
         try:
             k = int(self._cfg["recall_k"])
-            hits = engine.recall(query[:2000], k=k * 3, min_score=float(self._cfg["min_score"]),
-                                 dual=bool(self._cfg.get("dual_query", True)), skip_kinds=(QUESTION_KIND,))
+            hits = engine.recall(query[:2000], k=k * 3, min_score=float(self._cfg["min_score"]), **recall_options(self._cfg))
+            hits = select_for_injection([h for h in hits if self._visible(h, sid)], self._cfg)
         except Exception as exc:
             logger.warning("holonomic: recall failed: %s", exc)
             return ""
@@ -350,13 +372,16 @@ class HolonomicMemoryProvider(MemoryProvider):
         max_chars = int(self._cfg["max_turn_chars"])
         from .engine import split_sentences
         user = clean_for_storage(user, max_chars)
+        only_questions = False
         if user and not is_trivial_prompt(user):
             # One memory per sentence, so each fact is separately findable; the plates
             # chain the sentences back together.  Besides following the previous reply,
             # the first sentence is linked to the user's previous statement, so their
             # train of thought stays connected across replies.
             previous = self._last_user.get(sid)
-            for unit in split_sentences(user):
+            units = split_sentences(user)
+            only_questions = all(is_question(u) for u in units)
+            for unit in units:
                 question = is_question(unit)
                 ids = engine.remember(unit, kind=QUESTION_KIND if question else "said_user", session=sid,
                                       keys=[] if question else extract_keys(unit), salience=0.5 if question else 1.0,
@@ -365,7 +390,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                     previous = self._last_user[sid] = ids[-1]
         if self._cfg.get("store_assistant", True):
             assistant = strip_memory_denials(clean_for_storage(assistant, max_chars))
-            if len(assistant) >= 20:
+            # A short reply to a bare question is an answer read off the context, not new knowledge.
+            if len(assistant) >= (80 if only_questions else 20):
                 engine.remember(assistant, kind="said_assistant", session=sid, keys=extract_keys(assistant), salience=0.8)
 
     def _flush_backlog(self) -> None:
@@ -444,8 +470,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                 query = (args.get("query") or "").strip()
                 if not query:
                     return _error("recall needs 'query'")
-                hits = engine.recall(query, k=limit, min_score=0.25, dual=bool(self._cfg.get("dual_query", True)),
-                                     skip_kinds=(QUESTION_KIND,))
+                hits = engine.recall(query, k=limit, min_score=0.15, **recall_options(self._cfg))
                 return json.dumps({"results": [self._hit_json(h) for h in hits], "count": len(hits)})
             if action == "remember":
                 content = clean_for_storage(args.get("content") or "", 4000)

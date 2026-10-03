@@ -54,7 +54,8 @@ def holonomic_command(args) -> None:
         if action == "stats":
             for key, value in engine.stats().items():
                 print(f"  {key}: {value}")
-            print(f"  min_score (config): {cfg['min_score']}")
+            for key in ("min_score", "score_band", "lexical_weight", "assistant_weight", "recall_k"):
+                print(f"  {key} (config): {cfg[key]}")
         elif action == "list":
             rows = engine.recent(args.n)
             print(f"{len(rows)} most recent memories (newest first):")
@@ -62,20 +63,23 @@ def holonomic_command(args) -> None:
                 print(f"  [#{r['id']}] {_when(r['created_at'])} {r['kind']:<14} {len(r['text']):>5} chars  {_clip(r['text'], args.width)}")
         else:
             t0 = time.perf_counter()
-            from .provider import QUESTION_KIND
-            dual = bool(cfg.get("dual_query", True))
+            from .engine import content_terms
+            from .provider import QUESTION_KIND, recall_options, select_for_injection
+            opts = recall_options(cfg)
             # What the agent would get (questions skipped), then the skipped questions for reference.
-            hits = engine.recall(args.query, k=args.k, min_score=0.0, dual=dual, skip_kinds=(QUESTION_KIND,))
+            hits = engine.recall(args.query, k=max(args.k, int(cfg["recall_k"]) * 3), min_score=0.0, **opts)
             ms = (time.perf_counter() - t0) * 1000
-            print(f'Query: "{args.query}"  ({ms:.0f} ms, injection threshold {cfg["min_score"]}, dual_query {dual})')
-            print("   id  score  as-question as-statement linked  injected  kind            text")
-            for h in hits:
-                injected = "yes" if (h.direct >= float(cfg["min_score"]) or h.assoc >= 0.6) else "no"
-                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>11.2f} {h.as_statement:>12.2f} {h.assoc:>6.2f}  {injected:<8}  "
-                      f"{h.kind:<14}  {_clip(h.text, args.width)}")
-            skipped = [h for h in engine.recall(args.query, k=50, min_score=0.0, dual=dual) if h.kind == QUESTION_KIND][:3]
-            for h in skipped:
-                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>11.2f} {h.as_statement:>12.2f} {h.assoc:>6.2f}  {'never':<8}  "
+            floor = [h for h in hits if h.score >= float(cfg["min_score"]) or h.assoc >= 0.6]
+            chosen = {h.id for h in select_for_injection(floor, cfg)[:int(cfg["recall_k"])]}
+            print(f'Query: "{args.query}"  ({ms:.0f} ms; floor {cfg["min_score"]}, band {cfg["score_band"]}; '
+                  f'content words: {", ".join(content_terms(args.query)) or "none"})')
+            print("   id  score  vector  words  linked  injected  kind            text")
+            for h in hits[:args.k]:
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  "
+                      f"{'yes' if h.id in chosen else 'no':<8}  {h.kind:<14}  {_clip(h.text, args.width)}")
+            opts["skip_kinds"] = ()
+            for h in [h for h in engine.recall(args.query, k=50, min_score=0.0, **opts) if h.kind == QUESTION_KIND][:3]:
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  {'never':<8}  "
                       f"{h.kind:<14}  {_clip(h.text, args.width)}")
             if not hits:
                 print("  (nothing stored matches)")
