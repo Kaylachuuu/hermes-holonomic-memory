@@ -1,0 +1,730 @@
+"""Holonomic memory engine.
+
+Storage model
+-------------
+* A **plate** is one complex vector holding many associations superposed on top
+  of each other: for each association, `plate += weight * cue * target`.
+  Which cue leads to which target is recorded nowhere else.
+* Each plate also keeps a **gate**: the plain sum of its cues.  Comparing a cue
+  with every gate is a cheap way to see which plates will resonate.
+* The **cleanup memory** holds one embedding per memory plus its text.  Plates
+  return a noisy blend; cleanup turns that blend back into actual memories.
+
+Associations written for every memory
+-------------------------------------
+* it <-> the previous memory in the same session (both directions),
+* it <-> any memory it is explicitly linked to (e.g. a reflection and its sources),
+* each discrete key (an entity, a topic) -> it.
+
+A memory with no neighbour, link or key has nothing to associate with; it lives
+in the cleanup memory only and is found by direct similarity.
+
+Recall
+------
+1. Direct: exact similarity between the query and the cleanup memory.
+2. Associative: the query (plus its best direct matches) is used as a cue.
+   Resonating plates are unbound with it, the result is projected back into
+   embedding space, and cleaned up against that plate's members.  This surfaces
+   memories that are *linked to* things like the query without being similar
+   to the query themselves.
+
+Realms keep kinds of experience apart ("waking", "dream"): recall only ever
+probes the realms it is asked for, so dreams cannot leak into factual recall.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import sqlite3
+import threading
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from . import vsa
+
+SCHEMA_VERSION = 1
+
+# On a many-core machine the math library's worker threads fight with whatever
+# else is busy (measured: 109 ms per recall with 16 threads, 21 ms with one), and
+# the arrays here are too small to benefit from them.  Hold it to one thread
+# while the engine runs.
+try:
+    from threadpoolctl import ThreadpoolController
+    _BLAS = ThreadpoolController()
+
+    def _single_threaded():
+        return _BLAS.limit(limits=1, user_api="blas")
+except Exception:                                    # threadpoolctl missing or unusable
+    import contextlib
+
+    def _single_threaded():
+        return contextlib.nullcontext()
+
+
+def _locked(method):
+    """Run an engine method under the lock, single-threaded, on fresh state."""
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock, _single_threaded():
+            self._sync()
+            return method(self, *args, **kwargs)
+    return wrapper
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB);
+CREATE TABLE IF NOT EXISTS memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'episodic',
+    realm      TEXT NOT NULL DEFAULT 'waking',
+    session    TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    strength   REAL NOT NULL DEFAULT 1.0,
+    trust      REAL NOT NULL DEFAULT 0.5,
+    recalls    INTEGER NOT NULL DEFAULT 0,
+    meta       TEXT NOT NULL DEFAULT '{}',
+    vec        BLOB,
+    forgotten  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(realm, session, id);
+CREATE INDEX IF NOT EXISTS idx_mem_kind ON memories(kind, id);
+CREATE TABLE IF NOT EXISTS plates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    realm      TEXT NOT NULL,
+    load       REAL NOT NULL DEFAULT 0,
+    sealed     INTEGER NOT NULL DEFAULT 0,
+    gain       REAL NOT NULL DEFAULT 1.0,
+    created_at REAL NOT NULL,
+    trace      BLOB,
+    gate       BLOB
+);
+CREATE TABLE IF NOT EXISTS plate_members (
+    plate_id  INTEGER NOT NULL,
+    memory_id INTEGER NOT NULL,
+    PRIMARY KEY (plate_id, memory_id)
+) WITHOUT ROWID;
+"""
+
+# Generic sentences used once, at creation, to estimate the component every
+# embedding shares.  Fixed forever afterwards so stored phasors stay valid.
+_CALIBRATION = [
+    "The weather was cold and it rained most of the morning.",
+    "She fixed the bug in the database migration script.",
+    "We talked about what to cook for dinner tonight.",
+    "The stock market fell sharply after the announcement.",
+    "He plays guitar in a small band on weekends.",
+    "I need to renew my passport before the trip.",
+    "The cat knocked a glass off the kitchen table.",
+    "Quantum computers use qubits instead of classical bits.",
+    "My grandmother grew tomatoes in her garden every summer.",
+    "The meeting was moved to Thursday at three o'clock.",
+    "Install the package and restart the server.",
+    "They felt anxious about the upcoming exam.",
+    "The novel follows three generations of one family.",
+    "What do you think happens after we die?",
+    "The GPU ran out of memory during training.",
+    "He apologised for forgetting her birthday.",
+    "The river floods the valley every spring.",
+    "I prefer tea to coffee in the afternoon.",
+    "The function returns null when the list is empty.",
+    "We watched the sunset from the top of the hill.",
+    "The doctor recommended more sleep and less caffeine.",
+    "Ancient Rome built roads across its whole empire.",
+    "She laughed so hard she started crying.",
+    "The invoice is due at the end of the month.",
+    "I had a strange dream about flying over the ocean.",
+    "The team shipped the new feature last night.",
+    "Please remember to water the plants while I'm away.",
+    "Music helps me concentrate when I work.",
+    "The children built a fort out of blankets.",
+    "Who are you, and what do you want to become?",
+    "The train was delayed by forty minutes.",
+    "I'm proud of how much you've grown this year.",
+]
+
+ROLE_ASSOC = "role:assoc"
+_CUE_PERM = "cue"
+
+
+@dataclass
+class Recollection:
+    id: int
+    text: str
+    kind: str
+    realm: str
+    score: float           # final ranking score
+    direct: float          # similarity to the query itself
+    assoc: float           # strength recovered from the plates
+    strength: float
+    trust: float
+    created_at: float
+    session: str = ""
+    meta: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class _Grow:
+    """Append-only numpy array with amortised doubling."""
+
+    def __init__(self, width: int, dtype, cap: int = 64):
+        self.a = np.zeros((cap, width) if width else (cap,), dtype=dtype)
+        self.n = 0
+
+    def add(self, row=None) -> int:
+        if self.n == len(self.a):
+            self.a = np.concatenate([self.a, np.zeros_like(self.a)])
+        if row is not None:
+            self.a[self.n] = row
+        self.n += 1
+        return self.n - 1
+
+    @property
+    def v(self) -> np.ndarray:
+        return self.a[:self.n]
+
+
+def split_text(text: str, max_chars: int) -> list[str]:
+    """Split long text at paragraph, then sentence, boundaries."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+    pieces: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= max_chars:
+            pieces.append(para)
+            continue
+        for sent in re.split(r"(?<=[.!?])\s+", para):
+            while len(sent) > max_chars:
+                cut = sent.rfind(" ", 0, max_chars)
+                cut = cut if cut > max_chars // 2 else max_chars
+                pieces.append(sent[:cut].strip())
+                sent = sent[cut:].strip()
+            if sent:
+                pieces.append(sent)
+    chunks, cur = [], ""
+    for piece in pieces:
+        if cur and len(cur) + 1 + len(piece) > max_chars:
+            chunks.append(cur)
+            cur = piece
+        else:
+            cur = f"{cur} {piece}".strip()
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def normalize_key(key: str) -> str:
+    return re.sub(r"\s+", " ", key.strip().lower())
+
+
+class HolonomicMemory:
+    def __init__(self, path: str | Path, embedder, *, dim: int = 4096, plate_capacity: float = 128.0,
+                 max_chars: int = 1200):
+        self.path = Path(path)
+        self.path.mkdir(parents=True, exist_ok=True)
+        self.embedder = embedder
+        self.max_chars = max_chars
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(self.path / "holonomic.db", check_same_thread=False, timeout=10.0,
+                                   isolation_level=None)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; avoids a disk flush per write
+        self._db.executescript(_SCHEMA)
+        self._init_meta(dim, plate_capacity)
+        self._load()
+
+    # ------------------------------------------------------------------ setup
+
+    def _meta_get(self, key: str):
+        row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def _meta_set(self, key: str, value) -> None:
+        self._db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                         (key, value))
+
+    def _init_meta(self, dim: int, plate_capacity: float) -> None:
+        proj_path = self.path / "projection.npy"
+        stored = self._meta_get("embedder")
+        if stored is None:
+            calib = np.asarray(self.embedder.embed(_CALIBRATION, "document"), dtype=np.float32)
+            embed_dim = int(calib.shape[1])
+            center = calib.mean(axis=0)
+            np.save(proj_path, vsa.make_projection(embed_dim, dim))
+            self._db.execute("BEGIN")
+            for key, value in (("schema", str(SCHEMA_VERSION)), ("embedder", self.embedder.signature),
+                               ("embed_dim", str(embed_dim)), ("dim", str(dim)),
+                               ("plate_capacity", str(plate_capacity)), ("center", center.tobytes())):
+                self._meta_set(key, value)
+            self._db.execute("COMMIT")
+        elif stored != self.embedder.signature:
+            raise ValueError(f"This memory was built with embedder '{stored}' but is being opened with "
+                             f"'{self.embedder.signature}'. Vectors from different models are not comparable.")
+        self.dim = int(self._meta_get("dim"))
+        self.embed_dim = int(self._meta_get("embed_dim"))
+        self.plate_capacity = float(self._meta_get("plate_capacity"))
+        center = np.frombuffer(self._meta_get("center"), dtype=np.float32)
+        if not proj_path.exists():
+            raise FileNotFoundError(f"{proj_path} is missing; the plates cannot be read without it.")
+        self.proj = vsa.Projector(np.load(proj_path), center)
+        self._perm = vsa.permutation(_CUE_PERM, self.dim)
+        self._perm2 = vsa.permutation(_CUE_PERM + "2", self.dim)
+        self._role = vsa.atom(ROLE_ASSOC, self.dim)
+
+    def _load(self) -> None:
+        self._X = _Grow(self.embed_dim, np.float32)      # cleanup memory
+        self._ids = _Grow(0, np.int64)
+        self._realm = _Grow(0, np.int16)
+        self._strength = _Grow(0, np.float32)
+        self._trust = _Grow(0, np.float32)
+        self._row: dict[int, int] = {}                   # memory id -> row
+        self._realm_codes: dict[str, int] = {}
+        for r in self._db.execute("SELECT id, realm, strength, trust, vec FROM memories WHERE forgotten = 0 ORDER BY id"):
+            self._add_row(r["id"], r["realm"], r["strength"], r["trust"],
+                          np.frombuffer(r["vec"], dtype=np.float16).astype(np.float32))
+
+        self._trace = _Grow(self.dim, np.complex64, cap=8)
+        self._gate = _Grow(self.dim, np.complex64, cap=8)
+        self._pid = _Grow(0, np.int64, cap=8)
+        self._prealm = _Grow(0, np.int16, cap=8)
+        self._pload = _Grow(0, np.float32, cap=8)
+        self._pgain = _Grow(0, np.float32, cap=8)
+        self._pgate = _Grow(0, np.float32, cap=8)        # energy of each gate vector
+        self._members: list[set[int]] = []               # plate index -> rows
+        self._open: dict[int, int] = {}                  # realm code -> open plate index
+        pidx: dict[int, int] = {}
+        for p in self._db.execute("SELECT * FROM plates ORDER BY id"):
+            i = self._trace.add(np.frombuffer(p["trace"], dtype=np.complex64))
+            self._gate.add(np.frombuffer(p["gate"], dtype=np.complex64))
+            self._pid.add(p["id"])
+            code = self._realm_code(p["realm"])
+            self._prealm.add(code)
+            self._pload.add(p["load"])
+            self._pgain.add(p["gain"])
+            self._pgate.add(float(np.mean(np.abs(self._gate.a[i]) ** 2)))
+            self._members.append(set())
+            pidx[p["id"]] = i
+            if not p["sealed"]:
+                self._open[code] = i
+        for m in self._db.execute("SELECT plate_id, memory_id FROM plate_members"):
+            row = self._row.get(m["memory_id"])
+            if row is not None and m["plate_id"] in pidx:
+                self._members[pidx[m["plate_id"]]].add(row)
+        self._last: dict[tuple[str, str], int | None] = {}
+        self._dv = self._data_version()
+
+    def _data_version(self) -> int:
+        return int(self._db.execute("PRAGMA data_version").fetchone()[0])
+
+    def _sync(self) -> None:
+        """Reload if another process has written to the store since we last looked.
+        Plates are read-modify-write, so working from a stale copy would silently
+        drop the other process's associations."""
+        if self._data_version() != self._dv:
+            self._load()
+
+    def _realm_code(self, realm: str) -> int:
+        return self._realm_codes.setdefault(realm, len(self._realm_codes))
+
+    def _add_row(self, mid: int, realm: str, strength: float, trust: float, x: np.ndarray) -> int:
+        row = self._X.add(x)
+        self._ids.add(mid)
+        self._realm.add(self._realm_code(realm))
+        self._strength.add(strength)
+        self._trust.add(trust)
+        self._row[mid] = row
+        return row
+
+    # ---------------------------------------------------------------- writing
+
+    def _cue(self, phasor: np.ndarray) -> np.ndarray:
+        """Content cue: the phasor bound to a shuffled copy of itself, then
+        permuted and tagged.  Self-binding squares the similarity between cues,
+        so an exact cue still matches fully (1 -> 1) while the faint resemblance
+        every text has to every other text is suppressed (0.1 -> 0.01).  Without
+        this, a loaded plate answers every cue with a blur of all its members."""
+        return (phasor * phasor[self._perm2])[self._perm] * self._role
+
+    def _key_atom(self, key: str) -> np.ndarray:
+        return vsa.atom("key:" + normalize_key(key), self.dim)
+
+    def _phasor_of(self, row: int) -> np.ndarray:
+        return self.proj.phasor(self._X.a[row:row + 1])[0]
+
+    def _last_in_session(self, realm: str, session: str) -> int | None:
+        k = (realm, session)
+        if k not in self._last:
+            r = self._db.execute("SELECT MAX(id) AS m FROM memories WHERE realm = ? AND session = ? AND forgotten = 0",
+                                 (realm, session)).fetchone()
+            self._last[k] = r["m"]
+        return self._last[k]
+
+    def _plate_for(self, realm: str, incoming_load: float) -> int:
+        code = self._realm_code(realm)
+        i = self._open.get(code)
+        if i is not None and self._pload.a[i] > 0 and self._pload.a[i] + incoming_load > self.plate_capacity:
+            self._db.execute("UPDATE plates SET sealed = 1 WHERE id = ?", (int(self._pid.a[i]),))
+            i = None
+        if i is None:
+            zeros = np.zeros(self.dim, dtype=np.complex64)
+            cur = self._db.execute("INSERT INTO plates (realm, created_at, trace, gate) VALUES (?, ?, ?, ?)",
+                                   (realm, time.time(), zeros.tobytes(), zeros.tobytes()))
+            i = self._trace.add()
+            self._gate.add()
+            self._pid.add(cur.lastrowid)
+            self._prealm.add(code)
+            self._pload.add(0.0)
+            self._pgain.add(1.0)
+            self._pgate.add(0.0)
+            self._members.append(set())
+            self._open[code] = i
+        return i
+
+    def _write(self, realm: str, bindings: list[tuple[np.ndarray, np.ndarray, int, float]]) -> None:
+        """bindings: (cue, target phasor, target row, weight)."""
+        if not bindings:
+            return
+        i = self._plate_for(realm, sum(w * w for *_, w in bindings))
+        pid = int(self._pid.a[i])
+        for cue, target, row, w in bindings:
+            self._trace.a[i] += np.complex64(w) * cue * target
+            self._gate.a[i] += np.complex64(w) * cue
+            if row not in self._members[i]:
+                self._members[i].add(row)
+                self._db.execute("INSERT OR IGNORE INTO plate_members (plate_id, memory_id) VALUES (?, ?)",
+                                 (pid, int(self._ids.a[row])))
+        # Load is the plate's measured energy, not a count of bindings: many similar
+        # targets under one key add up coherently and use far more of the plate's
+        # capacity than the same number of unrelated associations.
+        self._pload.a[i] = float(np.mean(np.abs(self._trace.a[i]) ** 2))
+        self._pgate.a[i] = float(np.mean(np.abs(self._gate.a[i]) ** 2))
+        self._db.execute("UPDATE plates SET trace = ?, gate = ?, load = ? WHERE id = ?",
+                         (self._trace.a[i].tobytes(), self._gate.a[i].tobytes(), float(self._pload.a[i]), pid))
+
+    def find_by_text(self, text: str, *, kind: str | None = None, realm: str = "waking") -> list[int]:
+        sql, params = "SELECT id FROM memories WHERE forgotten = 0 AND realm = ? AND text = ?", [realm, text.strip()]
+        if kind:
+            sql, params = sql + " AND kind = ?", params + [kind]
+        with self._lock:
+            return [r["id"] for r in self._db.execute(sql, params)]
+
+    def remember(self, text: str, *, kind: str = "episodic", realm: str = "waking", session: str = "",
+                 keys: tuple[str, ...] | list[str] = (), links: tuple[int, ...] | list[int] = (),
+                 salience: float = 1.0, trust: float = 0.5, meta: dict | None = None, chain: bool = True,
+                 created_at: float | None = None) -> list[int]:
+        """Store text.  Long text is split into chunks that are chained together.
+        `salience` is how brightly the memory is written into the plate.
+        `links` are ids of existing memories this one is associated with.
+        Returns the new memory ids."""
+        chunks = split_text(text, self.max_chars)
+        if not chunks:
+            return []
+        raw = self.embedder.embed(chunks, "document")         # network call: outside the lock
+        with _single_threaded():
+            X = self.proj.prep(raw)
+            phasors = self.proj.phasor(X)
+        now = time.time() if created_at is None else created_at
+        all_keys = list(dict.fromkeys(normalize_key(k) for k in keys if k and k.strip()))
+        w = float(min(max(salience, 0.25), 2.0))
+        ids: list[int] = []
+        with self._lock, _single_threaded():
+            self._db.execute("BEGIN IMMEDIATE")      # take the write lock first, then check for foreign writes
+            try:
+                self._sync()
+                for chunk, x, p in zip(chunks, X, phasors):
+                    previous = self._last_in_session(realm, session)     # must be read before the insert
+                    cur = self._db.execute(
+                        "INSERT INTO memories (text, kind, realm, session, created_at, strength, trust, meta, vec) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (chunk, kind, realm, session, now, w, trust, json.dumps(meta or {}), x.astype(np.float16).tobytes()))
+                    mid = int(cur.lastrowid)
+                    row = self._add_row(mid, realm, w, trust, x.astype(np.float16).astype(np.float32))
+                    partners = [previous] if chain else []
+                    partners += list(links) if not ids else []      # links attach to the first chunk
+                    bindings = []
+                    for other in dict.fromkeys(o for o in partners if o is not None and o != mid):
+                        orow = self._row.get(int(other))
+                        if orow is None:
+                            continue
+                        po = self._phasor_of(orow)
+                        bindings.append((self._cue(po), p, row, w))      # the other one recalls this one
+                        bindings.append((self._cue(p), po, orow, w))     # and this one recalls the other
+                    bindings += [(self._key_atom(k), p, row, w) for k in all_keys]
+                    self._write(realm, bindings)
+                    self._last[(realm, session)] = mid
+                    ids.append(mid)
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                self._load()            # discard partial in-memory state
+                raise
+        return ids
+
+    # ---------------------------------------------------------------- reading
+
+    def _probe(self, cue: np.ndarray, realm_codes: list[int], *, aperture: float = 1.0,
+               max_plates: int = 24, z_min: float = 3.5, ridge: float = 0.1) -> dict[int, float]:
+        """Unbind `cue` from every resonating plate; return {row: recovered strength}."""
+        n = self._trace.n
+        if n == 0:
+            return {}
+        d = self.dim if aperture >= 1.0 else max(64, int(self.dim * aperture))
+        cc = np.conj(cue[:d])
+        cue_weight2 = float(np.mean(np.abs(cc) ** 2))        # the cue's actual power
+        load = self._pload.v
+        resonance = (self._gate.a[:n, :d] @ cc).real / d
+        gate_sigma = np.sqrt(np.maximum(self._pgate.v, 1e-9) * cue_weight2 / (2.0 * d))
+        eligible = np.isin(self._prealm.v, realm_codes) & (load > 0)
+        if eligible.sum() >= 4:
+            # Every plate resonates a little with every cue, in proportion to its
+            # load.  Subtract that shared baseline so only real matches stand out.
+            resonance = resonance - np.median(resonance[eligible] / load[eligible]) * load
+        ok = eligible & (resonance > 2.5 * gate_sigma)
+        idx = np.nonzero(ok)[0]
+        if idx.size == 0:
+            return {}
+        if idx.size > max_plates:
+            idx = idx[np.argsort(-resonance[idx])[:max_plates]]
+        estimates = self.proj.back(self._trace.a[idx, :d] * cc, aperture_dim=d)
+        out: dict[int, float] = {}
+        for j, i in enumerate(idx):
+            rows = np.fromiter(self._members[i], dtype=np.int64, count=len(self._members[i]))
+            if rows.size == 0:
+                continue
+            rows = rows[np.isin(self._realm.a[rows], realm_codes)]
+            M = self._X.a[rows]
+            # Ridge deconvolution: members of a plate resemble each other, so a
+            # plain matched filter credits every member for its neighbours'
+            # signal.  Solving (M M^T + lambda I) a = M e instead attributes the
+            # estimate to the members that actually explain it.
+            G = (M @ M.T).astype(np.float64)
+            K = np.linalg.inv(G + ridge * np.eye(rows.size))
+            scores = (1.0 + ridge) * (K @ (M @ estimates[j]).astype(np.float64))
+            sigma = (1.0 + ridge) * vsa.noise_sigma(float(load[i]), cue_weight2, d) \
+                * np.sqrt(np.maximum(np.einsum("ij,jk,ki->i", K, G, K), 1e-12))
+            keep = scores > z_min * sigma
+            gain = float(self._pgain.a[i])
+            for row, sc in zip(rows[keep], scores[keep]):
+                out[int(row)] = max(out.get(int(row), 0.0), float(sc) * gain)
+        return out
+
+    def _alive_mask(self, realm_codes: list[int]) -> np.ndarray:
+        return np.isin(self._realm.v, realm_codes) & (self._trust.v >= 0)   # trust < 0 marks forgotten rows
+
+    def recall(self, query: str | None = None, k: int = 8, *, realms: tuple[str, ...] = ("waking",),
+               keys: tuple[str, ...] | list[str] = (), vector: np.ndarray | None = None, hops: int = 3,
+               hop_min: float = 0.3, hop_ratio: float = 0.75, gamma: float = 0.85, min_score: float = 0.2,
+               aperture: float = 1.0, blur: float = 0.0, fuzzy: bool = False, reinforce: bool = False,
+               exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None) -> list[Recollection]:
+        """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
+
+        The best direct matches ("hops") are each used as an exact cue on the
+        plates.  A memory recovered that way gets `assoc` = how strongly it is
+        tied to the hop, scaled by how well the hop matched relative to the best
+        match.  An associate never outranks the memory that led to it.
+
+        aperture < 1 reads only that fraction of each plate (graceful degradation).
+        blur > 0 adds phase noise to the cues, loosening the associations.
+        fuzzy=True also cues the plates with the query itself, which returns a
+        looser blend of things linked to anything resembling it (used for dreaming).
+        """
+        x = None
+        if vector is not None:
+            x = np.asarray(vector, dtype=np.float32)
+        elif query:
+            raw = self.embedder.embed([query], "query")       # network call: outside the lock
+            x = self.proj.prep(raw)[0]
+        with self._lock, _single_threaded():
+            self._sync()
+            if self._X.n == 0:
+                return []
+            codes = [self._realm_codes[r] for r in realms if r in self._realm_codes]
+            if not codes:
+                return []
+            mask = self._alive_mask(codes)
+            for mid in exclude:
+                if mid in self._row:
+                    mask[self._row[mid]] = False
+
+            def dither(cue: np.ndarray) -> np.ndarray:
+                if blur <= 0:
+                    return cue
+                gen = rng or np.random.default_rng()
+                return cue * np.exp(1j * gen.normal(0.0, blur, self.dim)).astype(np.complex64)
+
+            direct = np.zeros(self._X.n, dtype=np.float32)
+            assoc: dict[int, float] = {}
+            anchor = 1.0
+            if x is not None:
+                direct = self._X.v @ x
+                direct[~mask] = -1.0
+                order = [int(r) for r in np.argsort(-direct)[:max(hops, 0)]]
+                d_top = float(direct[order[0]]) if order else 0.0
+                anchor = max(d_top, 0.0)
+                for r in order:
+                    if direct[r] < max(hop_min, hop_ratio * d_top):
+                        continue
+                    relevance = float(direct[r]) / d_top
+                    for row, sc in self._probe(dither(self._cue(self._phasor_of(r))), codes, aperture=aperture).items():
+                        if row != r:
+                            assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc) * relevance)
+                if fuzzy:
+                    cue = dither(self._cue(self.proj.phasor(x[None, :])[0]))
+                    for row, sc in self._probe(cue, codes, aperture=aperture).items():
+                        assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc))
+            norm_keys = [normalize_key(key) for key in keys if key and key.strip()]
+            if norm_keys:
+                anchor = max(anchor, 0.5)
+                kcue = np.sum([self._key_atom(key) for key in norm_keys], axis=0)
+                for row, sc in self._probe(kcue, codes, aperture=aperture).items():
+                    assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc / len(norm_keys)))
+            return self._rank(direct, assoc, mask, anchor, gamma, k, min_score, reinforce)
+
+    def _rank(self, direct: np.ndarray, assoc: dict[int, float], mask: np.ndarray, anchor: float, gamma: float,
+              k: int, min_score: float, reinforce: bool) -> list[Recollection]:
+        d = np.maximum(direct, 0.0)
+        via = np.zeros_like(d)
+        for row, sc in assoc.items():
+            via[row] = gamma * anchor * sc
+        base = np.maximum(d, via) + 0.15 * np.minimum(d, via)
+        base[~mask] = 0.0
+        final = base * (0.7 + 0.3 * np.tanh(self._strength.v)) * (0.75 + 0.5 * np.clip(self._trust.v, 0, 1))
+        # A strongly linked memory passes whenever the match that led to it would pass.
+        strong = np.zeros(len(d), dtype=bool)
+        if anchor >= min_score:
+            for row, sc in assoc.items():
+                strong[row] = sc >= 0.6
+        top = [int(r) for r in np.argsort(-final)[:k] if mask[r] and (base[r] >= min_score or strong[r])]
+        if not top:
+            return []
+        ids = [int(self._ids.a[r]) for r in top]
+        rows = {r["id"]: r for r in self._db.execute(
+            f"SELECT id, text, kind, realm, session, created_at, meta FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        out = [Recollection(id=mid, text=rows[mid]["text"], kind=rows[mid]["kind"], realm=rows[mid]["realm"],
+                            score=float(final[r]), direct=float(d[r]), assoc=float(assoc.get(r, 0.0)),
+                            strength=float(self._strength.a[r]), trust=float(self._trust.a[r]),
+                            created_at=rows[mid]["created_at"], session=rows[mid]["session"],
+                            meta=json.loads(rows[mid]["meta"] or "{}"))
+               for r, mid in zip(top, ids) if mid in rows]
+        if reinforce:
+            self.reinforce(ids, 0.05)
+        return out
+
+    def associates(self, memory_id: int, k: int = 8, *, realms: tuple[str, ...] = ("waking",),
+                   aperture: float = 1.0, min_score: float = 0.2) -> list[Recollection]:
+        """What does this memory lead to?  Cue the plates with the memory itself."""
+        with self._lock, _single_threaded():
+            self._sync()
+            row = self._row.get(memory_id)
+            codes = [self._realm_codes[r] for r in realms if r in self._realm_codes]
+            if row is None or not codes:
+                return []
+            mask = self._alive_mask(codes)
+            mask[row] = False
+            found = self._probe(self._cue(self._phasor_of(row)), codes, aperture=aperture)
+            assoc = {r: min(1.0, sc) for r, sc in found.items() if r != row}
+            return self._rank(np.zeros(self._X.n, dtype=np.float32), assoc, mask, 1.0, 1.0, k, min_score, False)
+
+    def get(self, memory_id: int) -> dict | None:
+        r = self._db.execute("SELECT id, text, kind, realm, session, created_at, strength, trust, recalls, meta "
+                             "FROM memories WHERE id = ? AND forgotten = 0", (memory_id,)).fetchone()
+        return dict(r, meta=json.loads(r["meta"] or "{}")) if r else None
+
+    def recent(self, n: int = 20, *, realm: str = "waking", kind: str | None = None, since: float | None = None) -> list[dict]:
+        sql, params = "SELECT id, text, kind, realm, session, created_at, strength, trust FROM memories WHERE forgotten = 0 AND realm = ?", [realm]
+        if kind:
+            sql, params = sql + " AND kind = ?", params + [kind]
+        if since is not None:
+            sql, params = sql + " AND created_at >= ?", params + [since]
+        return [dict(r) for r in self._db.execute(sql + " ORDER BY id DESC LIMIT ?", params + [n])]
+
+    # ------------------------------------------------------------ maintenance
+
+    @_locked
+    def reinforce(self, ids: list[int], amount: float = 0.1) -> None:
+        with self._lock:
+            for mid in ids:
+                row = self._row.get(mid)
+                if row is not None:
+                    self._strength.a[row] = min(3.0, self._strength.a[row] + amount)
+                    self._db.execute("UPDATE memories SET strength = ?, recalls = recalls + 1 WHERE id = ?",
+                                     (float(self._strength.a[row]), mid))
+
+    @_locked
+    def set_trust(self, memory_id: int, trust: float) -> bool:
+        with self._lock:
+            row = self._row.get(memory_id)
+            if row is None:
+                return False
+            self._trust.a[row] = min(max(trust, 0.0), 1.0)
+            self._db.execute("UPDATE memories SET trust = ? WHERE id = ?", (float(self._trust.a[row]), memory_id))
+            return True
+
+    @_locked
+    def decay(self, factor: float = 0.98, *, floor: float = 0.1) -> None:
+        """Let every memory fade a little.  Reinforced memories fade from a higher start."""
+        with self._lock:
+            self._strength.v[:] = np.maximum(self._strength.v * factor, floor)
+            self._db.execute("UPDATE memories SET strength = MAX(strength * ?, ?) WHERE forgotten = 0", (factor, floor))
+
+    @_locked
+    def forget(self, memory_id: int) -> bool:
+        """Remove a memory from cleanup.  Its traces stay in the plates as faint
+        noise that can no longer be resolved into anything."""
+        with self._lock:
+            row = self._row.pop(memory_id, None)
+            if row is None:
+                return False
+            self._trust.a[row] = -1.0
+            self._X.a[row] = 0.0
+            for members in self._members:
+                members.discard(row)
+            self._db.execute("UPDATE memories SET forgotten = 1, text = '', vec = NULL WHERE id = ?", (memory_id,))
+            self._db.execute("DELETE FROM plate_members WHERE memory_id = ?", (memory_id,))
+            self._last.clear()
+            return True
+
+    @_locked
+    def stats(self) -> dict:
+        with self._lock:
+            n_plates = self._trace.n
+            by_realm = {realm: int(np.sum((self._realm.v == code) & (self._trust.v >= 0)))
+                        for realm, code in self._realm_codes.items()}
+            return {
+                "memories": len(self._row),
+                "by_realm": by_realm,
+                "plates": n_plates,
+                "dim": self.dim,
+                "embed_dim": self.embed_dim,
+                "plate_capacity": self.plate_capacity,
+                "mean_plate_load": float(self._pload.v.mean()) if n_plates else 0.0,
+                "plate_bytes": int(n_plates * self.dim * 16),
+                "cleanup_bytes": int(len(self._row) * self.embed_dim * 2),
+                "embedder": self.embedder.signature,
+            }
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                self._db.close()
+
+    def __enter__(self) -> "HolonomicMemory":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
