@@ -1,8 +1,34 @@
 import hashlib, sys
 from pathlib import Path
 import numpy as np
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import _bootstrap  # noqa: E402,F401
+try:
+    import pytest  # noqa: E402
+except ImportError:                      # scripts/bench.py runs without pytest
+    pytest = None
+
+OPEN = []
+
+
+def track(engine):
+    OPEN.append(engine)
+    return engine
+
+
+def close_all():
+    while OPEN:
+        try:
+            OPEN.pop().close()
+        except Exception:
+            pass
+
+
+if pytest is not None:
+    @pytest.fixture(autouse=True)
+    def _close_engines():
+        yield
+        close_all()
 
 
 class TopicEmbedder:

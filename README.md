@@ -92,9 +92,9 @@ Recall time without embedding, two CPU cores: 5 ms at 2,000 memories, 10 ms at 2
 ## Testing
 
 ```
-python run_tests.py                 # engine tests; provider tests too if a Hermes checkout is found
-python selftest.py --host http://YOUR-OLLAMA:11434
-python bench.py
+python scripts/run_tests.py          # engine tests; provider tests too if a Hermes checkout is found
+python scripts/selftest.py --host http://YOUR-OLLAMA:11434
+python scripts/bench.py
 ```
 
 Provider tests need the Hermes source: set `HERMES_SRC` or keep a `hermes-agent` checkout next to

@@ -1,7 +1,7 @@
 """Self-test against a real Ollama embedding model.
 
-    python3 selftest.py                      # nomic-embed-text on localhost:11434
-    python3 selftest.py --model NAME --host http://HOST:11434
+    python3 scripts/selftest.py                      # nomic-embed-text on localhost:11434
+    python3 scripts/selftest.py --model NAME --host http://HOST:11434
 
 Writes only to a temporary folder, which it deletes afterwards.
 Paste the whole output back to Claude.
@@ -9,7 +9,7 @@ Paste the whole output back to Claude.
 import argparse, os, platform, shutil, sys, tempfile, time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 import numpy as np
 from holonomic import HolonomicMemory, OllamaEmbedder, HashEmbedder, EmbeddingError
@@ -86,7 +86,7 @@ def main():
     ap.add_argument("--host", default="http://localhost:11434")
     ap.add_argument("--hash", action="store_true", help="use the built-in test embedder instead of Ollama")
     a = ap.parse_args()
-    print(f"holonomic self-test v3 | python {platform.python_version()} | numpy {np.__version__} | {platform.system()}")
+    print(f"holonomic self-test v4 | python {platform.python_version()} | numpy {np.__version__} | {platform.system()}")
     emb = Timed(HashEmbedder() if a.hash else OllamaEmbedder(a.model, a.host))
     problems = []
 

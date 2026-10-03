@@ -211,3 +211,36 @@ print("ok")
 """
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert out.stdout.strip() == "ok", out.stderr[-800:]
+
+
+def test_top_folder_only_holds_modules_that_are_safe_to_execute():
+    """Hermes executes every top-level .py when it loads the plugin, before __init__.py."""
+    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "embed.py", "engine.py", "provider.py", "vsa.py"]
+
+
+def test_failed_first_open_releases_the_database_file(tmp_path):
+    from holonomic import OllamaEmbedder, EmbeddingError
+    with pytest.raises(EmbeddingError):
+        HolonomicMemory(tmp_path / "m", OllamaEmbedder(host="http://127.0.0.1:9", timeout=1))
+    (tmp_path / "m" / "holonomic.db").unlink()          # would raise on Windows if the handle had leaked
+
+
+def test_status_config_works_uninitialised():
+    if not HAVE_HERMES: return
+    from holonomic.provider import HolonomicMemoryProvider
+    assert set(HolonomicMemoryProvider().get_status_config({})) == {"ollama_host", "embed_model", "recall_k", "min_score"}
+
+
+def test_hermes_real_plugin_loader_loads_the_folder():
+    if not HAVE_HERMES: return
+    try:
+        from plugins import plugin_loader
+    except Exception:
+        return
+    import logging
+    mod = plugin_loader.load_plugin_module("hermes_user_plugins.holonomic__source_loader", ROOT,
+                                           parents=("plugins", "plugins.memory"), logger=logging.getLogger("test"),
+                                           synthetic_namespace="hermes_user_plugins")
+    got = []
+    mod.register(type("Ctx", (), {"register_memory_provider": lambda self, prov: got.append(prov)})())
+    assert got and got[0].name == "holonomic"

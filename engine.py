@@ -240,11 +240,19 @@ class HolonomicMemory:
         self._db = sqlite3.connect(self.path / "holonomic.db", check_same_thread=False, timeout=10.0,
                                    isolation_level=None)
         self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; avoids a disk flush per write
-        self._db.executescript(_SCHEMA)
-        self._init_meta(dim, plate_capacity)
-        self._load()
+        self._closed = False
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; avoids a disk flush per write
+            self._db.executescript(_SCHEMA)
+            self._init_meta(dim, plate_capacity)
+            self._load()
+        except BaseException:
+            # e.g. the embedding server is down during first-time calibration.  Without
+            # this the open handle leaks, and on Windows the file stays locked.
+            self._closed = True
+            self._db.close()
+            raise
 
     # ------------------------------------------------------------------ setup
 
@@ -718,6 +726,9 @@ class HolonomicMemory:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             try:
                 self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             finally:

@@ -1,12 +1,12 @@
 import numpy as np, pytest
-from conftest import TopicEmbedder
+from conftest import TopicEmbedder, track
 from holonomic import HolonomicMemory, HashEmbedder
 from holonomic import vsa
 from holonomic.engine import split_text
 
 
 def mem(tmp_path, **kw):
-    return HolonomicMemory(tmp_path / "m", kw.pop("embedder", HashEmbedder()), **kw)
+    return track(HolonomicMemory(tmp_path / "m", kw.pop("embedder", HashEmbedder()), **kw))
 
 
 def test_algebra_roundtrip():

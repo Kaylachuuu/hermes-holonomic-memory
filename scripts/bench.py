@@ -7,7 +7,8 @@ only its neighbours can lead to.  Queries are paraphrases of a turn.
 import sys, tempfile, time
 from pathlib import Path
 import numpy as np
-sys.path[:0] = [str(Path(__file__).parent), str(Path(__file__).parent / "tests")]
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "tests")]
 from conftest import StructEmbedder
 from holonomic import HolonomicMemory
 

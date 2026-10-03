@@ -467,5 +467,13 @@ class HolonomicMemoryProvider(MemoryProvider):
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
         write_config(hermes_home, {k: v for k, v in (values or {}).items() if v not in (None, "")})
 
-    def get_status_config(self) -> Dict[str, Any]:
-        return {k: self._cfg.get(k) for k in ("ollama_host", "embed_model", "recall_k", "min_score")}
+    def get_status_config(self, provider_config: Any = None) -> Dict[str, Any]:
+        """Shown by `hermes memory status`, which calls this on an uninitialised instance."""
+        cfg = self._cfg
+        if self._home is None:
+            try:
+                from hermes_constants import get_hermes_home
+                cfg = load_config(get_hermes_home())
+            except Exception:
+                pass
+        return {k: cfg.get(k) for k in ("ollama_host", "embed_model", "recall_k", "min_score")}
