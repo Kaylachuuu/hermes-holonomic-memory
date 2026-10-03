@@ -49,6 +49,7 @@ installs them after you choose the provider, and Hermes needs a restart afterwar
 | `min_score` | `0.35` | Minimum score for a memory to be injected |
 | `max_context_chars` | `2400` | Size budget of the injected block |
 | `max_item_chars` | `420` | Each recalled memory is trimmed to this |
+| `dual_query` | `true` | Match each message both as a question and as a statement |
 | `store_assistant` | `true` | Also remember the agent's own replies |
 | `max_turn_chars` | `4000` | Longer messages are cut before storing |
 | `dim` | `4096` | Plate dimension. Fixed once the store exists |
@@ -66,6 +67,10 @@ Each turn, relevant memories are injected like this:
 
 It also gets one tool, `holonomic_memory`, with the actions `recall`, `remember`, `related`,
 `feedback`, `forget` and `stats`.
+
+User messages are stored one sentence per memory, so each fact is separately findable. Questions
+are stored to keep the conversation chain intact but are never recalled. Sentences in which the model
+says it has no memory are not stored.
 
 Memories from the current session are not injected while they are still in the context window; they
 become eligible again after Hermes compresses the context. Writes to Hermes' built-in memory are

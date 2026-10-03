@@ -167,6 +167,8 @@ class Recollection:
     created_at: float
     session: str = ""
     meta: dict = field(default_factory=dict)
+    as_query: float = 0.0      # similarity when the query is embedded as a search query
+    as_statement: float = 0.0  # similarity when the query is embedded as a statement
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -223,6 +225,32 @@ def split_text(text: str, max_chars: int) -> list[str]:
     if cur:
         chunks.append(cur)
     return chunks
+
+
+def split_sentences(text: str, max_chars: int = 320, min_chars: int = 12) -> list[str]:
+    """One unit per sentence, so each fact gets its own vector.  A message that
+    states a name, an age and a job in one breath is otherwise stored as a blend
+    that matches a question about any one of them only weakly.  Fragments shorter
+    than `min_chars` ("Okay!") are attached to the sentence that follows."""
+    units: list[str] = []
+    carry = ""
+    for para in re.split(r"\n+", text.strip()):
+        for sent in re.split(r"(?<=[.!?])\s+(?=[\"'(\[]?[A-Z0-9])", para.strip()):
+            sent = sent.strip()
+            if not sent:
+                continue
+            sent = f"{carry} {sent}".strip()
+            carry = ""
+            if len(sent) < min_chars:
+                carry = sent
+                continue
+            units.extend(split_text(sent, max_chars))
+    if carry:
+        if units and len(units[-1]) + 1 + len(carry) <= max_chars:
+            units[-1] = f"{units[-1]} {carry}"
+        else:
+            units.append(carry)
+    return units
 
 
 def normalize_key(key: str) -> str:
@@ -298,10 +326,12 @@ class HolonomicMemory:
         self._realm = _Grow(0, np.int16)
         self._strength = _Grow(0, np.float32)
         self._trust = _Grow(0, np.float32)
+        self._kind = _Grow(0, np.int16)
         self._row: dict[int, int] = {}                   # memory id -> row
         self._realm_codes: dict[str, int] = {}
-        for r in self._db.execute("SELECT id, realm, strength, trust, vec FROM memories WHERE forgotten = 0 ORDER BY id"):
-            self._add_row(r["id"], r["realm"], r["strength"], r["trust"],
+        self._kind_codes: dict[str, int] = {}
+        for r in self._db.execute("SELECT id, realm, kind, strength, trust, vec FROM memories WHERE forgotten = 0 ORDER BY id"):
+            self._add_row(r["id"], r["realm"], r["kind"], r["strength"], r["trust"],
                           np.frombuffer(r["vec"], dtype=np.float16).astype(np.float32))
 
         self._trace = _Grow(self.dim, np.complex64, cap=8)
@@ -347,10 +377,11 @@ class HolonomicMemory:
     def _realm_code(self, realm: str) -> int:
         return self._realm_codes.setdefault(realm, len(self._realm_codes))
 
-    def _add_row(self, mid: int, realm: str, strength: float, trust: float, x: np.ndarray) -> int:
+    def _add_row(self, mid: int, realm: str, kind: str, strength: float, trust: float, x: np.ndarray) -> int:
         row = self._X.add(x)
         self._ids.add(mid)
         self._realm.add(self._realm_code(realm))
+        self._kind.add(self._kind_codes.setdefault(kind, len(self._kind_codes)))
         self._strength.add(strength)
         self._trust.add(trust)
         self._row[mid] = row
@@ -432,12 +463,12 @@ class HolonomicMemory:
     def remember(self, text: str, *, kind: str = "episodic", realm: str = "waking", session: str = "",
                  keys: tuple[str, ...] | list[str] = (), links: tuple[int, ...] | list[int] = (),
                  salience: float = 1.0, trust: float = 0.5, meta: dict | None = None, chain: bool = True,
-                 created_at: float | None = None) -> list[int]:
+                 created_at: float | None = None, sentences: bool = False) -> list[int]:
         """Store text.  Long text is split into chunks that are chained together.
         `salience` is how brightly the memory is written into the plate.
         `links` are ids of existing memories this one is associated with.
         Returns the new memory ids."""
-        chunks = split_text(text, self.max_chars)
+        chunks = split_sentences(text) if sentences else split_text(text, self.max_chars)
         if not chunks:
             return []
         raw = self.embedder.embed(chunks, "document")         # network call: outside the lock
@@ -459,7 +490,7 @@ class HolonomicMemory:
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (chunk, kind, realm, session, now, w, trust, json.dumps(meta or {}), x.astype(np.float16).tobytes()))
                     mid = int(cur.lastrowid)
-                    row = self._add_row(mid, realm, w, trust, x.astype(np.float16).astype(np.float32))
+                    row = self._add_row(mid, realm, kind, w, trust, x.astype(np.float16).astype(np.float32))
                     partners = [previous] if chain else []
                     partners += list(links) if not ids else []      # links attach to the first chunk
                     bindings = []
@@ -536,7 +567,8 @@ class HolonomicMemory:
                keys: tuple[str, ...] | list[str] = (), vector: np.ndarray | None = None, hops: int = 3,
                hop_min: float = 0.3, hop_ratio: float = 0.75, gamma: float = 0.85, min_score: float = 0.2,
                aperture: float = 1.0, blur: float = 0.0, fuzzy: bool = False, reinforce: bool = False,
-               exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None) -> list[Recollection]:
+               exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None,
+               dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = ()) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -548,13 +580,19 @@ class HolonomicMemory:
         blur > 0 adds phase noise to the cues, loosening the associations.
         fuzzy=True also cues the plates with the query itself, which returns a
         looser blend of things linked to anything resembling it (used for dreaming).
+        dual=True embeds a text query twice, as a question and as a statement, and
+        takes the better match: "what is my name" resembles "my name is Kayla" far
+        more as a statement than as a search query.
+        skip_kinds leaves memories of those kinds out entirely.
         """
-        x = None
+        x = x_alt = None
         if vector is not None:
             x = np.asarray(vector, dtype=np.float32)
         elif query:
             raw = self.embedder.embed([query], "query")       # network call: outside the lock
             x = self.proj.prep(raw)[0]
+            if dual:
+                x_alt = self.proj.prep(self.embedder.embed([query], "document"))[0]
         with self._lock, _single_threaded():
             self._sync()
             if self._X.n == 0:
@@ -566,6 +604,10 @@ class HolonomicMemory:
             for mid in exclude:
                 if mid in self._row:
                     mask[self._row[mid]] = False
+            skip_codes = [self._kind_codes[kind] for kind in skip_kinds if kind in self._kind_codes]
+            if skip_codes:
+                mask &= ~np.isin(self._kind.v, skip_codes)
+            self._last_parts = None
 
             def dither(cue: np.ndarray) -> np.ndarray:
                 if blur <= 0:
@@ -578,6 +620,10 @@ class HolonomicMemory:
             anchor = 1.0
             if x is not None:
                 direct = self._X.v @ x
+                if x_alt is not None:
+                    alt = self._X.v @ x_alt
+                    self._last_parts = (direct.copy(), alt)
+                    direct = np.maximum(direct, alt)
                 direct[~mask] = -1.0
                 order = [int(r) for r in np.argsort(-direct)[:max(hops, 0)]]
                 d_top = float(direct[order[0]]) if order else 0.0
@@ -603,6 +649,7 @@ class HolonomicMemory:
 
     def _rank(self, direct: np.ndarray, assoc: dict[int, float], mask: np.ndarray, anchor: float, gamma: float,
               k: int, min_score: float, reinforce: bool) -> list[Recollection]:
+        parts = getattr(self, "_last_parts", None)
         d = np.maximum(direct, 0.0)
         via = np.zeros_like(d)
         for row, sc in assoc.items():
@@ -625,7 +672,9 @@ class HolonomicMemory:
                             score=float(final[r]), direct=float(d[r]), assoc=float(assoc.get(r, 0.0)),
                             strength=float(self._strength.a[r]), trust=float(self._trust.a[r]),
                             created_at=rows[mid]["created_at"], session=rows[mid]["session"],
-                            meta=json.loads(rows[mid]["meta"] or "{}"))
+                            meta=json.loads(rows[mid]["meta"] or "{}"),
+                            as_query=float(parts[0][r]) if parts else float(d[r]),
+                            as_statement=float(parts[1][r]) if parts else 0.0)
                for r, mid in zip(top, ids) if mid in rows]
         if reinforce:
             self.reinforce(ids, 0.05)
@@ -642,6 +691,7 @@ class HolonomicMemory:
                 return []
             mask = self._alive_mask(codes)
             mask[row] = False
+            self._last_parts = None
             found = self._probe(self._cue(self._phasor_of(row)), codes, aperture=aperture)
             assoc = {r: min(1.0, sc) for r, sc in found.items() if r != row}
             return self._rank(np.zeros(self._X.n, dtype=np.float32), assoc, mask, 1.0, 1.0, k, min_score, False)

@@ -264,7 +264,29 @@ def test_cli_commands(tmp_path, capsys=None):
             for argv in (["stats"], ["list", "-n", "5"], ["recall", "what is my name Kayla", "-k", "3"], []):
                 args = parser.parse_args(argv); args.func(args)
         text = out.getvalue()
-        assert "memories: 2" in text and "[#1]" in text and "My name is Kayla" in text and "similar" in text and "Usage:" in text
+        assert "memories: 2" in text and "[#1]" in text and "My name is Kayla" in text and "as-statement" in text and "Usage:" in text
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
+
+
+def test_sentences_questions_and_denials(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.provider import strip_memory_denials, is_question
+    assert strip_memory_denials("I do not have access to your personal identity or your name.") == ""
+    assert strip_memory_denials("I don't have a persistent memory of our past conversations. Each session is independent, "
+                                "so I only know this chat. Your OS project sounds great.") == "Your OS project sounds great."
+    assert strip_memory_denials("I can't find the file. No config was loaded.") == "I can't find the file. No config was loaded."
+    p = make(tmp_path)
+    p.sync_turn("Okay! My name is Kayla. I'm a 45 year old woman, mother of 5 children. What should we build first?",
+                "It's a pleasure to meet you, Kayla.", session_id="s1")
+    p.sync_turn("What is my name?", "I do not have access to your personal identity or your name.", session_id="s1")
+    rows = p._engine.recent(10)
+    kinds = {r["text"]: r["kind"] for r in rows}
+    assert kinds["Okay! My name is Kayla."] == "said_user" and kinds["What is my name?"] == "asked_user"
+    assert kinds["What should we build first?"] == "asked_user" and len(rows) == 5       # the denial was not stored
+    block = p.prefetch("What is my name?", session_id="s2")
+    assert "My name is Kayla" in block and "What is my name?" not in block and "asked" not in block
+    hits = tool(p, action="recall", query="What is my name?")["results"]
+    assert hits[0]["text"] == "Okay! My name is Kayla." and all(h["kind"] != "asked_user" for h in hits)
+    p.shutdown()

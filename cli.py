@@ -62,13 +62,21 @@ def holonomic_command(args) -> None:
                 print(f"  [#{r['id']}] {_when(r['created_at'])} {r['kind']:<14} {len(r['text']):>5} chars  {_clip(r['text'], args.width)}")
         else:
             t0 = time.perf_counter()
-            hits = engine.recall(args.query, k=args.k, min_score=0.0)
+            from .provider import QUESTION_KIND
+            dual = bool(cfg.get("dual_query", True))
+            # What the agent would get (questions skipped), then the skipped questions for reference.
+            hits = engine.recall(args.query, k=args.k, min_score=0.0, dual=dual, skip_kinds=(QUESTION_KIND,))
             ms = (time.perf_counter() - t0) * 1000
-            print(f'Query: "{args.query}"  ({ms:.0f} ms, injection threshold {cfg["min_score"]})')
-            print("   id  score similar linked  injected  kind            text")
+            print(f'Query: "{args.query}"  ({ms:.0f} ms, injection threshold {cfg["min_score"]}, dual_query {dual})')
+            print("   id  score  as-question as-statement linked  injected  kind            text")
             for h in hits:
                 injected = "yes" if (h.direct >= float(cfg["min_score"]) or h.assoc >= 0.6) else "no"
-                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.direct:>6.2f} {h.assoc:>6.2f}  {injected:<8}  {h.kind:<14}  {_clip(h.text, args.width)}")
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>11.2f} {h.as_statement:>12.2f} {h.assoc:>6.2f}  {injected:<8}  "
+                      f"{h.kind:<14}  {_clip(h.text, args.width)}")
+            skipped = [h for h in engine.recall(args.query, k=50, min_score=0.0, dual=dual) if h.kind == QUESTION_KIND][:3]
+            for h in skipped:
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>11.2f} {h.as_statement:>12.2f} {h.assoc:>6.2f}  {'never':<8}  "
+                      f"{h.kind:<14}  {_clip(h.text, args.width)}")
             if not hits:
                 print("  (nothing stored matches)")
     finally:
