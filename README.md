@@ -185,6 +185,10 @@ agent has been idle for a long stretch, or by hand, and has four steps, each of 
    into a dream. The agent then rereads it awake, notes what it makes of it, and records a connection
    only if a recent and an older memory really bear on each other.
 
+A sleep has one dream, plus one more for every forty memories since the last sleep, up to three. Each
+dream draws its starting memories across all recent conversations, preferring ones not yet drawn from,
+so different days run together; a later dream starts from memories the earlier ones did not use.
+
 Dreams and what was made of them live in their own realm. Factual recall never reads it, and by default
 a dream strengthens nothing, so it does not bring faded memories back to the surface. The agent can still
 recall its dreams and talk about them: the latest one is in its system prompt for a few days, dreams are
@@ -217,6 +221,9 @@ hermes holonomic recall "..." --deep
 | `dream_enabled` | `true` | Dream during sleep |
 | `dream_model`, `dream_host` | the reflection model and server | Model that dreams |
 | `dream_temperature` | `1.0` | Sampling temperature for the dream itself |
+| `dream_max_per_sleep` | `3` | Most dreams in one sleep |
+| `dream_memories_per_extra` | `40` | One more dream for every this many memories since the last sleep |
+| `dream_min_words`, `dream_max_words` | `100`, `180` | Length of each dream |
 | `dream_reinforce` | `false` | Let a dream strengthen the old memories it touches |
 
 ## Inspecting the store

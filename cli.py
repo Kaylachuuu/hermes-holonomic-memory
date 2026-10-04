@@ -216,9 +216,9 @@ def _sleep(engine, cfg, args) -> None:
     d = report["dream"]
     if d and d.get("skipped"):
         print(f"  DREAM     skipped: {d['skipped']}")
-    elif d:
+    for n, d in enumerate(report.get("dreams") or [], 1):
         faded = sum(1 for f in d["fragments"] if f["faded"])
-        print(f"  DREAM     from {len(d['fragments'])} fragments ({sum(1 for f in d['fragments'] if f['age'] == 'OLDER')} older, {faded} faded)")
+        print(f"  DREAM {n}   from {len(d['fragments'])} fragments ({sum(1 for f in d['fragments'] if f['age'] == 'OLDER')} older, {faded} faded)")
         print(f"            {d['text']}")
         print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
         for c in d["connections"]:

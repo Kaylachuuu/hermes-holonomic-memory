@@ -275,3 +275,27 @@ def test_replies_cut_short_are_asked_again_and_never_stored_half(tmp_path):
     r = reflect_once(m, {}, llm=lambda s, u: out, dry_run=True)
     assert [f["text"] for f in r["proposed"]["fact"]] == ["Kayla started an operating system twenty years ago."]
     assert r["cut_off"] == ["Kayla's original vision was to create a"] and r["profiles"]["user"] == "Kayla started an operating system twenty years ago."
+
+
+def test_a_busy_stretch_gets_several_dreams_each_drawn_across_conversations(tmp_path):
+    from holonomic.sleep import sleep_once, dreams_tonight, dreams, gather_fragments
+    m = store(tmp_path)
+    for c in range(9):                                                   # nine conversations, 45 memories
+        talk(m, f"s{c}", NOW - DAY + c * 100, [(k, f"{t} in conversation number{c}") for k, t in (OS if c % 2 else GARDEN)])
+    assert dreams_tonight(m, {}, NOW) == 2 and dreams_tonight(m, {"dream_max_per_sleep": 1}, NOW) == 1
+    assert dreams_tonight(m, {"dream_memories_per_extra": 10}, NOW) == 3                # capped at the maximum
+    seeds = [f for f in gather_fragments(m, {}, random.Random(5), NOW) if f["age"] == "RECENT"]
+    assert len({m.get(f["id"])["session"] for f in seeds}) >= 3                          # melded across conversations
+    long_dream = " ".join(["The garden and the operating system grow into one another while the herbs boot in rows."] * 16)
+    assert len(long_dream) > 1300
+    prompts = []
+    def llm(system, user, step):
+        prompts.append((step, user))
+        return json.dumps({"dream": long_dream}) if step.startswith("dream") else json.dumps({"thoughts": "Odd, and long.", "connections": []})
+    report = sleep_once(m, {"dream_max_words": 260}, llm=llm, steps=["dream"], rng=random.Random(5), now=NOW)
+    assert [s for s, _ in prompts] == ["dream", "wake", "dream 2", "wake 2"] and "100 to 260 words" in prompts[0][1]
+    first, second = report["dreams"]
+    assert not {f["id"] for f in first["fragments"] if f["age"] == "RECENT"} & {f["id"] for f in second["fragments"] if f["age"] == "RECENT"}
+    journal = dreams(m, 5)
+    assert len(journal) == 2 and all(d["text"] == long_dream for d in journal)           # stored whole, not in pieces
+    assert m.stats()["by_realm"]["dream"] == 2 and m.kv_get("dream:latest") == str(second["id"])

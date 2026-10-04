@@ -50,6 +50,12 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_host": "",                 # empty = the reflection server
     "dream_temperature": 1.0,
     "dream_seeds": 4,                 # recent memories a dream starts from
+    # A busy stretch gets more dreams, not one longer dream: asked to fit many fragments into one, a
+    # model stops blending them and starts listing them.  Each dream draws on all recent conversations.
+    "dream_max_per_sleep": 3,
+    "dream_memories_per_extra": 40,   # one more dream for every this many memories since the last sleep
+    "dream_min_words": 100,
+    "dream_max_words": 180,
     "dream_days": 3,                  # how far back "recent" reaches
     "dream_in_prompt_days": 3,        # how long the latest dream stays in view
     # Whether a dream strengthens the old memories it touches.  Off: dreams stay in their own realm
@@ -209,7 +215,7 @@ def consolidate(engine, cfg: Dict[str, Any], call: Callable[..., str], report: D
         derived = [m["id"] for m in engine.recent(200) if m["kind"] in DERIVED_KINDS
                    and set((engine.get(m["id"]) or {}).get("meta", {}).get("sources", [])) & ids][:4]
         links = list(dict.fromkeys([memories[0]["id"], memories[-1]["id"]] + derived))
-        new = engine.remember(summary, kind=EPISODE, session="episodes", chain=True, links=links,
+        new = engine.remember(summary, kind=EPISODE, session="episodes", chain=True, links=links, whole=True,
                               keys=key_fn(summary) if key_fn else [], trust=0.7, salience=1.2,
                               created_at=memories[-1]["created_at"], meta={"session": s["session"], "sources": sorted(ids)[:40]})
         entry["id"] = new[0] if new else None
@@ -242,22 +248,37 @@ def fade(engine, cfg: Dict[str, Any], report: Dict[str, Any], *, dry_run: bool, 
 
 # ---------------------------------------------------------------------- dream
 
-def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optional[float] = None) -> List[dict]:
-    """Recent memories to dream from, each with older memories it echoes."""
+def dreams_tonight(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> int:
+    """How many dreams this sleep gets: one, plus one for each stretch of new memories, up to the maximum."""
+    sc = sleep_config(cfg)
+    last = float(engine.kv_get("sleep:last_run", "0") or 0)
+    new = len(engine.recent(500, since=last)) if last else len(engine.recent(500))
+    return max(1, min(int(sc["dream_max_per_sleep"]), 1 + new // max(int(sc["dream_memories_per_extra"]), 1)))
+
+
+def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optional[float] = None,
+                     exclude: Optional[set] = None) -> List[dict]:
+    """Recent memories to dream from, each with older memories it echoes.  Seeds are drawn across
+    conversations, so different days run together; `exclude` keeps a second dream off the first one's ground."""
     sc = sleep_config(cfg)
     now = time.time() if now is None else now
     since = now - float(sc["dream_days"]) * 86400
-    recent = [m for m in engine.recent(120, since=since) if m["kind"] not in (DREAM, DREAM_INSIGHT, "asked_user")
-              and len(m["text"]) >= 25]
+    exclude = exclude or set()
+    recent = [m for m in engine.recent(300, since=since) if m["kind"] not in (DREAM, DREAM_INSIGHT, "asked_user")
+              and len(m["text"]) >= 25 and m["id"] not in exclude]
     if len(recent) < 2:
         return []
     # Favour what was strongly written and what the agent or the user actually stated.
     weights = [m["strength"] * (1.5 if m["kind"] in ("said_user", "fact", EPISODE) else 1.0) for m in recent]
     seeds: List[dict] = []
     pool = list(zip(recent, weights))
+    used_sessions: set = set()
     while pool and len(seeds) < int(sc["dream_seeds"]):
-        pick = rng.choices(range(len(pool)), weights=[w for _, w in pool])[0]
-        seeds.append(pool.pop(pick)[0])
+        # A conversation already drawn from is less likely to be drawn from again.
+        pick = rng.choices(range(len(pool)), weights=[w * (0.3 if m["session"] in used_sessions else 1.0) for m, w in pool])[0]
+        seed = pool.pop(pick)[0]
+        seeds.append(seed)
+        used_sessions.add(seed["session"])
     fragments, seen = [], set()
     for seed in seeds:
         if seed["id"] in seen:
@@ -275,26 +296,44 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
 
 def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
           rng: Optional[random.Random] = None, now: Optional[float] = None, user_profile: str = "") -> None:
-    sc = sleep_config(cfg)
+    """The night's dreams.  report["dreams"] lists them; report["dream"] is the first."""
     rng = rng or random.Random()
-    fragments = gather_fragments(engine, cfg, rng, now)
+    now = time.time() if now is None else now
+    report["dreams"] = []
+    used: set = set()
+    for n in range(dreams_tonight(engine, cfg, now)):
+        one = _one_dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now + n, user_profile=user_profile,
+                         exclude=used, label="" if n == 0 else f" {n + 1}")
+        if one is None:
+            break
+        report["dreams"].append(one)
+        used |= {f["id"] for f in one["fragments"] if f["age"] == "RECENT"}
+    report["dream"] = report["dreams"][0] if report["dreams"] else {"skipped": "not enough recent memories to dream from"}
+
+
+def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
+               rng: random.Random, now: float, user_profile: str, exclude: set, label: str) -> Optional[dict]:
+    sc = sleep_config(cfg)
+    fragments = gather_fragments(engine, cfg, rng, now, exclude)
     if len(fragments) < 2:
-        report["dream"] = {"skipped": "not enough recent memories to dream from"}
-        return
+        return None
+    low, high = int(sc["dream_min_words"]), max(int(sc["dream_max_words"]), int(sc["dream_min_words"]) + 20)
+    limit = max(1800, high * 9)
     listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
     who = engine.profile("user") or user_profile      # in a dry run the profile from this cycle is not stored yet
     try:
-        text = _ask_text(call, "dream", "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
-                         _DREAM + "\n\nFRAGMENTS:\n" + listing, _DREAM_SCHEMA, 700, "dream", float(sc["dream_temperature"]))
+        text = _ask_text(call, "dream" + label, "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
+                         _DREAM.replace("100 to 180 words", f"{low} to {high} words") + "\n\nFRAGMENTS:\n" + listing,
+                         _DREAM_SCHEMA, max(700, high * 4), "dream", float(sc["dream_temperature"]))
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
         numbered = "\n".join(f"[{f['id']}] {f['age']} ({_voice(f['kind'])}): {' '.join(f['text'].split())}" for f in fragments)
         wake_prompt = (_WAKE.format(rules=_reflect._RULES) + (f"\n\nWHAT YOU KNOW ABOUT THE USER:\n{who}" if who else "")
                        + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}")
-        woke = _parse(call("wake", _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
+        woke = _parse(call("wake" + label, _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
     except ReflectionError as exc:
-        report["errors"].append(f"dream: {exc}")
-        return
+        report["errors"].append(f"dream{label}: {exc}")
+        return None
     recent_ids = {f["id"] for f in fragments if f["age"] == "RECENT"}
     older_ids = {f["id"] for f in fragments if f["age"] == "OLDER"}
     thoughts = " ".join(str(woke.get("thoughts") or "").split())[:500]
@@ -307,18 +346,17 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
             thoughts = trim_to_sentence(thoughts)
     connections = [c for c in _reflect._clean_items(woke.get("connections"), recent_ids | older_ids, 2)
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
-    report["dream"] = {"text": text[:1800], "thoughts": thoughts, "connections": connections,
-                       "fragments": [{"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])}
-                                     for f in fragments]}
+    result = {"text": text[:limit], "thoughts": thoughts, "connections": connections,
+              "fragments": [{"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])}
+                            for f in fragments]}
     if dry_run:
-        return
-    now = time.time() if now is None else now
+        return result
     # Everything a dream produces is stored in the dream realm.  Its links to waking memories are
     # written on dream plates, which waking recall never reads.
-    ids = engine.remember(text[:1800], kind=DREAM, realm=DREAM_REALM, session="dreams", chain=True,
+    ids = engine.remember(text[:limit], kind=DREAM, realm=DREAM_REALM, session="dreams", chain=True, whole=True,
                           links=sorted(recent_ids | older_ids)[:6], salience=1.0, trust=0.5, created_at=now,
                           meta={"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids)})
-    report["dream"]["id"] = ids[0] if ids else None
+    result["id"] = ids[0] if ids else None
     for c in connections:
         engine.remember(c["text"], kind=DREAM_INSIGHT, realm=DREAM_REALM, session="dreams", chain=False,
                         links=(ids[:1] + c["sources"]), trust=0.4, salience=1.0, created_at=now, meta={"sources": c["sources"]})
@@ -327,6 +365,7 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
     if ids:
         engine.kv_set("dream:latest", str(ids[0]))
         engine.kv_set("dream:latest_at", str(now))
+    return result
 
 
 def latest_dream(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> Optional[dict]:

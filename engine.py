@@ -512,12 +512,13 @@ class HolonomicMemory:
     def remember(self, text: str, *, kind: str = "episodic", realm: str = "waking", session: str = "",
                  keys: tuple[str, ...] | list[str] = (), links: tuple[int, ...] | list[int] = (),
                  salience: float = 1.0, trust: float = 0.5, meta: dict | None = None, chain: bool = True,
-                 created_at: float | None = None, sentences: bool = False) -> list[int]:
+                 created_at: float | None = None, sentences: bool = False, whole: bool = False) -> list[int]:
         """Store text.  Long text is split into chunks that are chained together.
         `salience` is how brightly the memory is written into the plate.
         `links` are ids of existing memories this one is associated with.
         Returns the new memory ids."""
-        chunks = split_sentences(text) if sentences else split_text(text, self.max_chars)
+        # whole=True keeps the text as one memory however long it is (a dream must not be stored in pieces)
+        chunks = [text.strip()] if whole and text.strip() else split_sentences(text) if sentences else split_text(text, self.max_chars)
         if not chunks:
             return []
         raw = self.embedder.embed(chunks, "document")         # network call: outside the lock
