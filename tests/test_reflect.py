@@ -385,3 +385,19 @@ def test_quotes_are_kept_only_around_the_users_own_words(tmp_path):
     assert report["proposed"]["fact"][0]["text"] == "Kayla's goal is a meta-platform built as an operating system in x86 assembly."
     assert "'meta-platform'" in report["proposed"]["self_note"][0]["text"]            # her own words stay quoted in her own note
     assert [c["verdict"] for c in report["checked"]] == ["unquote"]
+
+
+def test_facts_are_checked_against_the_users_lines_only(tmp_path):
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    out = answer(ids, user_facts=[{"text": "Kayla is writing an operating system, expanding its functionality.", "sources": [ids["os"], ids["hi"]]}],
+                 self_notes=[{"text": "I greeted Kayla warmly when we first met.", "sources": [ids["hi"]]}])
+    seen = {}
+    def llm(system, user, step):
+        seen[step] = user
+        return out
+    report = reflect_once(m, {}, llm=llm, dry_run=True)
+    fact_block = seen["check"].split("STATEMENT 1")[1].split("STATEMENT 2")[0]
+    assert "USER: The project I am most excited about" in fact_block and "ASSISTANT:" not in fact_block
+    assert "ASSISTANT: It is a pleasure" in seen["check"].split("STATEMENT 2")[1]        # her own note keeps her own line
+    assert report["proposed"]["fact"][0]["sources"] == [ids["os"]]

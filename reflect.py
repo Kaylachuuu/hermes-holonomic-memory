@@ -157,8 +157,9 @@ Check each statement against its own lines and nothing else.
 
 For each statement give a verdict:
 - "keep": every part of it is supported by its lines, and it is attributed to the right person.
-- "rewrite": part of it is supported. Give the corrected sentence in "text", keeping only what the lines support, \
-with the same subject and the same grammatical person.
+- "rewrite": part of it is supported, or it is vaguer than its lines. Give the corrected sentence in "text", \
+keeping only what the lines support and restoring the specific detail they give, with the same subject and the \
+same grammatical person.
 - "drop": its lines do not support it; or it is a fact about the user that rests only on ASSISTANT lines; or it is \
 about the conversation itself and not about the person; or, for a self note, it is really about the user.
 
@@ -422,7 +423,11 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     not_assistant = {m["id"] for m in batch if m["kind"] != "said_assistant"}
     facts = _clean_items(data.get("user_facts"), valid, 10)
     report["dropped_assistant_only"] = [f["text"] for f in facts if not set(f["sources"]) & not_assistant]
-    facts = [f for f in facts if set(f["sources"]) & not_assistant]
+    # ...and from then on it cites only those lines.  The checker therefore judges it against what
+    # the user said, not against the assistant's paraphrase of it ("expanding its functionality"
+    # for "three choices where the original had two").
+    facts = [dict(f, sources=[s for s in f["sources"] if s in not_assistant])
+             for f in facts if set(f["sources"]) & not_assistant]
     groups = [(FACT, facts)]
     if depth > 1:
         groups += [(SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4)),
