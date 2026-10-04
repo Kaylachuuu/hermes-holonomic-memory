@@ -287,11 +287,39 @@ def build_prompt(memories: List[dict], profiles: Optional[Dict[str, str]] = None
     return _PROPOSE.format(rules=_RULES, facts=_FACTS_RULE) + f"\n\nFOUNDATION:\n{_foundation(foundation)}\n\n" + tail
 
 
-def build_check_prompt(items: List[dict], by_id: Dict[int, dict]) -> str:
+def unsupported_names(statement: str, cited_text: str, known_text: str = "") -> List[str]:
+    """Names and numbers in a statement that appear nowhere in the lines it cites.
+
+    From a real run: the user said she was open to suggestions for another language,
+    the assistant suggested Zig and Rust, and the stored fact read "Kayla is open to
+    ... Zig or Rust", citing only the user's line.  A model checking the statement
+    missed it; a word list does not.  `known_text` holds names that are established
+    elsewhere (the user's own name, say) and should not be flagged."""
+    have = set(re.findall(r"[a-z0-9+#]+", (cited_text + " " + known_text).lower()))
+    out: List[str] = []
+    for match in re.finditer(r"\b(?:[A-Z][A-Za-z0-9+#]*|\d[\d.,]*[A-Za-z]*)\b", statement):
+        word = match.group(0)
+        start_of_sentence = match.start() == 0 or statement[:match.start()].rstrip().endswith((".", "!", "?"))
+        if start_of_sentence and not word.isupper() and not any(ch.isdigit() for ch in word):
+            continue                                       # capitalised only because it opens the sentence
+        parts = re.findall(r"[a-z0-9+#]+", word.lower())
+        if parts and not all(p in have for p in parts) and word not in out:
+            out.append(word)
+    return out
+
+
+def build_check_prompt(items: List[dict], by_id: Dict[int, dict], known_text: str = "") -> str:
     blocks = []
     for n, item in enumerate(items, 1):
-        cited = "\n".join("    " + _line(by_id[s]) for s in item["sources"] if s in by_id)
-        blocks.append(f"STATEMENT {n} ({_KIND_TITLE[item['kind']]}): {item['text']}\n  cites:\n{cited}")
+        lines = [by_id[s] for s in item["sources"] if s in by_id]
+        cited = "\n".join("    " + _line(m) for m in lines)
+        block = f"STATEMENT {n} ({_KIND_TITLE[item['kind']]}): {item['text']}\n  cites:\n{cited}"
+        if item["kind"] == FACT:
+            missing = unsupported_names(item["text"], " ".join(m["text"] for m in lines), known_text)
+            if missing:
+                block += ("\n  note: these words in the statement appear nowhere in its lines: " + ", ".join(missing)
+                          + ". Unless the lines say the same thing in other words, rewrite the statement without them.")
+        blocks.append(block)
     return _CHECK.format(rules=_RULES) + "\n\n" + "\n\n".join(blocks)
 
 
@@ -437,7 +465,10 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
 
     # ---- step 2: check each item against only the lines it cites
     if depth >= 3 and items:
-        verdicts = _parse(call("check", _SYSTEM, build_check_prompt(items, by_id), _CHECK_SCHEMA, budget)).get("verdicts")
+        # Names already established about the user (their own name above all) are not news to the checker.
+        known = " ".join([current["user"]] + [f["text"] for f in existing]
+                         + [m["text"] for m in batch if m["kind"] != "said_assistant"])
+        verdicts = _parse(call("check", _SYSTEM, build_check_prompt(items, by_id, known), _CHECK_SCHEMA, budget)).get("verdicts")
         decided: Dict[int, dict] = {}
         for v in verdicts if isinstance(verdicts, list) else []:
             if isinstance(v, dict) and isinstance(v.get("item"), (int, float)) and 1 <= int(v["item"]) <= len(items):

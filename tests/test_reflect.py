@@ -401,3 +401,19 @@ def test_facts_are_checked_against_the_users_lines_only(tmp_path):
     assert "USER: The project I am most excited about" in fact_block and "ASSISTANT:" not in fact_block
     assert "ASSISTANT: It is a pleasure" in seen["check"].split("STATEMENT 2")[1]        # her own note keeps her own line
     assert report["proposed"]["fact"][0]["sources"] == [ids["os"]]
+
+
+def test_checker_is_told_which_names_the_cited_lines_never_mention(tmp_path):
+    from holonomic.reflect import unsupported_names, build_check_prompt, FACT, SELF_NOTE
+    line = ("If there's a way to use C/C++ that doesn't include a bunch of abstraction or unnecessary extra bloat, that could be "
+            "an option, or if there's some other language that might be a better fit I am open to suggestions.")
+    stmt = "Kayla is open to using C, C++, or other languages like Zig or Rust for her next project."
+    assert unsupported_names(stmt, line, known_text="Hello! My name is Kayla.") == ["Zig", "Rust"]
+    assert unsupported_names(stmt, line) == ["Zig", "Rust"]                      # "Kayla" opens the sentence
+    assert unsupported_names("She reduced CHOICE.COM from 5KB to 52 bytes.", "my CHOICE.COM was 52 bytes, the original 5kb") == []
+    assert unsupported_names("It shrank to 48 bytes.", "my version was 52 bytes") == ["48"]
+    by_id = {40: {"id": 40, "kind": "said_user", "text": line}, 41: {"id": 41, "kind": "said_assistant", "text": "Zig or Rust would suit you."}}
+    prompt = build_check_prompt([{"kind": FACT, "text": stmt, "sources": [40]},
+                                 {"kind": SELF_NOTE, "text": "I suggested Zig and Rust to her.", "sources": [41]}], by_id, "Kayla")
+    first, second = prompt.split("STATEMENT 2")
+    assert "appear nowhere in its lines: Zig, Rust" in first and "note:" not in second
