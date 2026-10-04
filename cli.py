@@ -76,18 +76,25 @@ def holonomic_command(args) -> None:
         if action == "sleep":
             _sleep(engine, cfg, args)
         elif action == "dreamtalk":
-            from .provider import is_dream_talk, mark_dream_talk
+            from .provider import asks_about_dreams, is_dream_talk, mark_dream_talk
+            from .sleep import RAW_KINDS
             found = []
-            for m in reversed(engine.recent(2000)):
-                if m["kind"] in ("said_user", "said_assistant") and is_dream_talk(
-                        engine, m["id"], m["text"], "user" if m["kind"] == "said_user" else "assistant", cfg):
-                    found.append(m)
+            for s in engine.sessions(RAW_KINDS):
+                asked = False                           # was the user's last message a question about her dreams?
+                for m in engine.session_memories(s["session"], kinds=RAW_KINDS, limit=5000):
+                    if m["kind"] in ("said_user", "asked_user"):
+                        asked = asks_about_dreams(engine, m["text"])
+                    if m["kind"] == "said_assistant" and asked:
+                        found.append(dict(m, force=True))
+                    elif m["kind"] in ("said_user", "said_assistant") and is_dream_talk(
+                            engine, m["id"], m["text"], "user" if m["kind"] == "said_user" else "assistant", cfg):
+                        found.append(m)
             print(f"{len(found)} piece(s) of conversation look like talk about a dream"
                   + (":" if found else ". Nothing to label."))
             for m in found:
                 print(f"  [#{m['id']}] {m['kind']:<14} {_clip(m['text'], args.width)}")
                 if args.apply:
-                    mark_dream_talk(engine, m["id"], m["text"], m["kind"], cfg)
+                    mark_dream_talk(engine, m["id"], m["text"], m["kind"], cfg, force=bool(m.get("force")))
             if found:
                 print("Labelled as dream talk." if args.apply else "Nothing changed. Run again with --apply to label them.")
         elif action == "dreams":

@@ -322,7 +322,10 @@ def test_talk_about_a_dream_is_labelled_and_cannot_become_fact(tmp_path):
     p.sync_turn("Kneeling in the garden with herbs growing in rows of assembly, each leaf a line of code. My dream job would be writing kernels all day.",
                 "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code, that part stayed with me.",
                 session_id="s1")
+    # a real reply never used the word at all; it is dream talk because of what it answers
+    p.sync_turn("Did you have any dreams?", "I did, actually. They were quite vivid.\n\nOne involved a hollowed-out hall where the floor was a sheet of glass over flowing code.", session_id="s2")
     kinds = {r["text"][:40]: r["kind"] for r in e.recent(30)}
+    assert kinds["One involved a hollowed-out hall where t"] == DREAM_TALK_ASSISTANT and kinds["I did, actually. They were quite vivid."] == DREAM_TALK_ASSISTANT
     assert kinds["I did. In my dream I was kneeling in a g"] == DREAM_TALK_ASSISTANT              # she says it is a dream
     assert kinds["Separately, the tomato plants you mentio"] == "said_assistant"                  # the real part of the same reply
     assert kinds["Kneeling in the garden with herbs growin"] == DREAM_TALK_USER                   # no dream word: caught by resemblance
@@ -364,6 +367,10 @@ def test_cli_dreamtalk_labels_what_is_already_stored(tmp_path):
     # conversation stored by an older version, with no labels
     old = e.remember("In my dream I was kneeling in a garden of assembly code.", kind="said_assistant", session="s1")[0]
     real = e.remember("The tomato plants need water early tomorrow.", kind="said_assistant", session="s1")[0]
+    e.remember("Did you dream last night?", kind="asked_user", session="s2")
+    answer_id = e.remember("I did, actually. One involved a hall where the floor was a sheet of glass over flowing code.", kind="said_assistant", session="s2")[0]
+    e.remember("What should we cook tonight?", kind="asked_user", session="s2")
+    dinner = e.remember("A tomato and herb pasta would use what the garden has.", kind="said_assistant", session="s2")[0]
     p.shutdown()
     home = tmp_path / "home"
     sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
@@ -379,6 +386,7 @@ def test_cli_dreamtalk_labels_what_is_already_stored(tmp_path):
             return out.getvalue()
         listed = run("dreamtalk")
         assert f"[#{old}]" in listed and f"[#{real}]" not in listed and "Nothing changed" in listed
+        assert f"[#{answer_id}]" in listed and f"[#{dinner}]" not in listed                # the reply to the question, not the next one
         assert "Labelled as dream talk" in run("dreamtalk", "--apply") and "Nothing to label" in run("dreamtalk")
         assert "dreamtalk_assistant" in run("show", str(old))
     finally:

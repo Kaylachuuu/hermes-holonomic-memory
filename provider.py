@@ -209,12 +209,22 @@ def is_dream_talk(engine, memory_id: int, text: str, speaker: str, cfg: Dict[str
         return False
 
 
-def mark_dream_talk(engine, memory_id: int, text: str, kind: str, cfg: Dict[str, Any]) -> Optional[str]:
+def asks_about_dreams(engine, text: str) -> bool:
+    """Did the user just ask about the agent's dreams?  The reply to that is dream talk even when it
+    never uses the word: a real reply began "I did, actually. They were quite vivid" and went on to
+    describe a hall with a glass floor."""
+    try:
+        return bool(_HER_DREAM_RE.search(text or "")) and bool(engine.recent(1, realm=DREAM_REALM, kind=DREAM))
+    except Exception:
+        return False
+
+
+def mark_dream_talk(engine, memory_id: int, text: str, kind: str, cfg: Dict[str, Any], force: bool = False) -> Optional[str]:
     """Relabel a stored piece of conversation if it is dream talk.  Returns the new kind, or None."""
     if kind not in ("said_user", "said_assistant"):
         return None
     speaker = "user" if kind == "said_user" else "assistant"
-    if not is_dream_talk(engine, memory_id, text, speaker, cfg):
+    if not force and not is_dream_talk(engine, memory_id, text, speaker, cfg):
         return None
     new = DREAM_TALK_USER if speaker == "user" else DREAM_TALK_ASSISTANT
     engine.set_kind(memory_id, new)
@@ -500,6 +510,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         from .engine import split_sentences
         user = clean_for_storage(user, max_chars)
         only_questions = False
+        dream_turn = asks_about_dreams(engine, user)
         if user and not is_trivial_prompt(user):
             # One memory per sentence, so each fact is separately findable; the plates
             # chain the sentences back together.  Besides following the previous reply,
@@ -527,7 +538,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                     for mid in engine.remember(part, kind="said_assistant", session=sid, keys=extract_keys(part), salience=0.8):
                         stored = engine.get(mid)
                         if stored:
-                            mark_dream_talk(engine, mid, stored["text"], "said_assistant", self._cfg)
+                            mark_dream_talk(engine, mid, stored["text"], "said_assistant", self._cfg, force=dream_turn)
 
     def _flush_backlog(self) -> None:
         engine = self._engine
