@@ -146,6 +146,20 @@ def test_full_cycle_and_when_it_is_due(tmp_path):
                 "wake": json.dumps({"thoughts": "Mostly odd.", "connections": []})}[step]
     report = sleep_once(m, cfg, llm=llm, rng=random.Random(1), now=NOW)
     assert steps == ["propose", "consolidate", "dream", "wake"] and not report["errors"]
+    # in a dry run the profile written by this cycle's reflection still reaches the waking step
+    m2 = store(tmp_path / "second")
+    talk(m2, "s-old", NOW - 2 * DAY, OS)
+    seen = {}
+    def llm2(system, user, step):
+        seen[step] = user
+        if step in ("propose", "check", "profiles"):
+            return json.dumps({"user_facts": [{"text": "Kayla started an operating system twenty years ago.", "sources": [1]}],
+                               "self_notes": [], "relationship_notes": [], "insights": [], "superseded": [], "verdicts": [],
+                               "user_profile": "Kayla started an operating system in x86 assembly twenty years ago.",
+                               "self_profile": "", "relationship_profile": ""})
+        return llm(system, user, step)
+    sleep_once(m2, cfg, llm=llm2, dry_run=True, rng=random.Random(1), now=NOW)
+    assert "WHAT YOU KNOW ABOUT THE USER:\nKayla started an operating system" in seen["wake"] and m2.profile("user") == ""
     assert len(report["episodes"]) == 1 and report["dream"]["id"]
     assert sleep_due(m, cfg, last_activity=NOW - 7200, now=NOW + 3600) is False             # slept an hour ago
     assert sleep_due(m, cfg, last_activity=NOW - 7200, now=NOW + 13 * 3600) is False        # nothing new since

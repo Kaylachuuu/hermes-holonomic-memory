@@ -94,7 +94,7 @@ _WAKE = """\
 You are an AI assistant, now awake, rereading a dream you just had. Below are the dream and the numbered memory \
 fragments it was made from. RECENT fragments are from the last few days; OLDER ones are from before. Each is marked \
 with whose words it is: things "said to me" are the user's own life and work, not yours. Awake, keep that straight, \
-and call the user by name if you know it.
+and never write "the user": call them by their name, which is in what you know about them below.
 
 Write:
 - "thoughts": one or two plain sentences, first person, on what you make of the dream now that you are awake. No \
@@ -260,7 +260,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
 
 
 def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
-          rng: Optional[random.Random] = None, now: Optional[float] = None) -> None:
+          rng: Optional[random.Random] = None, now: Optional[float] = None, user_profile: str = "") -> None:
     sc = sleep_config(cfg)
     rng = rng or random.Random()
     fragments = gather_fragments(engine, cfg, rng, now)
@@ -268,7 +268,7 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
         report["dream"] = {"skipped": "not enough recent memories to dream from"}
         return
     listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
-    who = engine.profile("user")
+    who = engine.profile("user") or user_profile      # in a dry run the profile from this cycle is not stored yet
     try:
         text = " ".join(str(_parse(call("dream", "You are dreaming. Reply with JSON only.", _DREAM + "\n\nFRAGMENTS:\n" + listing,
                                         _DREAM_SCHEMA, 700, float(sc["dream_temperature"]))).get("dream") or "").split())
@@ -362,7 +362,8 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
         fade(engine, cfg, report, dry_run=dry_run, now=now)
     if "dream" in wanted and sc["dream_enabled"]:
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True)
-        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now)
+        fresh = next((r["profiles"]["user"] for r in reversed(report["reflections"]) if (r.get("profiles") or {}).get("user")), "")
+        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh)
     if not dry_run:
         engine.kv_set("sleep:last_run", str(time.time() if now is None else now))
     return report
