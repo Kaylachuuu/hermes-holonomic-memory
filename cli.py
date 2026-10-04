@@ -3,6 +3,8 @@
     hermes holonomic stats
     hermes holonomic list [-n 20]
     hermes holonomic recall "what is my name" [-k 10]
+    hermes holonomic show 37 40                 full text of memories, and what each is linked to
+    hermes holonomic forget 52 [--yes]          remove memories for good (shows them first; --yes to confirm)
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
@@ -47,8 +49,8 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile"):
-        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] | '
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget"):
+        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | profile [--history]')
         return
     if action == "reflect" and args.reflect_action in ("on", "off"):
@@ -58,7 +60,34 @@ def holonomic_command(args) -> None:
     if engine is None:
         return
     try:
-        if action == "reflect":
+        if action in ("show", "forget"):
+            found = [(mid, engine.get(mid)) for mid in args.ids]
+            for mid, mem in found:
+                if mem is None:
+                    print(f"[#{mid}] no such memory (or already forgotten)")
+                    continue
+                meta = mem.get("meta") or {}
+                print(f"[#{mid}] {mem['kind']}, {_when(mem['created_at'])}, trust {mem['trust']:.2f}, strength {mem['strength']:.2f}"
+                      + (f", SUPERSEDED by #{meta['superseded_by']}" if meta.get("superseded_by") else ""))
+                print(f"    {mem['text']}")
+                if meta.get("sources"):
+                    print(f"    drawn from: {', '.join('#' + str(s) for s in meta['sources'])}")
+                if action == "show":
+                    for h in engine.associates(mid, k=6):
+                        print(f"    linked to [#{h.id}] ({h.kind}, {h.assoc:.2f}) {_clip(h.text, 90)}")
+            if action == "forget":
+                real = [mid for mid, mem in found if mem is not None]
+                if not real:
+                    return
+                if not args.yes:
+                    print(f"Nothing removed. To remove {'this memory' if len(real) == 1 else 'these ' + str(len(real)) + ' memories'} "
+                          f"for good, run the same command with --yes.")
+                    return
+                for mid in real:
+                    engine.forget(mid)
+                print(f"Forgot {', '.join('#' + str(m) for m in real)}. This cannot be undone. "
+                      "Profiles are not changed by this; see `hermes holonomic profile`.")
+        elif action == "reflect":
             _reflect(engine, cfg, args)
         elif action == "profile":
             if args.set:
@@ -207,6 +236,11 @@ def register_cli(subparser) -> None:
     rec.add_argument("query")
     rec.add_argument("-k", type=int, default=10, help="How many results (default 10)")
     rec.add_argument("--width", type=int, default=100, help="Characters of text to show")
+    show = subs.add_parser("show", help="Full text of memories and what each is linked to")
+    show.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
+    fg = subs.add_parser("forget", help="Remove memories for good")
+    fg.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
+    fg.add_argument("--yes", action="store_true", help="Actually remove them (without this, they are only shown)")
     ref = subs.add_parser("reflect", help="Reflection: turn on or off, check, or run once now")
     ref.add_argument("reflect_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")

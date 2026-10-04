@@ -128,7 +128,8 @@ Write:
 {facts}
 - self_notes: what the assistant learned about itself, written in the first person ("I ..."): an opinion or taste \
 of its own that it voiced, something it found interesting, a commitment it made, a mistake or something that went \
-well. Not a log of what it said, and not anything about the user. If there is nothing of that kind, leave it \
+well, or a suggestion or question of its own that the user has not answered yet ("I suggested X; she has not said \
+what she thinks"). Not a log of everything it said, and not anything about the user. If there is nothing of that kind, leave it \
 empty. At most 4.
 - relationship_notes: what matters about the two of them together, written from the assistant's side ("We ..."): \
 shared plans, running jokes, trust, friction, how they work together. At most 3.

@@ -331,3 +331,33 @@ def test_old_store_gains_word_matching_on_open(tmp_path):
     mid = m.remember("A second note about the telescope dome", session="a")[0]
     assert m.forget(mid) and all(h.id != mid for h in m.recall("dome", k=5, min_score=0.0, lexical=0.2))
     m.close()
+
+
+def test_cli_show_and_forget(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io, types
+    p = make(tmp_path)
+    p.sync_turn("My name is Kayla and I build memory systems for fun", "Nice to meet you, Kayla, memory systems are a fine hobby.", session_id="s1")
+    fact = p._engine.remember("Kayla builds memory systems.", kind="fact", session="reflection", chain=False, links=[1], meta={"sources": [1]})[0]
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        real = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *a, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        shown = run("show", str(fact), "999")
+        assert "Kayla builds memory systems." in shown and "drawn from: #1" in shown and "linked to [#1]" in shown and "[#999] no such memory" in shown
+        preview = run("forget", str(fact))
+        assert "Nothing removed" in preview and "Kayla builds memory systems." in preview and "Kayla builds" in run("list")
+        assert f"Forgot #{fact}" in run("forget", str(fact), "--yes")
+        assert "Kayla builds memory systems." not in run("list") and "no such memory" in run("forget", str(fact), "--yes")
+    finally:
+        embed.OllamaEmbedder = real
+        sys.modules.pop("hermes_constants", None)

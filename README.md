@@ -174,6 +174,8 @@ terminal session that exits straight away never goes quiet for long enough; use 
 hermes holonomic stats
 hermes holonomic list -n 20
 hermes holonomic recall "what is my name"
+hermes holonomic show 37 40
+hermes holonomic forget 52 --yes
 ```
 
 `recall` prints every candidate with its scores and whether it would have been injected.
