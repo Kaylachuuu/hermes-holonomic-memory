@@ -59,10 +59,11 @@ REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_batch": 60,              # memories read per pass
     "reflect_timeout": 600.0,
     "reflect_max_tokens": 2000,       # cap on each reply; without one a model can generate until its context is full
-    # Let a reasoning model think first.  On a real 43-memory batch this took 98 s instead of 24 s and
-    # found 8 well-separated facts instead of 3.  If thinking uses up the token budget without producing
-    # an answer, that step is repeated without it.
-    "reflect_think": True,
+    # Let a reasoning model think first.  Off by default: on the model this was developed against,
+    # thinking ran through its whole token budget without answering in three runs out of four (about
+    # 140 s wasted per step), while the same steps without thinking took 6-14 s and gave 9 specific,
+    # correctly attributed facts.  If thinking is on and runs away, the step is repeated without it.
+    "reflect_think": False,
     "reflect_temperature": 0.3,
     "profile_max_chars": 1200,
 }

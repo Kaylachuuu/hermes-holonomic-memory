@@ -160,7 +160,7 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 | `reflect_batch` | `60` | Memories read per pass |
 | `reflect_temperature` | `0.3` | Sampling temperature |
 | `reflect_max_tokens` | `2000` | Hard cap on the model's reply |
-| `reflect_think` | `true` | Let a reasoning model think first (slower, noticeably better) |
+| `reflect_think` | `false` | Let a reasoning model think first. Slow, and small models can think until the token budget is gone |
 | `reflect_timeout` | `600` | Seconds before a pass is abandoned |
 | `profile_max_chars` | `1200` | Size limit of each profile |
 

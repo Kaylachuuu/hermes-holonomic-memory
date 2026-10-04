@@ -279,7 +279,7 @@ def test_ollama_chat_caps_output_and_reports_runaway():
     try:
         assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3, max_tokens=123) == "{}"
         assert seen[-1]["options"]["num_predict"] == 123 and seen[-1]["think"] is False and seen[-1]["stream"] is False
-        assert reflect.reflect_config({})["reflect_think"] is True
+        assert reflect.reflect_config({})["reflect_think"] is False
         assert reflect.LAST_CALL["reply_tokens"] == 2 and reflect.LAST_CALL["done_reason"] == "stop"
         mode["v"] = "nothink"
         assert reflect.ollama_chat(host, "m", "s", "u", timeout=5, temperature=0.3) == "{}" and "think" not in seen[-1]
@@ -361,7 +361,7 @@ def test_runaway_thinking_is_repeated_without_thinking(tmp_path):
     real = reflect.ollama_chat
     reflect.ollama_chat = fake
     try:
-        report = reflect.reflect_once(m, {"reflect_model": "gemma", "reflect_max_tokens": 1000}, dry_run=True)
+        report = reflect.reflect_once(m, {"reflect_model": "gemma", "reflect_max_tokens": 1000, "reflect_think": True}, dry_run=True)
     finally:
         reflect.ollama_chat = real
     assert calls[0][:2] == (True, 4000) and calls[1][:2] == (False, 1000)          # same step, repeated plainly

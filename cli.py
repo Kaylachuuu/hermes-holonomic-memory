@@ -3,7 +3,7 @@
     hermes holonomic stats
     hermes holonomic list [-n 20]
     hermes holonomic recall "what is my name" [-k 10]
-    hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--no-think]
+    hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -212,8 +212,8 @@ def register_cli(subparser) -> None:
     ref.add_argument("--depth", type=int, choices=[1, 2, 3],
                      help="1 facts and user profile only; 2 everything, unchecked; 3 everything, each item checked (default)")
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
-    ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (the default)")
-    ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (faster, shallower)")
+    ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (slow; can run away on small models)")
+    ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     prof = subs.add_parser("profile", help="Show the profiles written by reflection")
     prof.add_argument("--history", action="store_true", help="Show earlier versions too")
     prof.add_argument("--set", nargs=2, metavar=("WHO", "TEXT"), help="Write a profile yourself: user, self or us")
