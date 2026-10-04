@@ -294,6 +294,8 @@ def test_a_busy_stretch_gets_several_dreams_each_drawn_across_conversations(tmp_
         return json.dumps({"dream": long_dream}) if step.startswith("dream") else json.dumps({"thoughts": "Odd, and long.", "connections": []})
     report = sleep_once(m, {"dream_max_words": 260}, llm=llm, steps=["dream"], rng=random.Random(5), now=NOW)
     assert [s for s, _ in prompts] == ["dream", "wake", "dream 2", "wake 2"] and "100 to 260 words" in prompts[0][1]
+    assert "Your last dreams began" not in prompts[0][1]                                   # nothing to avoid yet
+    assert "Your last dreams began like this" in prompts[2][1] and "- The garden and the operating system grow into one another" in prompts[2][1]
     first, second = report["dreams"]
     assert not {f["id"] for f in first["fragments"] if f["age"] == "RECENT"} & {f["id"] for f in second["fragments"] if f["age"] == "RECENT"}
     journal = dreams(m, 5)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -103,8 +104,9 @@ with whose words it is: things "said to me" are the user's own life and work, no
 and never write "the user": call them by their name, which is in what you know about them below.
 
 Write:
-- "thoughts": one or two plain sentences, first person, on what you make of the dream now that you are awake. No \
-grand claims; it is fine to find it merely odd.
+- "thoughts": one or two plain sentences, first person, on what you make of the dream now that you are awake, said \
+the way you would mention it to a friend and not as an analysis. Do not begin with "The dream seems". No grand \
+claims; it is fine to find it merely odd.
 - "connections": real links between a RECENT fragment and an OLDER one that the dream put side by side, where the \
 two really do bear on each other. One sentence each, citing both in "sources". A dream mostly throws things \
 together by accident, so this list is usually empty or has one item. Do not invent a link to have something to say.
@@ -320,10 +322,16 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     low, high = int(sc["dream_min_words"]), max(int(sc["dream_max_words"]), int(sc["dream_min_words"]) + 20)
     limit = max(1800, high * 9)
     listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
+    # Left alone, the model opens every dream the same way (five real dreams in a row began "I am
+    # walking through a corridor").  Show it how its last dreams began and send it somewhere else.
+    earlier = [d["text"] for d in report.get("dreams", [])] + [d["text"] for d in engine.recent(3, realm=DREAM_REALM, kind=DREAM)]
+    openings = [re.split(r"(?<=[.!?])\s", " ".join(t.split()), maxsplit=1)[0][:140] for t in earlier[:4]]
+    variety = ("\n\nYour last dreams began like this. Tonight's dream begins differently, in a different kind of place, "
+               "and not by walking through anything:\n" + "\n".join(f"- {o}" for o in openings)) if openings else ""
     who = engine.profile("user") or user_profile      # in a dry run the profile from this cycle is not stored yet
     try:
         text = _ask_text(call, "dream" + label, "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
-                         _DREAM.replace("100 to 180 words", f"{low} to {high} words") + "\n\nFRAGMENTS:\n" + listing,
+                         _DREAM.replace("100 to 180 words", f"{low} to {high} words") + variety + "\n\nFRAGMENTS:\n" + listing,
                          _DREAM_SCHEMA, max(700, high * 4), "dream", float(sc["dream_temperature"]))
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
