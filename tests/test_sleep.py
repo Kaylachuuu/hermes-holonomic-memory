@@ -114,7 +114,8 @@ def test_dream_reaches_back_but_stays_in_its_own_realm(tmp_path):
     report = sleep_once(m, {}, llm=llm, steps=["dream"], rng=random.Random(3), now=NOW)
     d = report["dream"]
     assert d["id"] and len(d["connections"]) == 1 and any(f["faded"] for f in d["fragments"])
-    assert "RECENT:" in seen["wake"][0] and "OLDER:" in seen["wake"][0] and "RECENT" not in seen["dream"][0]
+    assert "RECENT (said to me):" in seen["wake"][0] and "OLDER (" in seen["wake"][0] and "RECENT" not in seen["dream"][0]
+    assert "- (said to me) " in seen["dream"][0]
     assert {i: m.get(i)["strength"] for i in old} == before                                 # the dream strengthened nothing
     waking = m.recall("garden herbs assembly code operating system", k=20, min_score=0.0)
     assert all(h.realm == "waking" for h in waking) and d["id"] not in {h.id for h in waking}

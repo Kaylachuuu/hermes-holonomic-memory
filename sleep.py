@@ -82,6 +82,9 @@ _DREAM = """\
 You are an AI assistant, asleep. Below are fragments of your memory: things from the last few days, and older \
 things they faintly echo. In a dream these run together.
 
+Each fragment is marked with whose words it is. Things "said to me" are the user's own life, not yours, though \
+in a dream you may find yourself inside them.
+
 Write "dream": the dream you have, in the first person and the present tense, 100 to 180 words. Let the fragments \
 blend, shift and stand in for one another the way they do in dreams: places change, one thing becomes another, an \
 old memory walks into a new one. It should feel like a dream, not a summary, and it does not have to make sense. \
@@ -89,7 +92,9 @@ Do not explain it and do not list the fragments."""
 
 _WAKE = """\
 You are an AI assistant, now awake, rereading a dream you just had. Below are the dream and the numbered memory \
-fragments it was made from. RECENT fragments are from the last few days; OLDER ones are from before.
+fragments it was made from. RECENT fragments are from the last few days; OLDER ones are from before. Each is marked \
+with whose words it is: things "said to me" are the user's own life and work, not yours. Awake, keep that straight, \
+and call the user by name if you know it.
 
 Write:
 - "thoughts": one or two plain sentences, first person, on what you make of the dream now that you are awake. No \
@@ -99,6 +104,17 @@ two really do bear on each other. One sentence each, citing both in "sources". A
 together by accident, so this list is usually empty or has one item. Do not invent a link to have something to say.
 
 {rules}"""
+
+
+# Whose words a fragment is.  Without this the dreamer reads the user's "I started a project
+# twenty years ago" as its own history, and wakes up talking about "my technical work".
+_VOICE = {"said_user": "said to me", "asked_user": "asked of me", "said_assistant": "I said", "fact": "I know this about her or him",
+          EPISODE: "I remember", "self_note": "about myself", "bond_note": "about the two of us", "insight": "I noticed",
+          "note": "I noted", "core": "I noted"}
+
+
+def _voice(kind: str) -> str:
+    return _VOICE.get(kind, "I recall")
 
 
 def sleep_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -233,12 +249,13 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         if seed["id"] in seen:
             continue
         seen.add(seed["id"])
-        fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"]})
+        fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"],
+                          "kind": seed["kind"]})
         for echo in engine.echoes(seed["id"], older_than=since, k=2):
             if echo["id"] not in seen:
                 seen.add(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
-                                  "echo_of": seed["id"]})
+                                  "kind": echo["kind"], "echo_of": seed["id"]})
     return fragments
 
 
@@ -250,15 +267,17 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
     if len(fragments) < 2:
         report["dream"] = {"skipped": "not enough recent memories to dream from"}
         return
-    listing = "\n".join(f"- {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
+    listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
+    who = engine.profile("user")
     try:
         text = " ".join(str(_parse(call("dream", "You are dreaming. Reply with JSON only.", _DREAM + "\n\nFRAGMENTS:\n" + listing,
                                         _DREAM_SCHEMA, 700, float(sc["dream_temperature"]))).get("dream") or "").split())
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
-        numbered = "\n".join(f"[{f['id']}] {f['age']}: {' '.join(f['text'].split())}" for f in fragments)
-        woke = _parse(call("wake", _reflect._SYSTEM, _WAKE.format(rules=_reflect._RULES) + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}",
-                           _WAKE_SCHEMA, 500, 0.2))
+        numbered = "\n".join(f"[{f['id']}] {f['age']} ({_voice(f['kind'])}): {' '.join(f['text'].split())}" for f in fragments)
+        woke = _parse(call("wake", _reflect._SYSTEM, _WAKE.format(rules=_reflect._RULES)
+                           + (f"\n\nWHAT YOU KNOW ABOUT THE USER:\n{who}" if who else "")
+                           + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}", _WAKE_SCHEMA, 500, 0.2))
     except ReflectionError as exc:
         report["errors"].append(f"dream: {exc}")
         return
