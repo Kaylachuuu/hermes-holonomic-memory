@@ -316,7 +316,7 @@ def test_talk_about_a_dream_is_labelled_and_cannot_become_fact(tmp_path):
     dream_text = "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code that boots slowly."
     llm = fake({"dream": json.dumps({"dream": dream_text}), "wake": json.dumps({"thoughts": "It was odd to see the garden turn into code.", "connections": []})})
     sleep_once(e, p._cfg, llm=llm, steps=["dream"], rng=random.Random(2))
-    p.sync_turn("Did you dream last night?",
+    p.sync_turn("Good morning, how are you feeling today?",                        # she brings the dream up herself
                 "I did. In my dream I was kneeling in a garden where the herbs grew in rows of assembly code.\n\n"
                 "Separately, the tomato plants you mentioned should be watered early tomorrow.", session_id="s1")
     p.sync_turn("Kneeling in the garden with herbs growing in rows of assembly, each leaf a line of code. My dream job would be writing kernels all day.",
