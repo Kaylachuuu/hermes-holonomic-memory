@@ -447,7 +447,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         out = ["## Your dreams (dreams you had while idle; not things that happened)"]
         for d in found:
             when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
-            out.append(f"- ({when}) {' '.join(d['text'].split())[:900]}"
+            out.append(f"- ({when}) {' '.join(d['text'].split())}"
                        + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") else "")
                        + "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", [])))
         return "\n".join(out)
