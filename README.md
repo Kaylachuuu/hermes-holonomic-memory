@@ -109,7 +109,8 @@ Off by default. When on, a language model periodically reads the memories stored
   who the user is never depends on a search matching.
 
 A fact about the user must cite at least one thing that was not said by the agent itself; facts resting
-only on the agent's own words are dropped.
+only on the agent's own words are dropped. Quotation marks in a fact about the user are removed unless
+the quoted words appear in what the user actually said.
 
 Facts about the user change by contradiction, not by time. When the user plainly says something that
 makes a stored fact untrue, reflection stores the new fact and marks the old one superseded: it leaves

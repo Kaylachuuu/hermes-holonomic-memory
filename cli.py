@@ -169,6 +169,8 @@ def _reflect(engine, cfg, args) -> None:
         for c in report.get("checked") or []:
             if c["verdict"] == "drop":
                 print(f"  CHECK dropped ({c['kind']}): {c['was']}")
+            elif c["verdict"] == "unquote":
+                print(f"  UNQUOTED ({c['kind']}), not the user's own words: {c['was']}\n             ->  {c['now']}")
             else:
                 print(f"  CHECK rewrote ({c['kind']}): {c['was']}\n             ->  {c['now']}")
         for kind, items in (report.get("proposed") or {}).items():

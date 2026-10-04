@@ -332,6 +332,24 @@ def _clean_items(items: Any, valid_ids: set, limit: int) -> List[dict]:
     return out
 
 
+_QUOTED_RE = re.compile(r"(?<!\w)'([^'\n]{2,60})'(?!\w)|\"([^\"\n]{2,80})\"|\u2018([^\u2019\n]{2,60})\u2019|\u201c([^\u201d\n]{2,80})\u201d")
+
+
+def unquote_unsaid(text: str, spoken: str) -> str:
+    """Remove quotation marks from phrases the user never said.
+
+    The model likes to put a neat label in quotes ("meta-platform", "no-bloat") and
+    attribute it to the user when the label was the assistant's own summary.  The
+    summary may be fair; the quotation marks claim the user's exact words, and that
+    claim is checked here against what the user actually said."""
+    spoken = " ".join(spoken.lower().split())
+
+    def fix(match: "re.Match") -> str:
+        phrase = next(g for g in match.groups() if g is not None)
+        return match.group(0) if " ".join(phrase.lower().split()) in spoken else phrase
+    return _QUOTED_RE.sub(fix, text)
+
+
 def _make_llm(rc: Dict[str, Any], report: Dict[str, Any]) -> Callable[[str, str, str, dict, int], str]:
     """Model caller for one named step.  If reasoning eats the whole token budget
     without an answer, the step is repeated once with reasoning off."""
@@ -432,6 +450,17 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                 item = dict(item, text=new_text)
             kept.append(item)
         items = kept
+    # Quotation marks in a statement about the user must enclose the user's own words.
+    unquoted = []
+    for item in items:
+        if item["kind"] in (FACT, INSIGHT):
+            spoken = " ".join(by_id[s]["text"] for s in item["sources"] if s in not_assistant)
+            fixed = unquote_unsaid(item["text"], spoken)
+            if fixed != item["text"]:
+                report["checked"].append({"verdict": "unquote", "kind": item["kind"], "was": item["text"], "now": fixed})
+                item = dict(item, text=fixed)
+        unquoted.append(item)
+    items = unquoted
     report["proposed"] = {kind: [{"text": i["text"], "sources": i["sources"]} for i in items if i["kind"] == kind]
                           for kind in (FACT, SELF_NOTE, BOND_NOTE, INSIGHT)}
 

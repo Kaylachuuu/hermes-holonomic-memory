@@ -368,3 +368,20 @@ def test_runaway_thinking_is_repeated_without_thinking(tmp_path):
     assert [c["step"] for c in report["calls"]] == ["propose", "propose (repeated without thinking)", "check", "profiles"]
     assert "failed" in report["calls"][0] and calls[2][2] == ["verdicts"] and "user_profile" in calls[3][2]
     assert len(report["proposed"]["fact"]) == 2
+
+
+def test_quotes_are_kept_only_around_the_users_own_words(tmp_path):
+    from holonomic.reflect import reflect_once, unquote_unsaid
+    said = "I feel like software today is so bloated. I wanted it to host apps from other systems."
+    assert unquote_unsaid("Kayla wants a 'no-bloat' approach.", said) == "Kayla wants a no-bloat approach."
+    assert unquote_unsaid('Kayla thinks software is "so bloated" today.', said) == 'Kayla thinks software is "so bloated" today.'
+    assert unquote_unsaid("Kayla's vision is a \u2018meta-platform\u2019 for apps.", said) == "Kayla's vision is a meta-platform for apps."
+    assert unquote_unsaid("Kayla's daughter's school doesn't open early.", said) == "Kayla's daughter's school doesn't open early."
+    m, ids = seeded(tmp_path)
+    out = answer(ids, user_facts=[{"text": "Kayla's goal is a 'meta-platform' built as an operating system in x86 assembly.",
+                                   "sources": [ids["os"], ids["hi"]]}],
+                 self_notes=[{"text": "I called her plan a 'meta-platform' and she seemed to like it.", "sources": [ids["hi"]]}])
+    report = reflect_once(m, {"reflect_depth": 2}, llm=lambda s, u: out, dry_run=True)
+    assert report["proposed"]["fact"][0]["text"] == "Kayla's goal is a meta-platform built as an operating system in x86 assembly."
+    assert "'meta-platform'" in report["proposed"]["self_note"][0]["text"]            # her own words stay quoted in her own note
+    assert [c["verdict"] for c in report["checked"]] == ["unquote"]
