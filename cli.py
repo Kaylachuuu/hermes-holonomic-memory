@@ -6,6 +6,8 @@
     hermes holonomic show 37 40                 full text of memories, and what each is linked to
     hermes holonomic forget 52 [--yes]          remove memories for good (shows them first; --yes to confirm)
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
+    hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
+    hermes holonomic dreams [-n 5]
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -49,18 +51,40 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget"):
-        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] | show ID... | forget ID... [--yes] | '
-              'reflect status|on|off|now | profile [--history]')
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams"):
+        print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
+              'reflect status|on|off|now | sleep status|on|off|now | dreams | profile [--history]')
         return
     if action == "reflect" and args.reflect_action in ("on", "off"):
         _reflect_toggle(args)
+        return
+    if action == "sleep" and args.sleep_action in ("on", "off"):
+        from hermes_constants import get_hermes_home
+        from .provider import load_config, write_config
+        home = get_hermes_home()
+        if args.sleep_action == "on" and not load_config(home).get("reflect_model"):
+            print("Sleep uses the reflection model. Set one first: hermes holonomic reflect on --model NAME")
+            return
+        write_config(home, {"sleep_enabled": args.sleep_action == "on"})
+        print(f"Unattended sleep is {'ON' if args.sleep_action == 'on' else 'OFF'}. Restart Hermes for a running session to pick this up.")
         return
     engine, cfg = _open()
     if engine is None:
         return
     try:
-        if action in ("show", "forget"):
+        if action == "sleep":
+            _sleep(engine, cfg, args)
+        elif action == "dreams":
+            from .sleep import dreams
+            found = dreams(engine, args.n)
+            print(f"{len(found)} most recent dream(s), newest first:" if found else "No dreams yet.")
+            for d in found:
+                print(f"\n[#{d['id']}] {_when(d['created_at'])}\n  {d['text']}")
+                if d.get("thoughts"):
+                    print(f"  What she made of it: {d['thoughts']}")
+                for c in d.get("connections", []):
+                    print(f"  Connection she noticed: {c}")
+        elif action in ("show", "forget"):
             found = [(mid, engine.get(mid)) for mid in args.ids]
             for mid, mem in found:
                 if mem is None:
@@ -125,24 +149,82 @@ def holonomic_command(args) -> None:
             from .provider import QUESTION_KIND, recall_options, select_for_injection
             opts = recall_options(cfg)
             # What the agent would get (questions skipped), then the skipped questions for reference.
+            if args.deep:
+                opts.update(min_strength=0.0, reach=2)
             hits = engine.recall(args.query, k=max(args.k, int(cfg["recall_k"]) * 3), min_score=0.0, **opts)
             ms = (time.perf_counter() - t0) * 1000
             floor = [h for h in hits if h.score >= float(cfg["min_score"]) or h.assoc >= 0.6]
             chosen = {h.id for h in select_for_injection(floor, cfg)[:int(cfg["recall_k"])]}
             print(f'Query: "{args.query}"  ({ms:.0f} ms; floor {cfg["min_score"]}, band {cfg["score_band"]}; '
                   f'content words: {", ".join(content_terms(args.query)) or "none"})')
-            print("   id  score  vector  words  linked  injected  kind            text")
+            print("   id  score  vector  words  linked  strength  injected  kind            text")
             for h in hits[:args.k]:
-                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  "
-                      f"{'yes' if h.id in chosen else 'no':<8}  {h.kind:<14}  {_clip(h.text, args.width)}")
+                faded = h.strength < float(cfg["fade_threshold"])
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  {h.strength:>8.2f}  "
+                      f"{'faded' if faded else 'yes' if h.id in chosen else 'no':<8}  {h.kind:<14}  {_clip(h.text, args.width)}")
             opts["skip_kinds"] = ()
             for h in [h for h in engine.recall(args.query, k=50, min_score=0.0, **opts) if h.kind == QUESTION_KIND][:3]:
-                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  {'never':<8}  "
+                print(f"  {h.id:>3}  {h.score:>5.2f}  {h.as_query:>6.2f} {h.lexical:>6.2f}  {h.assoc:>6.2f}  {h.strength:>8.2f}  {'never':<8}  "
                       f"{h.kind:<14}  {_clip(h.text, args.width)}")
             if not hits:
                 print("  (nothing stored matches)")
     finally:
         engine.close()
+
+
+def _print_calls(report) -> None:
+    for c in report["calls"]:
+        print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
+              f"reply {c.get('reply_tokens')} tokens, finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+
+
+def _sleep(engine, cfg, args) -> None:
+    from hermes_constants import get_hermes_home
+    from .provider import extract_keys
+    from .reflect import ReflectionError, pending, read_foundation
+    from .sleep import sleep_config, sleep_once, unfinished_business
+    sc = sleep_config(cfg)
+    if args.sleep_action != "now":
+        last = engine.kv_get("sleep:last_run")
+        print(f"  unattended sleep: {'on' if sc['sleep_enabled'] else 'off'} "
+              f"(after {sc['sleep_idle_seconds'] // 60} quiet minutes, at most every {sc['sleep_min_hours']} hours)")
+        print(f"  steps: reflect on, consolidate {'on' if sc['consolidate_enabled'] else 'off'}, "
+              f"fade {'on' if sc['fade_enabled'] else 'off'} (half-life {sc['fade_half_life_days']} days), "
+              f"dream {'on' if sc['dream_enabled'] else 'off'}")
+        print(f"  dream model: {sc['dream_model'] or cfg.get('reflect_model') or '(not set)'}")
+        print(f"  waiting: {pending(engine)} memories to reflect on, {len(unfinished_business(engine, cfg))} conversation(s) to summarise")
+        print(f"  last sleep: {_when(float(last)) if last else 'never'}")
+        return
+    steps = [s.strip() for s in args.only.split(",")] if args.only else None
+    t0 = time.perf_counter()
+    try:
+        report = sleep_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
+                            foundation=read_foundation(get_hermes_home()), steps=steps)
+    except ReflectionError as exc:
+        print(f"Sleep failed: {exc}")
+        return
+    print(f"Slept for {time.perf_counter() - t0:.0f} s" + (" (dry run: nothing stored)" if args.dry_run else ""))
+    _print_calls(report)
+    for r in report["reflections"]:
+        n = sum(len(v) for v in (r.get("proposed") or {}).values())
+        print(f"  REFLECT   read {r['read']} memories, {n} item(s)" + ("" if args.dry_run else f", stored {len(r['stored'])}"))
+    for e in report["episodes"]:
+        print(f"  EPISODE   ({e['memories']} memories, {_when(e['when'])}) {e['summary']}")
+    if report["fade"]:
+        f = report["fade"]
+        print(f"  FADE      {f['eligible']} summarised memories x {f['factor']}" + ("" if args.dry_run else f", {f['changed']} lowered"))
+    d = report["dream"]
+    if d and d.get("skipped"):
+        print(f"  DREAM     skipped: {d['skipped']}")
+    elif d:
+        faded = sum(1 for f in d["fragments"] if f["faded"])
+        print(f"  DREAM     from {len(d['fragments'])} fragments ({sum(1 for f in d['fragments'] if f['age'] == 'OLDER')} older, {faded} faded)")
+        print(f"            {d['text']}")
+        print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
+        for c in d["connections"]:
+            print(f"  CONNECTION {c['text']}   <- {', '.join('#' + str(s) for s in c['sources'])}")
+    for err in report["errors"]:
+        print(f"  ERROR     {err}")
 
 
 def _reflect_toggle(args) -> None:
@@ -236,6 +318,13 @@ def register_cli(subparser) -> None:
     rec.add_argument("query")
     rec.add_argument("-k", type=int, default=10, help="How many results (default 10)")
     rec.add_argument("--width", type=int, default=100, help="Characters of text to show")
+    rec.add_argument("--deep", action="store_true", help="Include faded memories and follow links further")
+    slp = subs.add_parser("sleep", help="The long-idle cycle: reflect, consolidate, fade, dream")
+    slp.add_argument("sleep_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
+    slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
+    slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
+    drm = subs.add_parser("dreams", help="Show recent dreams")
+    drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
     show = subs.add_parser("show", help="Full text of memories and what each is linked to")
     show.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     fg = subs.add_parser("forget", help="Remove memories for good")

@@ -5,7 +5,8 @@ inspired by the holonomic brain theory. Links between memories are not stored in
 superposed as interference patterns on fixed-size complex vectors ("plates") and recovered by
 resonance with a cue.
 
-Status: storage, recall and Hermes integration work. Reflection is built and off by default. Dreaming is planned.
+Status: storage, recall, Hermes integration and reflection work on a real install. Sleep (consolidation,
+fading and dreaming) is built and off by default; it has only been run against a stand-in model so far.
 
 ## How it works
 
@@ -168,6 +169,56 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 Background reflection only runs while a Hermes process is alive (the desktop app or gateway). A
 terminal session that exits straight away never goes quiet for long enough; use `reflect now` there.
 
+## Short-term and long-term memory, and sleep
+
+Conversation as it happened is short-term memory. Facts, notes, profiles and accounts of past
+conversations are long-term. A sleep cycle moves experience from one to the other. It runs when the
+agent has been idle for a long stretch, or by hand, and has four steps, each of which can be switched off:
+
+1. **Reflect**: as above.
+2. **Consolidate**: for each conversation that has gone quiet, the agent writes a short first-person
+   account of it. The account is stored long-term, dated as the conversation, and linked to it.
+3. **Fade**: conversation that has been summarised halves in strength every `fade_half_life_days`.
+   Below `fade_threshold` a memory is left out of everyday recall. Nothing is deleted. What the agent
+   knows about the user, its notes and its accounts do not fade, and whatever is recalled is strengthened.
+4. **Dream**: a few recent memories, and older memories each one echoes (faded ones included), are woven
+   into a dream. The agent then rereads it awake, notes what it makes of it, and records a connection
+   only if a recent and an older memory really bear on each other.
+
+Dreams and what was made of them live in their own realm. Factual recall never reads it, and by default
+a dream strengthens nothing, so it does not bring faded memories back to the surface. The agent can still
+recall its dreams and talk about them: the latest one is in its system prompt for a few days, dreams are
+offered when the conversation turns to dreaming, and its memory tool has a `dreams` action. They are
+always labelled as dreams.
+
+**Deep recall.** Everyday recall skips faded memories. The agent's memory tool takes `deep: true`, which
+searches them too and follows links two steps out. A faded memory recovered that way is strengthened
+back into everyday reach.
+
+```
+hermes holonomic sleep                        # status
+hermes holonomic sleep now --dry-run          # run the cycle and show the result without storing it
+hermes holonomic sleep now --only consolidate,dream
+hermes holonomic sleep on                     # run unattended when idle (needs a reflection model)
+hermes holonomic dreams
+hermes holonomic recall "..." --deep
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sleep_enabled` | `false` | Run the cycle unattended |
+| `sleep_idle_seconds` | `3600` | Quiet time needed before sleeping |
+| `sleep_min_hours` | `12` | Minimum time between sleeps |
+| `consolidate_enabled` | `true` | Write accounts of finished conversations |
+| `consolidate_quiet_minutes` | `30` | A conversation counts as finished after this |
+| `fade_enabled` | `true` | Let summarised conversation fade |
+| `fade_half_life_days` | `5` | How fast it fades |
+| `fade_threshold` | `0.35` | Strength below which a memory leaves everyday recall |
+| `dream_enabled` | `true` | Dream during sleep |
+| `dream_model`, `dream_host` | the reflection model and server | Model that dreams |
+| `dream_temperature` | `1.0` | Sampling temperature for the dream itself |
+| `dream_reinforce` | `false` | Let a dream strengthen the old memories it touches |
+
 ## Inspecting the store
 
 ```
@@ -195,7 +246,7 @@ this folder.
 
 - The plates hold associations only. Text and one embedding per memory are stored conventionally,
   and finding memories similar to a query is ordinary vector search.
-- Associations are one step deep per recall.
+- Everyday recall follows associations one step; deep recall follows two.
 - Forgetting removes a memory's text and vector. Its traces stay in the plates as faint noise.
 - Changing the embedding model, plate dimension or capacity requires a new store.
 - One user. Everyone who talks to the agent is treated as the same person.
@@ -203,10 +254,10 @@ this folder.
 
 ## Roadmap
 
-- Dreaming: loose, blurred cues pull distant memories together into a narrative, kept in the `dream`
-  realm and never mixed into factual recall.
-- A separate, configurable model and endpoint for dreaming, as reflection already has.
-- Consolidation of old plates and gradual decay.
+- Rebuild long-term plates from what survives, so old plates can be retired.
+- A deeper reflection level for stronger models: older linked memories as context, and periodic
+  re-derivation of the profiles from all stored facts.
+- More than one user.
 
 ## Licence
 

@@ -594,9 +594,29 @@ class IdleReflector:
         finally:
             self._busy.release()
 
+    def sleep_if_due(self) -> Optional[Dict[str, Any]]:
+        """The long-idle cycle (see sleep.py): reflect, consolidate, fade, dream."""
+        from . import sleep as _sleep                  # sleep imports this module, so not at the top
+        cfg = self.load_cfg()
+        if not _sleep.sleep_due(self.engine, cfg, self.last_activity) or not self._busy.acquire(blocking=False):
+            return None
+        try:
+            report = _sleep.sleep_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
+            self.last_error = "; ".join(report["errors"])
+            logger.info("holonomic: slept: %d conversation(s) summarised, dream %s",
+                        len(report["episodes"]), "yes" if (report.get("dream") or {}).get("id") else "no")
+            return report
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.warning("holonomic: sleep failed: %s", exc)
+            return None
+        finally:
+            self._busy.release()
+
     def _loop(self) -> None:
         while not self._stop.wait(self.poll_seconds):
             try:
                 self.run_if_due()
+                self.sleep_if_due()
             except Exception as exc:                   # never let the worker die
                 logger.debug("holonomic: reflector loop error: %s", exc)

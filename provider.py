@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
 
 from .reflect import REFLECT_DEFAULTS, SUBJECTS, IdleReflector, read_foundation
+from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 DEFAULTS.update(REFLECT_DEFAULTS)
+DEFAULTS.update(SLEEP_DEFAULTS)
+
+_DREAM_WORD_RE = re.compile(r"\bdream(?:s|t|ed|ing)?\b", re.IGNORECASE)
 
 TOOL_SCHEMA = {
     "name": "holonomic_memory",
@@ -51,7 +55,9 @@ TOOL_SCHEMA = {
         "Long-term associative memory. Relevant memories are recalled automatically every turn; use this tool "
         "to dig deeper or to manage memories.\n"
         "ACTIONS:\n"
-        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those. Set "
+        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those. If an "
+        "ordinary recall does not find what you are looking for, set `deep` to true: that also searches memories "
+        "that have faded with time and follows links further. Set "
         "`subject` to search only what you have concluded about the user ('user'), about yourself ('self') or "
         "about the two of you ('us').\n"
         "- remember: store `content` as a durable fact, preference or note. Use for things worth keeping that "
@@ -59,12 +65,14 @@ TOOL_SCHEMA = {
         "- related: what is linked to a memory (`memory_id`) or filed under a name/topic (`entity`).\n"
         "- feedback: rate `memory_id` as `helpful` or `wrong`. Wrong memories sink, helpful ones rise.\n"
         "- forget: permanently remove `memory_id`. Only when asked to, or when a memory is clearly false.\n"
+        "- dreams: your recent dreams and what you made of them. Dreams are not things that happened.\n"
         "- stats: size of the memory store."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["recall", "remember", "related", "feedback", "forget", "stats"]},
+            "action": {"type": "string", "enum": ["recall", "remember", "related", "feedback", "forget", "dreams", "stats"]},
+            "deep": {"type": "boolean", "description": "Recall only: also search faded memories and follow links further."},
             "query": {"type": "string", "description": "What to search for (recall)."},
             "subject": {"type": "string", "enum": ["user", "self", "us"],
                         "description": "Limit recall to your own conclusions about this subject."},
@@ -80,7 +88,8 @@ TOOL_SCHEMA = {
     },
 }
 
-_KIND_LABEL = {"fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
+_KIND_LABEL = {EPISODE: "your account of a past conversation", DREAM: "a dream you had",
+               DREAM_INSIGHT: "what you made of a dream", "fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
                "insight": "insight",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
@@ -170,6 +179,7 @@ def select_for_injection(hits: list, cfg: Dict[str, Any]) -> list:
 
 def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"dual": bool(cfg.get("dual_query", False)), "skip_kinds": (QUESTION_KIND,), "min_trust": 0.15,
+            "min_strength": float(cfg.get("fade_threshold", 0.35)),      # faded memories need deep recall
             "lexical": float(cfg.get("lexical_weight", 0.2)),
             "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75))}}
 
@@ -336,7 +346,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "are associated with something that was. Recalled memories can be incomplete or out of date: weigh them, "
                 "don't recite them. Use the holonomic_memory tool to search deeper, to store something important "
                 "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'."
-                + self._profile_block(engine))
+                + self._profile_block(engine) + self._latest_dream_block(engine))
 
     @staticmethod
     def _profile_block(engine) -> str:
@@ -353,6 +363,19 @@ class HolonomicMemoryProvider(MemoryProvider):
         if us:
             out += f"\n\n## Your relationship with the user (from your own reflection)\n{us}"
         return out
+
+    def _latest_dream_block(self, engine) -> str:
+        try:
+            d = latest_dream(engine, self._cfg)
+        except Exception:
+            return ""
+        if not d:
+            return ""
+        when = time.strftime("%A %d %B", time.localtime(d["at"]))
+        thoughts = (d.get("meta") or {}).get("thoughts", "")
+        return (f"\n\n## Your most recent dream ({when}; a dream, not something that happened)\n{d['text']}"
+                + (f"\nWhat you made of it on waking: {thoughts}" if thoughts else "")
+                + "\nYou can mention or discuss it if it comes up or seems worth sharing. Do not treat it as fact.")
 
     def _touch(self) -> None:
         reflector = reflector_for(self._engine) if self._engine is not None else None
@@ -402,10 +425,32 @@ class HolonomicMemoryProvider(MemoryProvider):
                 break
             lines.append(line)
             used += len(line) + 1
+        dream_block = self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else ""
         if not lines:
-            return ""
+            return dream_block
+        try:                                             # what gets used stays strong; what is never recalled fades
+            engine.reinforce([h.id for h in hits[:len(lines)]], 0.03)
+        except Exception:
+            pass
         self._last_count = len(lines)
-        return "## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)
+        return ("## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)
+                + ("\n\n" + dream_block if dream_block else ""))
+
+    def _dream_block(self, engine, query: str) -> str:
+        """Dreams are only brought up when the conversation turns to them, and always labelled."""
+        try:
+            found = list_dreams(engine, 3)
+        except Exception:
+            return ""
+        if not found:
+            return ""
+        out = ["## Your dreams (dreams you had while idle; not things that happened)"]
+        for d in found:
+            when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
+            out.append(f"- ({when}) {' '.join(d['text'].split())[:900]}"
+                       + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") else "")
+                       + "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", [])))
+        return "\n".join(out)
 
     def recall_status(self) -> Optional[RecallStatus]:
         return RecallStatus("Holonomic", self._last_count) if self._last_count else None
@@ -519,7 +564,17 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if subject and subject not in SUBJECTS:
                     return _error("subject must be 'user', 'self' or 'us'")
                 only = {"only_kinds": (SUBJECTS[subject],)} if subject else {}
-                hits = engine.recall(query, k=limit, min_score=0.0 if subject else 0.15, **recall_options(self._cfg), **only)
+                options = recall_options(self._cfg)
+                threshold = options["min_strength"]
+                if args.get("deep"):
+                    options.update(min_strength=0.0, reach=2)
+                hits = engine.recall(query, k=limit, min_score=0.0 if subject else (0.1 if args.get("deep") else 0.15),
+                                     **options, **only)
+                if args.get("deep"):
+                    # Recovering a faded memory brings it back within everyday reach.
+                    faded = [h.id for h in hits if h.strength < threshold]
+                    if faded:
+                        engine.reinforce(faded, 0.3)
                 if subject:
                     return json.dumps({"profile": engine.profile(subject), "results": [self._hit_json(h) for h in hits],
                                        "count": len(hits)})
@@ -559,6 +614,12 @@ class HolonomicMemoryProvider(MemoryProvider):
                 else:
                     return _error("feedback needs 'rating': helpful or wrong")
                 return json.dumps({"id": mid, "trust": round(engine.get(mid)["trust"], 2)})
+            if action == "dreams":
+                found = list_dreams(engine, limit)
+                return json.dumps({"note": "These are dreams, not things that happened.", "count": len(found), "dreams": [
+                    {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
+                     "dream": d["text"], "what_you_made_of_it": d.get("thoughts", ""),
+                     "connections_noticed": d.get("connections", [])} for d in found]})
             if action == "stats":
                 return json.dumps(engine.stats())
             return _error(f"Unknown action: {action}")

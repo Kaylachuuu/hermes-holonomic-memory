@@ -637,7 +637,8 @@ class HolonomicMemory:
                exclude: tuple[int, ...] | list[int] = (), rng: np.random.Generator | None = None,
                dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = (), lexical: float = 0.0,
                kind_weights: dict[str, float] | None = None,
-               only_kinds: tuple[str, ...] | list[str] = (), min_trust: float = 0.0) -> list[Recollection]:
+               only_kinds: tuple[str, ...] | list[str] = (), min_trust: float = 0.0,
+               min_strength: float = 0.0, reach: int = 1) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -655,6 +656,9 @@ class HolonomicMemory:
         skip_kinds leaves memories of those kinds out entirely.
         lexical adds up to that much to the similarity of memories sharing content
         words with a text query.  kind_weights scales the final score by kind.
+        min_strength leaves faded memories out (everyday recall); 0 includes them (deep recall).
+        reach is how many links to follow outward from the direct matches: with 2, what a
+        linked memory is itself linked to can surface as well.
         """
         x = x_alt = None
         if vector is not None:
@@ -682,6 +686,8 @@ class HolonomicMemory:
                 mask &= np.isin(self._kind.v, [self._kind_codes[kind] for kind in only_kinds if kind in self._kind_codes])
             if min_trust > 0:
                 mask &= self._trust.v >= min_trust       # superseded and repeatedly-wrong memories stay out
+            if min_strength > 0:
+                mask &= self._strength.v >= min_strength  # faded memories stay out of everyday recall
             self._last_parts, self._last_lex, self._last_lex_weight = None, {}, lexical
 
             def dither(cue: np.ndarray) -> np.ndarray:
@@ -714,6 +720,20 @@ class HolonomicMemory:
                     for row, sc in self._probe(dither(self._cue(self._phasor_of(r))), codes, aperture=aperture).items():
                         if row != r:
                             assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc) * relevance)
+                # Follow links outward from what was just found.  Each further step is weaker,
+                # and only memories that could be returned are used as stepping stones.
+                frontier = dict(assoc)
+                for _ in range(max(reach, 1) - 1):
+                    found: dict[int, float] = {}
+                    for r, weight in sorted(frontier.items(), key=lambda kv: -kv[1])[:4]:
+                        if not mask[r] or weight < 0.3:
+                            continue
+                        for row, sc in self._probe(self._cue(self._phasor_of(r)), codes, aperture=aperture).items():
+                            value = min(1.0, sc) * weight * 0.7
+                            if row != r and row not in order and value > assoc.get(row, 0.0):
+                                found[row] = max(found.get(row, 0.0), value)
+                    assoc.update(found)
+                    frontier = found
                 if fuzzy:
                     cue = dither(self._cue(self.proj.phasor(x[None, :])[0]))
                     for row, sc in self._probe(cue, codes, aperture=aperture).items():
@@ -891,6 +911,71 @@ class HolonomicMemory:
                     self._strength.a[row] = min(3.0, self._strength.a[row] + amount)
                     self._db.execute("UPDATE memories SET strength = ?, recalls = recalls + 1 WHERE id = ?",
                                      (float(self._strength.a[row]), mid))
+
+    @_locked
+    def fade(self, ids: list[int], factor: float, *, floor: float = 0.1) -> int:
+        """Lower the strength of these memories.  Nothing is deleted: a faded memory drops
+        out of everyday recall and stays reachable by deep recall, which strengthens it again."""
+        changed = 0
+        for mid in ids:
+            row = self._row.get(mid)
+            if row is None:
+                continue
+            new = max(floor, float(self._strength.a[row]) * factor)
+            if new < self._strength.a[row]:
+                self._strength.a[row] = new
+                self._db.execute("UPDATE memories SET strength = ? WHERE id = ?", (new, mid))
+                changed += 1
+        return changed
+
+    @_locked
+    def sessions(self, kinds: tuple[str, ...] | list[str], *, realm: str = "waking") -> list[dict]:
+        """One row per conversation: its id, first and last memory, size and time span."""
+        marks = ",".join("?" * len(kinds))
+        return [dict(r) for r in self._db.execute(
+            f"SELECT session, MIN(id) AS first_id, MAX(id) AS last_id, COUNT(*) AS n, MIN(created_at) AS started, "
+            f"MAX(created_at) AS ended FROM memories WHERE forgotten = 0 AND realm = ? AND kind IN ({marks}) "
+            f"GROUP BY session ORDER BY MIN(id)", [realm] + list(kinds))]
+
+    @_locked
+    def session_memories(self, session: str, *, after_id: int = 0, kinds: tuple[str, ...] | list[str] = (),
+                         realm: str = "waking", limit: int = 200) -> list[dict]:
+        sql = ("SELECT id, text, kind, session, created_at, strength FROM memories WHERE forgotten = 0 AND realm = ? "
+               "AND session = ? AND id > ?")
+        params: list = [realm, session, after_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params += list(kinds)
+        return [dict(r) for r in self._db.execute(sql + " ORDER BY id LIMIT ?", params + [limit])]
+
+    @_locked
+    def echoes(self, memory_id: int, *, older_than: float, low: float = 0.25, high: float = 0.7, k: int = 3,
+               kinds: tuple[str, ...] | list[str] = (), realm: str = "waking") -> list[dict]:
+        """Older memories that resemble this one somewhat: related, but not the same thing
+        said again.  Faded memories are included; this is how a dream reaches back.  Works
+        from the stored vectors, so it costs no embedding calls and strengthens nothing."""
+        row = self._row.get(memory_id)
+        code = self._realm_codes.get(realm)
+        if row is None or code is None:
+            return []
+        sims = self._X.v @ self._X.a[row]
+        ok = (self._realm.v == code) & (self._trust.v >= 0.15) & (sims >= low) & (sims <= high)
+        if kinds:
+            ok &= np.isin(self._kind.v, [self._kind_codes[x] for x in kinds if x in self._kind_codes])
+        candidates = [int(r) for r in np.argsort(-sims) if ok[r] and int(r) != row][:k * 6]
+        if not candidates:
+            return []
+        ids = [int(self._ids.a[r]) for r in candidates]
+        rows = {r["id"]: dict(r) for r in self._db.execute(
+            f"SELECT id, text, kind, session, created_at, strength FROM memories WHERE created_at < ? "
+            f"AND id IN ({','.join('?' * len(ids))})", [older_than] + ids)}
+        out = []
+        for r, mid in zip(candidates, ids):
+            if mid in rows:
+                out.append(dict(rows[mid], similarity=float(sims[r])))
+            if len(out) >= k:
+                break
+        return out
 
     @_locked
     def set_trust(self, memory_id: int, trust: float) -> bool:
