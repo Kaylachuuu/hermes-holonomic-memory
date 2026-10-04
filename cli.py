@@ -287,6 +287,8 @@ def _reflect(engine, cfg, args) -> None:
         for kind, items in (report.get("proposed") or {}).items():
             for item in items:
                 print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
+        for text in report.get("cut_off") or []:
+            print(f"  cut off   {text}   (stopped mid-sentence; not stored)")
         for text in report.get("dropped_assistant_only") or []:
             print(f"  dropped   {text}   (rested only on the assistant's own words)")
         for item in report.get("superseded") or []:

@@ -89,10 +89,31 @@ _PROFILE_SCHEMA = {"type": "object", "properties": {
 # Used when a caller asks for no particular step (kept for tests and older callers).
 _SCHEMA = _PROPOSE_SCHEMA
 
+# The reply is JSON, so a double quotation mark inside a sentence ends the string there.  A real run
+# returned an account that stopped at "her original vision for a" for exactly that reason.
+NO_DOUBLE_QUOTES = ("Inside the text you write, never use the double quotation mark character; if you need to quote "
+                    "something, use single quotation marks.")
+
 _SYSTEM = (
     "You are the reflective process of an AI assistant's long-term memory. You never invent anything: everything "
-    "you write must be supported by the numbered lines you are shown. Reply with JSON only."
+    "you write must be supported by the numbered lines you are shown. Reply with JSON only. " + NO_DOUBLE_QUOTES
 )
+
+_ENDS_RE = re.compile(r"[.!?\u2026][\"'\u2019\u201d)\]]*$")
+
+
+def is_complete(text: str) -> bool:
+    """Does the text end where a sentence ends?  Used to catch replies that were cut short."""
+    return bool(_ENDS_RE.search(text.strip()))
+
+
+def trim_to_sentence(text: str) -> str:
+    """Drop a trailing fragment, keeping whole sentences.  Empty if there is no whole sentence."""
+    text = text.strip()
+    if is_complete(text):
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?\u2026][\"'\u2019\u201d)\]]*(?=\s)", text)]
+    return text[:ends[-1]].strip() if ends else ""
 
 _RULES = """\
 Words and ideas belong to whoever said them. A phrase the ASSISTANT coined, a suggestion it made or a judgement it \
@@ -345,12 +366,16 @@ def read_foundation(hermes_home) -> str:
         return ""
 
 
-def _clean_items(items: Any, valid_ids: set, limit: int) -> List[dict]:
+def _clean_items(items: Any, valid_ids: set, limit: int, cut_off: Optional[List[str]] = None) -> List[dict]:
     out, seen = [], set()
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
         text = " ".join(str(item.get("text") or "").split())
+        if text and not is_complete(text):               # stopped mid-sentence: not worth storing half a statement
+            if cut_off is not None:
+                cut_off.append(text)
+            continue
         sources = [int(s) for s in item.get("sources") or [] if isinstance(s, (int, float)) and int(s) in valid_ids]
         # An item with no valid source is unsupported by anything the model was shown.
         if not (15 <= len(text) <= 400) or not sources or text.lower() in seen:
@@ -450,7 +475,8 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     report["superseded"] = superseded
     # A fact about the user must rest on something that did not come from the assistant's own mouth.
     not_assistant = {m["id"] for m in batch if m["kind"] != "said_assistant"}
-    facts = _clean_items(data.get("user_facts"), valid, 10)
+    report["cut_off"] = []
+    facts = _clean_items(data.get("user_facts"), valid, 10, report["cut_off"])
     report["dropped_assistant_only"] = [f["text"] for f in facts if not set(f["sources"]) & not_assistant]
     # ...and from then on it cites only those lines.  The checker therefore judges it against what
     # the user said, not against the assistant's paraphrase of it ("expanding its functionality"
@@ -459,9 +485,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
              for f in facts if set(f["sources"]) & not_assistant]
     groups = [(FACT, facts)]
     if depth > 1:
-        groups += [(SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4)),
-                   (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3)),
-                   (INSIGHT, _clean_items(data.get("insights"), valid, 3))]
+        groups += [(SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4, report["cut_off"])),
+                   (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3, report["cut_off"])),
+                   (INSIGHT, _clean_items(data.get("insights"), valid, 3, report["cut_off"]))]
     items = [dict(item, kind=kind) for kind, group in groups for item in group]
 
     # ---- step 2: check each item against only the lines it cites
@@ -482,7 +508,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
             if verdict == "drop":
                 report["checked"].append({"verdict": "drop", "kind": item["kind"], "was": item["text"]})
                 continue
-            if verdict == "rewrite" and 15 <= len(new_text) <= 400 and new_text != item["text"]:
+            if verdict == "rewrite" and 15 <= len(new_text) <= 400 and new_text != item["text"] and is_complete(new_text):
                 report["checked"].append({"verdict": "rewrite", "kind": item["kind"], "was": item["text"], "now": new_text})
                 item = dict(item, text=new_text)
             kept.append(item)
@@ -510,7 +536,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
         wanted = {"user": "user_profile"} if depth <= 1 else {"user": "user_profile", "self": "self_profile",
                                                               "us": "relationship_profile"}
         for who, key in wanted.items():
-            text = " ".join(str(pdata.get(key) or "").split())[:limit]
+            text = trim_to_sentence(" ".join(str(pdata.get(key) or "").split())[:limit])
             if len(text) >= 20:
                 new_profiles[who] = text
     report["profiles"] = new_profiles

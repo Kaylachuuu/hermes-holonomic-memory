@@ -1,5 +1,5 @@
 name: holonomic
-version: 0.7.2
+version: 0.7.3
 description: "Holonomic memory: local associative memory that stores links between memories as superposed interference patterns. Embeddings via Ollama."
 python_dependencies:
   - numpy>=1.26

@@ -240,3 +240,38 @@ def test_cli_sleep_and_dreams(tmp_path):
         embed.OllamaEmbedder = real
         reflect.ollama_chat = real_chat
         sys.modules.pop("hermes_constants", None)
+
+
+def test_replies_cut_short_are_asked_again_and_never_stored_half(tmp_path):
+    from holonomic.reflect import is_complete, trim_to_sentence, reflect_once, NO_DOUBLE_QUOTES, _SYSTEM
+    from holonomic.sleep import sleep_once
+    assert is_complete("She plans a new project.") and is_complete("He called it 'done.'") and not is_complete("her original vision for a")
+    assert trim_to_sentence("We talked about her project. She described her original vision for a") == "We talked about her project."
+    assert trim_to_sentence("The imagery of the corridor and the") == "" and NO_DOUBLE_QUOTES in _SYSTEM
+    m = store(tmp_path)
+    old = talk(m, "s-old", NOW - 2 * DAY, OS)
+    calls = []
+    def llm(system, user, step):
+        calls.append(step)
+        if step == "consolidate":
+            return json.dumps({"summary": "We talked about the operating system she began twenty years ago. She described her original vision for a"})
+        if step.startswith("consolidate"):
+            return json.dumps({"summary": "We talked about the operating system she began twenty years ago and her vision for it."})
+        if step == "dream":
+            return json.dumps({"dream": "The operating system is a house and every room boots slowly, one sector at a time. A child sleeps upstairs while the"})
+        if step.startswith("dream"):
+            return json.dumps({"dream": "The operating system is a house and every room boots slowly, one sector at a time. A child sleeps and the"})
+        return json.dumps({"thoughts": "The dream seems to be about the old project. The imagery of the corridor and the", "connections": []})
+    report = sleep_once(m, {}, llm=llm, steps=["consolidate", "dream"], rng=random.Random(1), now=NOW)
+    assert report["episodes"][0]["summary"].endswith("her vision for it.")                      # second answer was whole
+    assert report["dream"]["text"].endswith("one sector at a time.")                            # both cut: whole sentences kept
+    assert report["dream"]["thoughts"] == "The dream seems to be about the old project."
+    assert calls.count("consolidate (again: reply was cut short)") == 1 and calls.count("wake (again: reply was cut short)") == 1
+    # a fact that stops mid-sentence is dropped, not stored
+    out = json.dumps({"user_facts": [{"text": "Kayla started an operating system twenty years ago.", "sources": [old[0]]},
+                                     {"text": "Kayla's original vision was to create a", "sources": [old[0]]}],
+                      "self_notes": [], "relationship_notes": [], "insights": [], "superseded": [], "verdicts": [],
+                      "user_profile": "Kayla started an operating system twenty years ago. She wants to", "self_profile": "", "relationship_profile": ""})
+    r = reflect_once(m, {}, llm=lambda s, u: out, dry_run=True)
+    assert [f["text"] for f in r["proposed"]["fact"]] == ["Kayla started an operating system twenty years ago."]
+    assert r["cut_off"] == ["Kayla's original vision was to create a"] and r["profiles"]["user"] == "Kayla started an operating system twenty years ago."

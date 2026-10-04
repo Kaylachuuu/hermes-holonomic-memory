@@ -26,7 +26,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from . import reflect as _reflect
-from .reflect import DERIVED_KINDS, ReflectionError, _parse, _speaker
+from .reflect import DERIVED_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker, is_complete, trim_to_sentence
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,19 @@ def _lines(memories: List[dict], max_chars: int = 9000) -> str:
     return "\n".join(out)
 
 
+def _ask_text(call: Callable[..., str], step: str, system: str, prompt: str, schema: dict, max_tokens: int, key: str,
+              temperature: Optional[float] = None) -> str:
+    """One text field from the model.  If it comes back cut off mid-sentence, ask once more,
+    then keep only the whole sentences."""
+    text = ""
+    for attempt in range(2):
+        text = " ".join(str(_parse(call(step if attempt == 0 else step + " (again: reply was cut short)", system, prompt,
+                                        schema, max_tokens, temperature)).get(key) or "").split())
+        if is_complete(text):
+            return text
+    return trim_to_sentence(text)
+
+
 # ---------------------------------------------------------------- consolidate
 
 def unfinished_business(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> List[dict]:
@@ -179,11 +192,12 @@ def consolidate(engine, cfg: Dict[str, Any], call: Callable[..., str], report: D
         memories = s["memories"]
         prompt = _EPISODE.format(rules=_reflect._RULES) + "\n\nCONVERSATION:\n" + _lines(memories)
         try:
-            summary = " ".join(str(_parse(call("consolidate", _reflect._SYSTEM, prompt, _EPISODE_SCHEMA, 400)).get("summary") or "").split())
+            summary = _ask_text(call, "consolidate", _reflect._SYSTEM, prompt, _EPISODE_SCHEMA, 400, "summary")
         except ReflectionError as exc:
             report["errors"].append(f"consolidate {s['session']}: {exc}")
             continue
         if len(summary) < 30:
+            report["errors"].append(f"consolidate {s['session']}: the account came back cut short; it will be tried again next sleep")
             continue
         summary = summary[:900]
         entry = {"session": s["session"], "memories": len(memories), "summary": summary, "when": memories[-1]["created_at"]}
@@ -270,22 +284,29 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
     listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
     who = engine.profile("user") or user_profile      # in a dry run the profile from this cycle is not stored yet
     try:
-        text = " ".join(str(_parse(call("dream", "You are dreaming. Reply with JSON only.", _DREAM + "\n\nFRAGMENTS:\n" + listing,
-                                        _DREAM_SCHEMA, 700, float(sc["dream_temperature"]))).get("dream") or "").split())
+        text = _ask_text(call, "dream", "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
+                         _DREAM + "\n\nFRAGMENTS:\n" + listing, _DREAM_SCHEMA, 700, "dream", float(sc["dream_temperature"]))
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
         numbered = "\n".join(f"[{f['id']}] {f['age']} ({_voice(f['kind'])}): {' '.join(f['text'].split())}" for f in fragments)
-        woke = _parse(call("wake", _reflect._SYSTEM, _WAKE.format(rules=_reflect._RULES)
-                           + (f"\n\nWHAT YOU KNOW ABOUT THE USER:\n{who}" if who else "")
-                           + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}", _WAKE_SCHEMA, 500, 0.2))
+        wake_prompt = (_WAKE.format(rules=_reflect._RULES) + (f"\n\nWHAT YOU KNOW ABOUT THE USER:\n{who}" if who else "")
+                       + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}")
+        woke = _parse(call("wake", _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
     except ReflectionError as exc:
         report["errors"].append(f"dream: {exc}")
         return
     recent_ids = {f["id"] for f in fragments if f["age"] == "RECENT"}
     older_ids = {f["id"] for f in fragments if f["age"] == "OLDER"}
+    thoughts = " ".join(str(woke.get("thoughts") or "").split())[:500]
+    if not is_complete(thoughts):                    # cut short: ask the waking step once more
+        try:
+            again = _parse(call("wake (again: reply was cut short)", _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
+            retry = " ".join(str(again.get("thoughts") or "").split())[:500]
+            woke, thoughts = (again, retry) if is_complete(retry) else (woke, trim_to_sentence(thoughts))
+        except ReflectionError:
+            thoughts = trim_to_sentence(thoughts)
     connections = [c for c in _reflect._clean_items(woke.get("connections"), recent_ids | older_ids, 2)
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
-    thoughts = " ".join(str(woke.get("thoughts") or "").split())[:500]
     report["dream"] = {"text": text[:1800], "thoughts": thoughts, "connections": connections,
                        "fragments": [{"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])}
                                      for f in fragments]}
