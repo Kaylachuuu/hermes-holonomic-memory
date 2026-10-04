@@ -27,11 +27,12 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from . import reflect as _reflect
-from .reflect import DERIVED_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker, is_complete, trim_to_sentence
+from .reflect import (DERIVED_KINDS, DREAM_TALK_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker, is_complete,
+                      trim_to_sentence)
 
 logger = logging.getLogger(__name__)
 
-RAW_KINDS = ("said_user", "said_assistant", "asked_user")     # short-term: conversation as it happened
+RAW_KINDS = ("said_user", "said_assistant", "asked_user") + DREAM_TALK_KINDS     # short-term: conversation as it happened
 EPISODE = "episode"                                            # long-term: an account of one conversation
 DREAM, DREAM_INSIGHT, DREAM_REALM = "dream", "dream_insight", "dream"
 LASTING_KINDS = DERIVED_KINDS + (EPISODE, "core", "note")     # never faded
@@ -62,6 +63,8 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     # Whether a dream strengthens the old memories it touches.  Off: dreams stay in their own realm
     # and bring nothing faded back to the surface.
     "dream_reinforce": False,
+    # Conversation that resembles a stored dream this closely is treated as talk about that dream.
+    "dream_talk_similarity": 0.55,
 }
 
 _ITEMS = {"type": "array", "items": {"type": "object", "properties": {
@@ -82,8 +85,9 @@ decided, what the assistant suggested, and what was left open. Use the user's na
 
 {rules}
 
-Keep who said what straight: a suggestion the assistant made stays the assistant's suggestion. Plain prose, at \
-most 90 words, no list."""
+Keep who said what straight: a suggestion the assistant made stays the assistant's suggestion. Lines marked DREAM \
+TALK are the two of them discussing a dream the assistant had: say that they talked about a dream, and never report \
+what was in the dream as something that happened. Plain prose, at most 90 words, no list."""
 
 _DREAM = """\
 You are an AI assistant, asleep. Below are fragments of your memory: things from the last few days, and older \
@@ -266,7 +270,9 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
     now = time.time() if now is None else now
     since = now - float(sc["dream_days"]) * 86400
     exclude = exclude or set()
-    recent = [m for m in engine.recent(300, since=since) if m["kind"] not in (DREAM, DREAM_INSIGHT, "asked_user")
+    # Talk about a dream is not dreamt about again, or dreams would feed on dreams.
+    skip = (DREAM, DREAM_INSIGHT, "asked_user") + DREAM_TALK_KINDS
+    recent = [m for m in engine.recent(300, since=since) if m["kind"] not in skip
               and len(m["text"]) >= 25 and m["id"] not in exclude]
     if len(recent) < 2:
         return []
@@ -289,7 +295,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"],
                           "kind": seed["kind"]})
         for echo in engine.echoes(seed["id"], older_than=since, k=2):
-            if echo["id"] not in seen:
+            if echo["id"] not in seen and echo["kind"] not in skip:
                 seen.add(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
                                   "kind": echo["kind"], "echo_of": seed["id"]})

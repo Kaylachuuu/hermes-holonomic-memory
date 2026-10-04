@@ -914,6 +914,28 @@ class HolonomicMemory:
                                      (float(self._strength.a[row]), mid))
 
     @_locked
+    def set_kind(self, memory_id: int, kind: str) -> bool:
+        row = self._row.get(memory_id)
+        if row is None:
+            return False
+        self._kind.a[row] = self._kind_codes.setdefault(kind, len(self._kind_codes))
+        self._db.execute("UPDATE memories SET kind = ? WHERE id = ?", (kind, memory_id))
+        return True
+
+    @_locked
+    def similarity_to_realm(self, memory_id: int, realm: str, kinds: tuple[str, ...] | list[str] = ()) -> float:
+        """How closely this memory resembles the nearest memory in another realm (0 if that realm is empty)."""
+        row, code = self._row.get(memory_id), self._realm_codes.get(realm)
+        if row is None or code is None:
+            return 0.0
+        pool = (self._realm.v == code) & (self._trust.v >= 0)
+        if kinds:
+            pool &= np.isin(self._kind.v, [self._kind_codes[k] for k in kinds if k in self._kind_codes])
+        if not pool.any():
+            return 0.0
+        return float(np.max(self._X.v[pool] @ self._X.a[row]))
+
+    @_locked
     def fade(self, ids: list[int], factor: float, *, floor: float = 0.1) -> int:
         """Lower the strength of these memories.  Nothing is deleted: a faded memory drops
         out of everyday recall and stays reachable by deep recall, which strengthens it again."""

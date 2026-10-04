@@ -195,6 +195,13 @@ recall its dreams and talk about them: the latest one is in its system prompt fo
 offered when the conversation turns to dreaming, and its memory tool has a `dreams` action. They are
 always labelled as dreams.
 
+**Talking about dreams.** A conversation about a dream really happened, so it is stored as ordinary
+conversation, but what was said in it describes a dream. Such pieces are labelled as dream talk: either
+they say so ("in my dream", "did you dream") or they closely resemble a stored dream. Dream talk is
+labelled wherever it is recalled, no fact about the user may rest on it, the account of that conversation
+is told to report it as talk about a dream, and dreams are never seeded from it.
+`hermes holonomic dreamtalk` finds and labels such conversation stored by an earlier version.
+
 **Deep recall.** Everyday recall skips faded memories. The agent's memory tool takes `deep: true`, which
 searches them too and follows links two steps out. A faded memory recovered that way is strengthened
 back into everyday reach.

@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
 
-from .reflect import REFLECT_DEFAULTS, SUBJECTS, IdleReflector, read_foundation
+from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, REFLECT_DEFAULTS, SUBJECTS, IdleReflector,
+                      read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,9 @@ TOOL_SCHEMA = {
     },
 }
 
-_KIND_LABEL = {EPISODE: "your account of a past conversation", DREAM: "a dream you had",
+_KIND_LABEL = {DREAM_TALK_USER: "user said, talking about a dream of yours",
+               DREAM_TALK_ASSISTANT: "you said, describing a dream you had; not something that happened",
+               EPISODE: "your account of a past conversation", DREAM: "a dream you had",
                DREAM_INSIGHT: "what you made of a dream", "fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
                "insight": "insight",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
@@ -181,7 +184,41 @@ def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"dual": bool(cfg.get("dual_query", False)), "skip_kinds": (QUESTION_KIND,), "min_trust": 0.15,
             "min_strength": float(cfg.get("fade_threshold", 0.35)),      # faded memories need deep recall
             "lexical": float(cfg.get("lexical_weight", 0.2)),
-            "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75))}}
+            "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75)),
+                             DREAM_TALK_ASSISTANT: 0.5, DREAM_TALK_USER: 0.75}}
+
+
+# The user referring to a dream of the agent's ("your dream", "did you dream"), as opposed to "my dream job".
+_HER_DREAM_RE = re.compile(r"\b(?:your|that|this|the|last night'?s?)\s+(?:\w+\s+){0,2}dreams?\b|\bdid you dream|"
+                           r"\byou (?:dreamt|dreamed|were dreaming)\b|\bany dreams\b|\bin (?:your|the|that) dream\b", re.IGNORECASE)
+# The agent recounting one.
+_MY_DREAM_RE = re.compile(r"\b(?:my|the|that|this|a|last night'?s?)\s+(?:\w+\s+){0,2}dreams?\b|\bI (?:dreamt|dreamed|was dreaming)\b|"
+                          r"\bin (?:my|the|that) dream\b", re.IGNORECASE)
+
+
+def is_dream_talk(engine, memory_id: int, text: str, speaker: str, cfg: Dict[str, Any]) -> bool:
+    """Is this piece of conversation about a dream the agent had?  Either it says so, or it
+    resembles a stored dream closely (a follow-up about the dream's imagery need not use the word)."""
+    try:
+        if not engine.recent(1, realm=DREAM_REALM, kind=DREAM):
+            return False                                    # no dreams yet: "dream" can only be meant in the everyday sense
+        if (_HER_DREAM_RE if speaker == "user" else _MY_DREAM_RE).search(text):
+            return True
+        return engine.similarity_to_realm(memory_id, DREAM_REALM, kinds=(DREAM,)) >= float(cfg.get("dream_talk_similarity", 0.55))
+    except Exception:
+        return False
+
+
+def mark_dream_talk(engine, memory_id: int, text: str, kind: str, cfg: Dict[str, Any]) -> Optional[str]:
+    """Relabel a stored piece of conversation if it is dream talk.  Returns the new kind, or None."""
+    if kind not in ("said_user", "said_assistant"):
+        return None
+    speaker = "user" if kind == "said_user" else "assistant"
+    if not is_dream_talk(engine, memory_id, text, speaker, cfg):
+        return None
+    new = DREAM_TALK_USER if speaker == "user" else DREAM_TALK_ASSISTANT
+    engine.set_kind(memory_id, new)
+    return new
 
 
 def _error(message: str) -> str:
@@ -444,7 +481,8 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         if not found:
             return ""
-        out = ["## Your dreams (dreams you had while idle; not things that happened)"]
+        out = ["## Your dreams (dreams you had while idle; not things that happened. If you talk about them, "
+               "speak of them as dreams.)"]
         for d in found:
             when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
             out.append(f"- ({when}) {' '.join(d['text'].split())}"
@@ -477,11 +515,19 @@ class HolonomicMemoryProvider(MemoryProvider):
                                       links=[previous] if previous and not question else [])
                 if ids and not question:
                     previous = self._last_user[sid] = ids[-1]
+                    mark_dream_talk(engine, ids[-1], unit, "said_user", self._cfg)
         if self._cfg.get("store_assistant", True):
-            assistant = strip_memory_denials(clean_for_storage(assistant, max_chars))
+            # Stored a paragraph at a time, so a reply that recounts a dream and then turns to something
+            # real is labelled part by part.
+            parts = [strip_memory_denials(p) for p in re.split(r"\n\s*\n", clean_for_storage(assistant, max_chars))]
+            parts = [p for p in parts if len(p) >= 20]
             # A short reply to a bare question is an answer read off the context, not new knowledge.
-            if len(assistant) >= (80 if only_questions else 20):
-                engine.remember(assistant, kind="said_assistant", session=sid, keys=extract_keys(assistant), salience=0.8)
+            if sum(len(p) for p in parts) >= (80 if only_questions else 20):
+                for part in parts:
+                    for mid in engine.remember(part, kind="said_assistant", session=sid, keys=extract_keys(part), salience=0.8):
+                        stored = engine.get(mid)
+                        if stored:
+                            mark_dream_talk(engine, mid, stored["text"], "said_assistant", self._cfg)
 
     def _flush_backlog(self) -> None:
         engine = self._engine

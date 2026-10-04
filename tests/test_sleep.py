@@ -301,3 +301,86 @@ def test_a_busy_stretch_gets_several_dreams_each_drawn_across_conversations(tmp_
     journal = dreams(m, 5)
     assert len(journal) == 2 and all(d["text"] == long_dream for d in journal)           # stored whole, not in pieces
     assert m.stats()["by_realm"]["dream"] == 2 and m.kv_get("dream:latest") == str(second["id"])
+
+
+def test_talk_about_a_dream_is_labelled_and_cannot_become_fact(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.sleep import sleep_once, gather_fragments
+    from holonomic.reflect import reflect_once, DREAM_TALK_USER, DREAM_TALK_ASSISTANT
+    p = make(tmp_path)
+    e = p._engine
+    # before she has ever dreamed, the word is only the everyday word
+    p.sync_turn("Tell me about your dream setup for writing kernels.", "My dream setup would be a quiet room and a fast compiler for kernels.", session_id="s0")
+    assert {r["kind"] for r in e.recent(10)} <= {"said_user", "said_assistant", "asked_user"}
+    talk(e, "s-new", time.time() - 3600, GARDEN)
+    dream_text = "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code that boots slowly."
+    llm = fake({"dream": json.dumps({"dream": dream_text}), "wake": json.dumps({"thoughts": "It was odd to see the garden turn into code.", "connections": []})})
+    sleep_once(e, p._cfg, llm=llm, steps=["dream"], rng=random.Random(2))
+    p.sync_turn("Did you dream last night?",
+                "I did. In my dream I was kneeling in a garden where the herbs grew in rows of assembly code.\n\n"
+                "Separately, the tomato plants you mentioned should be watered early tomorrow.", session_id="s1")
+    p.sync_turn("Kneeling in the garden with herbs growing in rows of assembly, each leaf a line of code. My dream job would be writing kernels all day.",
+                "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code, that part stayed with me.",
+                session_id="s1")
+    kinds = {r["text"][:40]: r["kind"] for r in e.recent(30)}
+    assert kinds["I did. In my dream I was kneeling in a g"] == DREAM_TALK_ASSISTANT              # she says it is a dream
+    assert kinds["Separately, the tomato plants you mentio"] == "said_assistant"                  # the real part of the same reply
+    assert kinds["Kneeling in the garden with herbs growin"] == DREAM_TALK_USER                   # no dream word: caught by resemblance
+    assert kinds["My dream job would be writing kernels al"] == "said_user"                       # the everyday sense
+    assert kinds["I am kneeling in the garden and the herb"] == DREAM_TALK_ASSISTANT
+    # recalled later, it is labelled for what it is
+    block = p.prefetch("herbs growing in rows of assembly code in the garden", session_id="s9")
+    assert "talking about a dream of yours" in block or "describing a dream you had; not something that happened" in block
+    assert "user said) Kneeling in the garden" not in block
+    # reflection is shown the label, and a fact resting only on dream talk is dropped
+    seen = {}
+    def reflector(system, user, step):
+        seen[step] = user
+        ids = {r["text"][:40]: r["id"] for r in e.recent(30)}
+        return json.dumps({"user_facts": [{"text": "Kayla has a garden where herbs grow in rows of assembly code.", "sources": [ids["Kneeling in the garden with herbs growin"], ids["I did. In my dream I was kneeling in a g"]]},
+                                          {"text": "Kayla would love a job writing kernels all day.", "sources": [ids["My dream job would be writing kernels al"]]}],
+                           "self_notes": [], "relationship_notes": [], "insights": [], "superseded": [], "verdicts": [],
+                           "user_profile": "", "self_profile": "", "relationship_profile": ""})
+    r = reflect_once(e, p._cfg, llm=reflector, dry_run=True)
+    assert "USER (DREAM TALK: about a dream the assistant had)" in seen["propose"] and "Nothing in a dream" in seen["propose"]
+    assert r["dropped_assistant_only"] == ["Kayla has a garden where herbs grow in rows of assembly code."]
+    assert [f["text"] for f in r["proposed"]["fact"]] == ["Kayla would love a job writing kernels all day."]
+    # and dreams do not feed on talk about dreams
+    for seed in range(8):
+        assert not {e.get(f["id"])["kind"] for f in gather_fragments(e, p._cfg, random.Random(seed))} & {DREAM_TALK_USER, DREAM_TALK_ASSISTANT}
+    p.shutdown()
+
+
+def test_cli_dreamtalk_labels_what_is_already_stored(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io
+    p = make(tmp_path)
+    e = p._engine
+    talk(e, "s-new", time.time() - 3600, GARDEN)
+    llm = fake({"dream": json.dumps({"dream": "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code that boots slowly."}),
+                "wake": json.dumps({"thoughts": "Odd.", "connections": []})})
+    sleep_once = __import__("holonomic.sleep", fromlist=["sleep_once"]).sleep_once
+    sleep_once(e, p._cfg, llm=llm, steps=["dream"], rng=random.Random(2))
+    # conversation stored by an older version, with no labels
+    old = e.remember("In my dream I was kneeling in a garden of assembly code.", kind="said_assistant", session="s1")[0]
+    real = e.remember("The tomato plants need water early tomorrow.", kind="said_assistant", session="s1")[0]
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *a, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        listed = run("dreamtalk")
+        assert f"[#{old}]" in listed and f"[#{real}]" not in listed and "Nothing changed" in listed
+        assert "Labelled as dream talk" in run("dreamtalk", "--apply") and "Nothing to label" in run("dreamtalk")
+        assert "dreamtalk_assistant" in run("show", str(old))
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)

@@ -45,6 +45,12 @@ DERIVED_KINDS = (FACT, SELF_NOTE, BOND_NOTE, INSIGHT, "dream")
 SUBJECTS = {"user": FACT, "self": SELF_NOTE, "us": BOND_NOTE}
 FOUNDATION_MAX_CHARS = 20000      # a real SOUL.md ran to 10,000 characters; 6,000 cut it off mid-section
 WATERMARK = "reflect:last_id"
+# Conversation about a dream the agent had.  The conversation really happened, so it is an ordinary
+# waking memory, but what was said in it describes a dream.  These kinds keep that from being read
+# as fact: they are labelled wherever they are shown, and no fact about the user may rest on them.
+DREAM_TALK_USER, DREAM_TALK_ASSISTANT = "dreamtalk_user", "dreamtalk_assistant"
+DREAM_TALK_KINDS = (DREAM_TALK_USER, DREAM_TALK_ASSISTANT)
+ASSISTANT_KINDS = ("said_assistant", DREAM_TALK_ASSISTANT)
 
 REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_enabled": False,
@@ -145,6 +151,10 @@ it, and never write anything about the assistant that contradicts it.
 
 {rules}
 
+Lines marked DREAM TALK are the two of them discussing a dream the assistant had while idle. Nothing in a dream \
+happened. Never turn anything from those lines into a fact about the user or the world. That they talked about a \
+dream may be worth a note about the two of them; what was in the dream is not knowledge.
+
 Write:
 {facts}
 - self_notes: what the assistant learned about itself, written in the first person ("I ..."): an opinion or taste \
@@ -164,6 +174,9 @@ Below are an AI assistant's newest memories, oldest first. Lines marked USER wer
 the assistant itself, NOTE were stored deliberately.
 
 {rules}
+
+Lines marked DREAM TALK are about a dream the assistant had. Nothing in a dream happened: never turn anything from \
+those lines into a fact.
 
 Write:
 {facts}
@@ -287,7 +300,9 @@ def _parse(raw: str) -> Dict[str, Any]:
 
 
 def _speaker(kind: str) -> str:
-    return {"said_user": "USER", "asked_user": "USER", "said_assistant": "ASSISTANT"}.get(kind, "NOTE")
+    return {"said_user": "USER", "asked_user": "USER", "said_assistant": "ASSISTANT",
+            DREAM_TALK_USER: "USER (DREAM TALK: about a dream the assistant had)",
+            DREAM_TALK_ASSISTANT: "ASSISTANT (DREAM TALK: describing a dream it had, not real events)"}.get(kind, "NOTE")
 
 
 def _line(memory: dict) -> str:
@@ -474,7 +489,8 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                                "sources": list(dict.fromkeys(sources))[:4]})
     report["superseded"] = superseded
     # A fact about the user must rest on something that did not come from the assistant's own mouth.
-    not_assistant = {m["id"] for m in batch if m["kind"] != "said_assistant"}
+    # Nor on talk about a dream: nothing in a dream happened.
+    not_assistant = {m["id"] for m in batch if m["kind"] not in ASSISTANT_KINDS and m["kind"] not in DREAM_TALK_KINDS}
     report["cut_off"] = []
     facts = _clean_items(data.get("user_facts"), valid, 10, report["cut_off"])
     report["dropped_assistant_only"] = [f["text"] for f in facts if not set(f["sources"]) & not_assistant]

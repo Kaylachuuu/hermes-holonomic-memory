@@ -8,6 +8,7 @@
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
+    hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -51,7 +52,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | profile [--history]')
         return
@@ -74,6 +75,21 @@ def holonomic_command(args) -> None:
     try:
         if action == "sleep":
             _sleep(engine, cfg, args)
+        elif action == "dreamtalk":
+            from .provider import is_dream_talk, mark_dream_talk
+            found = []
+            for m in reversed(engine.recent(2000)):
+                if m["kind"] in ("said_user", "said_assistant") and is_dream_talk(
+                        engine, m["id"], m["text"], "user" if m["kind"] == "said_user" else "assistant", cfg):
+                    found.append(m)
+            print(f"{len(found)} piece(s) of conversation look like talk about a dream"
+                  + (":" if found else ". Nothing to label."))
+            for m in found:
+                print(f"  [#{m['id']}] {m['kind']:<14} {_clip(m['text'], args.width)}")
+                if args.apply:
+                    mark_dream_talk(engine, m["id"], m["text"], m["kind"], cfg)
+            if found:
+                print("Labelled as dream talk." if args.apply else "Nothing changed. Run again with --apply to label them.")
         elif action == "dreams":
             from .sleep import dreams
             found = dreams(engine, args.n)
@@ -325,6 +341,9 @@ def register_cli(subparser) -> None:
     slp.add_argument("sleep_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
     slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
+    dt = subs.add_parser("dreamtalk", help="Find stored conversation that is talk about a dream, and label it")
+    dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
+    dt.add_argument("--width", type=int, default=110, help="Characters of text to show")
     drm = subs.add_parser("dreams", help="Show recent dreams")
     drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
     show = subs.add_parser("show", help="Full text of memories and what each is linked to")
