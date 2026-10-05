@@ -636,6 +636,8 @@ def test_painters_speak_to_an_image_server(tmp_path):
         a = paint.make_painter({"dream_image_api": "a1111", "dream_image_host": host, "dream_image_model": "dreamshaper", "dream_image_steps": 20,
                                 "dream_image_width": 640, "dream_image_height": 384, "dream_image_strength": 0.5, "dream_image_negative": "text"})
         assert a("a cat", None) == png and a("a cat", b"START") == png
+        assert a("a cat", None, size=(384, 640)) == png and (json.loads(got[2][2])["width"], json.loads(got[2][2])["height"]) == (384, 640)
+        del got[2]
         path, _, raw = got[0]; body = json.loads(raw)
         assert path == "/sdapi/v1/txt2img" and body["prompt"] == "a cat" and (body["width"], body["height"], body["steps"]) == (640, 384, 20)
         assert body["override_settings"] == {"sd_model_checkpoint": "dreamshaper"} and body["negative_prompt"] == "text" and "init_images" not in body
@@ -703,6 +705,8 @@ def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
         saved = json.loads((home / "holonomic.json").read_text())
         assert saved["dream_images"] == "from_images" and saved["dream_image_use_people"] is True and saved["dream_image_width"] == 640
         assert "are not drawn from" in run("dreams", "images", "--people", "no")
+        out = run("dreams", "images", "--strength", "7", "--style", "ink wash, mist")
+        assert "may move from the images it starts from: 1.0" in out and "style added to every scene: ink wash, mist" in out
         out = run("dreams", "images", "--api", "comfyui", "--host", "http://127.0.0.1:9", "--test", "a cat asleep in a greenhouse")
         assert "The image generator did not produce a picture: Could not reach the image server" in out
         assert "Choose one of" in run("dreams", "images", "sometimes") and "WIDTHxHEIGHT" in run("dreams", "images", "--size", "big")
@@ -766,3 +770,29 @@ def test_painter_for_comfyui(tmp_path):
             paint.make_painter(dict(sc, dream_image_model="x"))("refuse this", None)
     finally:
         server.shutdown()
+
+
+def test_a_picture_drawn_from_a_tall_image_is_tall(tmp_path):
+    import random
+    from holonomic import images
+    from holonomic.sleep import sleep_config, sleep_once
+    m, ids, now = dream_store(tmp_path)
+    tall = images.add_image(m, picture(900, 1600, colour=(8, 8, 8)), CFG, session="s-today")
+    images.describe(m, CFG, tall["id"], see=eyes(whole={"description": "A tall photo of a lighthouse on a cliff above the sea.", "labels": ["lighthouse"], "text": "", "people": False}))
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=3, dream_image_seeds=9)
+    assert sleep_config({})["dream_image_strength"] == 0.75
+    drawn = []
+
+    def paint(prompt, start, size=None):
+        drawn.append((size, size_of(start) if start else None))
+        return picture(*(size or (768, 512)), colour=(len(drawn), 9, 9))
+    scenes = [{"picture": "A lighthouse standing in a garden of tomato plants.", "images": [tall["id"]]},
+              {"picture": "A black cat asleep on a couch in the lighthouse lamp room.", "images": [ids["cat"]]},
+              {"picture": "A garden path with no image behind it at all.", "images": []}]
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    assert drawn == [((512, 768), (512, 768)), ((768, 512), (768, 512)), ((768, 512), None)] and not report["errors"]
+    assert size_of(open(report["dreams"][0]["pictures"][0]["file"], "rb").read()) == (512, 768)
+    # set to draw tall pictures: a wide image turns the frame the other way
+    drawn.clear()
+    sleep_once(m, dict(cfg, dream_image_width=512, dream_image_height=768), llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now + 9, paint=paint)
+    assert [d[0] for d in drawn] == [(512, 768), (768, 512), (512, 768)]

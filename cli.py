@@ -9,7 +9,7 @@
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
     hermes holonomic dreams images [off|words|pictures|from_images] [--api comfyui|a1111|openai] [--host URL] [--model NAME]
-                                   [--size 768x512] [--count 3] [--people yes|no]      what images do in dreams
+                                   [--size 768x512] [--count 3] [--people yes|no] [--strength 0.75] [--style "..."]
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
     hermes holonomic images                       image memory: status, and what is waiting to be described
@@ -258,6 +258,10 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_count"] = args.count
     if args.people:
         values["dream_image_use_people"] = args.people == "yes"
+    if args.strength is not None:
+        values["dream_image_strength"] = min(max(args.strength, 0.1), 1.0)
+    if args.style is not None:
+        values["dream_image_style"] = args.style
     if args.size:
         try:
             w, h = (int(v) for v in args.size.lower().split("x"))
@@ -294,6 +298,9 @@ def _dream_images(cfg, args) -> None:
         print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}")
     if mode == "from_images":
         print(f"  images with real people in them: {'may be drawn from' if sc['dream_image_use_people'] else 'are not drawn from (--people yes to allow)'}")
+        print(f"  how far a picture may move from the images it starts from: {sc['dream_image_strength']} (--strength)")
+    if mode in ("pictures", "from_images"):
+        print(f"  style added to every scene: {sc['dream_image_style'] or '(none)'} (--style)")
     if not cfg.get("image_enabled"):
         print("  Image memory is off, so there are no images to dream of. Turn on with: hermes holonomic images on")
     if values:
@@ -651,6 +658,9 @@ def register_cli(subparser) -> None:
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
+    drm.add_argument("--strength", type=float, help="With 'images': from_images: how far a picture may move from the images it "
+                                                     "starts from, 0.1 (barely) to 1.0 (entirely)")
+    drm.add_argument("--style", help="With 'images': words added to every scene, e.g. \"dreamlike, soft light\"")
     show = subs.add_parser("show", help="Full text of memories and what each is linked to")
     show.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     fg = subs.add_parser("forget", help="Remove memories for good")

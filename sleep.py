@@ -20,6 +20,7 @@ Only stdlib imports here: Hermes executes this file when it loads the plugin.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import random
 import re
@@ -80,7 +81,9 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_width": 768,
     "dream_image_height": 512,
     "dream_image_steps": 0,           # 0 = the server's own default
-    "dream_image_strength": 0.6,      # from_images: how far the result may move from the images it starts from (0-1)
+    # from_images: how far a picture may move from the images it starts from (0-1).  At 0.6 the first real
+    # results were the photographs again, lightly retouched, with nothing of the dream in them.
+    "dream_image_strength": 0.75,
     "dream_image_style": "dreamlike, soft light, slightly out of focus",
     "dream_image_negative": "",
     "dream_image_timeout": 600,
@@ -512,11 +515,20 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
         return scenes
     size = (int(sc["dream_image_width"]), int(sc["dream_image_height"]))
     style = str(sc["dream_image_style"] or "").strip()
+    try:                                         # a painter written before pictures could be turned takes no size
+        sized = "size" in inspect.signature(painter).parameters
+    except (TypeError, ValueError):
+        sized = False
     made = []
     for s in scenes:
         try:
-            start = _images.blend(engine, s["from"], size) if s["from"] else None
-            picture = painter(s["scene"] + (", " + style if style else ""), start)
+            # A picture drawn from a tall image is tall: cutting the middle out of a portrait to fill a wide
+            # frame took the top off the head of the first person drawn this way.
+            turned = bool(s["from"]) and sized and _images.is_portrait(engine, s["from"][0]) != (size[1] > size[0])
+            shape = (size[1], size[0]) if turned else size
+            start = _images.blend(engine, s["from"], shape) if s["from"] else None
+            words = s["scene"] + (", " + style if style else "")
+            picture = painter(words, start, size=shape) if sized else painter(words, start)
             img = _images.add_dream_image(engine, picture, cfg, dream_id=one["id"], scene=s["scene"], sources=s["from"] if start else [])
         except Exception as exc:                 # the server is off, or sent back something that is not a picture
             report["errors"].append(f"dream pictures{label}: {exc}")

@@ -336,7 +336,7 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |
-| `dream_image_strength` | `0.6` | `from_images`: how far a picture may move from the images it starts from |
+| `dream_image_strength` | `0.75` | `from_images`: how far a picture may move from the images it starts from |
 | `dream_image_style` | `dreamlike, soft light, slightly out of focus` | Added to every scene |
 | `dream_image_use_people` | `false` | `from_images`: may images with real people be drawn from |
 

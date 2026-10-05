@@ -7,7 +7,7 @@ of three interfaces:
   a1111    the Stable Diffusion WebUI API (AUTOMATIC1111, Forge, SD.Next):  /sdapi/v1/txt2img, /sdapi/v1/img2img
   openai   the OpenAI images API, which several local servers also speak:   /v1/images/generations, /v1/images/edits
 
-A painter is a function (prompt, starting picture or None) -> image bytes.  With a starting picture the
+A painter is a function (prompt, starting picture or None, size or None) -> image bytes.  With a starting picture the
 server is asked to rework it towards the prompt instead of starting from noise.
 
 Only the standard library is imported: Hermes executes every top-level module in this folder at load.
@@ -74,13 +74,14 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     if api not in APIS or not host:
         raise PaintError("No image generator is set. Run: hermes holonomic dreams images pictures --api comfyui|a1111|openai --host URL")
     model = str(sc.get("dream_image_model") or "")
-    width, height = int(sc.get("dream_image_width") or 768), int(sc.get("dream_image_height") or 512)
+    default_width, default_height = int(sc.get("dream_image_width") or 768), int(sc.get("dream_image_height") or 512)
     steps, timeout = int(sc.get("dream_image_steps") or 0), float(sc.get("dream_image_timeout") or 600)
     strength = min(max(float(sc.get("dream_image_strength") or 0.6), 0.05), 1.0)
     negative = str(sc.get("dream_image_negative") or "")
     poll = float(sc.get("dream_image_poll_seconds") or 1.0)
 
-    def a1111(prompt: str, start: Optional[bytes]) -> bytes:
+    def a1111(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
+        width, height = size or (default_width, default_height)
         body: Dict[str, Any] = {"prompt": prompt, "width": width, "height": height, "batch_size": 1, "n_iter": 1}
         if negative:
             body["negative_prompt"] = negative
@@ -94,7 +95,8 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
         images = data.get("images") or []
         return _decode(images[0] if images else None)
 
-    def openai(prompt: str, start: Optional[bytes]) -> bytes:
+    def openai(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
+        width, height = size or (default_width, default_height)
         fields = {"prompt": prompt, "size": f"{width}x{height}", "n": "1", "response_format": "b64_json"}
         if model:
             fields["model"] = model
@@ -114,7 +116,8 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
                 raise PaintError(f"Could not fetch the picture the image server made: {exc}") from exc
         raise PaintError("The image server replied without a picture.")
 
-    def comfyui(prompt: str, start: Optional[bytes]) -> bytes:
+    def comfyui(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
+        width, height = size or (default_width, default_height)
         checkpoint = model
         if not checkpoint:                       # none named: use the first one the server has
             info = _post(f"{host}/object_info/CheckpointLoaderSimple", None, "", min(timeout, 60))

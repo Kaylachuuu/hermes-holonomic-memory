@@ -676,6 +676,11 @@ def has_people(engine, image_id: int) -> bool:
     return any(_PEOPLE_WORDS & set(label.split()) for label in labels)
 
 
+def is_portrait(engine, image_id: int) -> bool:
+    row = _row(engine, image_id)
+    return bool(row) and row["height"] > row["width"]
+
+
 def blend(engine, image_ids: List[int], size: Tuple[int, int]) -> Optional[bytes]:
     """One picture made of up to two stored images laid over each other, the size a dream picture will be.
     This is what an image generator is given to rework, so a dream can carry the shapes and colours of things
