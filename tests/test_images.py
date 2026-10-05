@@ -607,7 +607,7 @@ def test_dream_pictures_drawn_from_images_she_has_seen(tmp_path):
                rng=random.Random(1), now=now + 5, paint=paint)
     assert painted[0][0] == "A black cat asleep on a couch that is also a sofa, in two kinds of light., soft light"
     sleep_once(m, dict(cfg, dream_image_style="soft light"), llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now + 7, paint=paint)
-    assert painted[3][0].endswith("asleep on a grey sofa in the afternoon sun. soft light") and painted[4][0].endswith("tomato plants., soft light")
+    assert painted[2][0].endswith("asleep on a grey sofa in the afternoon sun. soft light") and painted[3][0].endswith("tomato plants., soft light")
     seen.clear(); painted.clear()
     sleep_once(m, dict(cfg, dream_image_use_people=True), llm=dreamer(scenes, seen), steps=["dream"], rng=random.Random(1), now=now + 9, paint=paint)
     assert f"[{ids['me']}]" in seen["scenes"][0].split("IMAGES:")[1] and painted[1][1] is not None     # allowed when the user says so
