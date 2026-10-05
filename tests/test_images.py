@@ -374,6 +374,8 @@ def test_cli_images(tmp_path):
         assert "9 part(s) waiting to be looked at again" in out and "looked at 9 part(s)" in run("images", "process")
         assert "Usage: hermes holonomic images redo" in run("images", "redo")
         assert "images: 1" in run("stats")
+        assert "real people in it: no" in run("images", "show", "1") and "Dreams will not draw from it" in run("images", "people", "1", "yes")
+        assert "real people in it: yes" in run("images", "show", "1") and "Usage:" in run("images", "people", "1", "maybe")
         assert "Nothing removed." in run("images", "forget", "1") and "images kept: 1" in run("images")
         assert "Forgot image #1 and deleted the files" in run("images", "forget", "1", "--yes")
         assert "images kept: 0" in run("images") and not list((home / "holonomic" / "images").glob("*"))
@@ -796,3 +798,16 @@ def test_a_picture_drawn_from_a_tall_image_is_tall(tmp_path):
     drawn.clear()
     sleep_once(m, dict(cfg, dream_image_width=512, dream_image_height=768), llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now + 9, paint=paint)
     assert [d[0] for d in drawn] == [(512, 768), (768, 512), (512, 768)]
+
+
+def test_a_cat_with_a_face_is_not_a_person(tmp_path):
+    from holonomic import images
+    m = store(tmp_path)
+    img = images.add_image(m, picture(), CFG)
+    images.process(m, CFG, see=eyes({"centre": {"description": "The cat's face and head, eyes half closed.", "labels": ["face", "head", "whisker"]},
+                                     "top left": {"description": "A hand-knitted blanket over the arm of the couch.", "labels": ["blanket", "arm"]}}))
+    m._db.execute("UPDATE images SET meta = '{}' WHERE id = ?", (img["id"],))        # described before the model was asked about people
+    assert not images.has_people(m, img["id"]) and images.get_image(m, img["id"])["people"] is False
+    assert images.set_people(m, img["id"], True) and images.has_people(m, img["id"]) and not images.set_people(m, 99, True)
+    m._db.execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps({"people": True, "people_said": False}), img["id"]))
+    assert not images.has_people(m, img["id"])                                       # what the user said wins over what the model judged

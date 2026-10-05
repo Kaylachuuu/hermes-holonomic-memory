@@ -144,8 +144,10 @@ _WHOLE_SCHEMA = {"type": "object", "properties": {"description": {"type": "strin
                                                   "people": {"type": "boolean"}},
                  "required": ["description", "labels", "text", "people"]}
 # For images described before the model was asked whether people are visible.
-_PEOPLE_WORDS = frozenset("person people woman women man men girl boy child children baby kid kids face selfie portrait daughter son "
-                          "mother father family crowd hand hands arm".split())
+# Words for a person only: 'face', 'head' and 'hand' were here once, and a photo of a cat was taken to have people in it
+# because its parts were labelled 'face' and 'head'.
+_PEOPLE_WORDS = frozenset("person people woman women man men girl girls boy boys child children baby toddler kid kids selfie "
+                          "daughter son mother father family crowd".split())
 _PART_SCHEMA = {"type": "object", "properties": {"notable": {"type": "boolean"}, "description": {"type": "string"}, "labels": _LABELS},
                 "required": ["notable", "description", "labels"]}
 _LOOK_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
@@ -638,6 +640,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "realm": row["realm"], "source": row["source"], "session": row["session"], "origin": row["origin"],
            "caption": row["caption"], "created_at": row["created_at"], "seen": row["seen"], "last_seen": row["last_seen"],
            "memory_id": row["memory_id"], "description": (memory or {}).get("text", ""), "labels": labels,
+           "people": has_people(engine, row["id"]),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -663,12 +666,25 @@ def count_images(engine, realm: str = "waking") -> int:
 
 # ------------------------------------------------------------ dream pictures
 
+def set_people(engine, image_id: int, people: bool) -> bool:
+    """Say whether an image has real people in it, overriding what the vision model judged."""
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return False
+    meta = dict(json.loads(row["meta"] or "{}"), people_said=bool(people))
+    with engine._lock:
+        _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps(meta), row["id"]))
+    return True
+
+
 def has_people(engine, image_id: int) -> bool:
-    """Whether real people are visible in an image, as the vision model judged when it described it."""
+    """Whether real people are visible in an image: what the user said if they said, otherwise what the vision
+    model judged when it described the image, otherwise a guess from what was noticed in it."""
     row = _row(engine, image_id)
     if row is None:
         return False
-    people = json.loads(row["meta"] or "{}").get("people")
+    meta = json.loads(row["meta"] or "{}")
+    people = meta.get("people_said", meta.get("people"))
     if isinstance(people, bool):
         return people
     with engine._lock:
