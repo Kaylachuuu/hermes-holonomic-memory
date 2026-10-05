@@ -10,6 +10,13 @@
     hermes holonomic dreams [-n 5]
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
+    hermes holonomic images                       image memory: status, and what is waiting to be described
+    hermes holonomic images on [--model NAME] [--host URL] [--sections idle|now|off]  |  off
+    hermes holonomic images list [-n 20] | show ID | find cat | labels
+    hermes holonomic images add photo.jpg [--say "This is my cat"]     keep an image and describe it now
+    hermes holonomic images process               describe everything that is waiting
+    hermes holonomic images look ID "what colour is the car?" [--section N]
+    hermes holonomic images forget ID [--yes] [--keep-files]
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -53,9 +60,12 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
-              'reflect status|on|off|now | sleep status|on|off|now | dreams | profile [--history]')
+              'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
+        return
+    if action == "images" and args.images_action in ("on", "off"):
+        _images_toggle(args)
         return
     if action == "reflect" and args.reflect_action in ("on", "off"):
         _reflect_toggle(args)
@@ -76,6 +86,8 @@ def holonomic_command(args) -> None:
     try:
         if action == "sleep":
             _sleep(engine, cfg, args)
+        elif action == "images":
+            _images_cmd(engine, cfg, args)
         elif action == "relabel":
             to_dream = {"said_user": "dreamtalk_user", "said_assistant": "dreamtalk_assistant"}
             to_said = {v: k for k, v in to_dream.items()}
@@ -145,6 +157,13 @@ def holonomic_command(args) -> None:
                           f"for good, run the same command with --yes.")
                     return
                 for mid in real:
+                    mem = engine.get(mid) or {}
+                    if mem.get("kind") == "image" and (mem.get("meta") or {}).get("image_id"):
+                        from . import images as _img          # what an image showed: forget the image with it
+                        _img.forget_image(engine, int(mem["meta"]["image_id"]))
+                        print(f"  #{mid} described image #{mem['meta']['image_id']}, which is forgotten too. Its file is still on "
+                              f"disk; `hermes holonomic images forget` removes files.")
+                        continue
                     engine.forget(mid)
                 print(f"Forgot {', '.join('#' + str(m) for m in real)}. This cannot be undone. "
                       "Profiles are not changed by this; see `hermes holonomic profile`.")
@@ -171,7 +190,8 @@ def holonomic_command(args) -> None:
                 for entry in history:
                     print(f"  [{_when(entry['created_at'])}] {entry['text']}")
         elif action == "stats":
-            for key, value in engine.stats().items():
+            from . import images as _img
+            for key, value in dict(engine.stats(), images=_img.count_images(engine)).items():
                 print(f"  {key}: {value}")
             for key in ("min_score", "score_band", "lexical_weight", "assistant_weight", "recall_k"):
                 print(f"  {key} (config): {cfg[key]}")
@@ -207,6 +227,161 @@ def holonomic_command(args) -> None:
                 print("  (nothing stored matches)")
     finally:
         engine.close()
+
+
+def _images_toggle(args) -> None:
+    from hermes_constants import get_hermes_home
+    from .images import image_config
+    from .provider import load_config, write_config
+    home = get_hermes_home()
+    values = {"image_enabled": args.images_action == "on"}
+    if args.images_action == "on":
+        if args.model:
+            values["image_model"] = args.model
+        if args.host:
+            values["image_host"] = args.host.rstrip("/")
+        if args.sections:
+            values.update({"image_sections": args.sections != "off"},
+                          **({"image_sections_when": args.sections} if args.sections != "off" else {}))
+        if not image_config(dict(load_config(home), **values))["image_model"]:
+            print("Image memory needs a model that can see. Run: hermes holonomic images on --model NAME   (a name from `ollama list`)")
+            return
+    write_config(home, values)
+    ic = image_config(load_config(home))
+    print(f"Image memory is {'ON' if ic['image_enabled'] else 'OFF'}"
+          + (f" (model {ic['image_model']} at {ic['image_host']}; parts of each image: "
+             f"{'not looked at' if not ic['image_sections'] else 'looked at ' + ('straight away' if ic['image_sections_when'] == 'now' else 'when the conversation is quiet')})"
+             if ic["image_enabled"] else "")
+          + ". Restart Hermes for a running session to pick this up.")
+
+
+def _print_image(img, width: int = 110, full: bool = False) -> None:
+    print(f"image #{img['id']}  {_when(img['created_at'])}  {img['width']}x{img['height']}  {img['bytes'] // 1024} KB"
+          + (f"  shown {img['seen']} times" if img["seen"] > 1 else "") + (f"  ({img['origin']})" if img["origin"] else ""))
+    print(f"    file: {img['file']}")
+    if full and img["original"] != img["file"]:
+        print(f"    original: {img['original']}")
+    if img["caption"]:
+        print(f"    said when shown: {img['caption'] if full else _clip(img['caption'], width)}")
+    described = img["description"] or "(not described yet)"
+    print(f"    [#{img['memory_id']}] {described if full else _clip(described, width)}" if img["memory_id"] else f"    {described}")
+    if img["labels"]:
+        print(f"    things in it: {', '.join(img['labels'])}")
+    if img["sections_waiting"]:
+        print(f"    {img['sections_waiting']} of {img['sections_total']} parts not looked at yet")
+    for s in img.get("sections", []):
+        if s["description"]:
+            print(f"    part {s['section']} ({s['place']}) [#{s['memory_id']}]: {s['description']}")
+        elif full and s["looked_at"]:
+            print(f"    part {s['section']} ({s['place']}): nothing notable")
+
+
+def _images_cmd(engine, cfg, args) -> None:
+    from pathlib import Path
+    from . import images as _img
+    from .provider import extract_keys
+    from .reflect import ReflectionError
+    ic = _img.image_config(cfg)
+    what, items = args.images_action, list(args.items or [])
+    if what == "status":
+        waiting = _img.pending(engine)
+        print(f"Image memory is {'ON' if ic['image_enabled'] else 'OFF'}.  Model: {ic['image_model'] or '(none set)'} at {ic['image_host']}")
+        print(f"  parts of each image: "
+              + ("not looked at" if not ic["image_sections"] else f"{ic['image_grid']}x{ic['image_grid']} overlapping, looked at "
+                 + ("straight away" if ic["image_sections_when"] == "now" else f"after {ic['image_idle_seconds']} s of quiet")))
+        print(f"  images kept: {_img.count_images(engine)}   waiting for a description: {waiting['images']}   "
+              f"parts waiting to be looked at: {waiting['sections']}")
+        print(f"  files are in: {engine.path / 'images'}")
+        if not ic["image_enabled"]:
+            print("  Turn on with: hermes holonomic images on --model NAME [--host URL]")
+    elif what == "list":
+        found = _img.list_images(engine, args.n)
+        print(f"{len(found)} most recent image(s), newest first:" if found else "No images yet.")
+        for img in found:
+            _print_image(img, args.width)
+    elif what == "show":
+        for raw in items:
+            img = _img.get_image(engine, int(raw), sections=True) if raw.isdigit() else None
+            _print_image(img, full=True) if img else print(f"image #{raw}: no such image")
+    elif what == "labels":
+        found = _img.all_labels(engine, 200)
+        print("Things noticed in images (and in how many):" if found else "Nothing noticed yet.")
+        print("  " + ",  ".join(f"{label} ({n})" for label, n in found)) if found else None
+    elif what == "find":
+        if not items:
+            print("Usage: hermes holonomic images find LABEL      (see `hermes holonomic images labels`)")
+            return
+        found = _img.find_by_label(engine, " ".join(items))
+        print(f"{len(found)} image(s) in which '{' '.join(items)}' was noticed:" if found else f"No image in which '{' '.join(items)}' was noticed.")
+        for img in found:
+            _print_image(img, args.width)
+            print(f"    matched: {', '.join(img['matched'])}" + (f"   noticed in the: {', '.join(img['matched_in'])}" if img["matched_in"] else ""))
+    elif what == "add":
+        if not items:
+            print('Usage: hermes holonomic images add FILE... [--say "what you would say when showing it"]')
+            return
+        for raw in items:
+            try:
+                img = _img.add_image(engine, Path(raw).expanduser().read_bytes(), cfg, origin=raw, caption=args.say or "",
+                                     session="shown-from-terminal", source="user")
+            except (OSError, _img.ImageError) as exc:
+                print(f"{raw}: {exc}")
+                continue
+            if not img["new"]:
+                print(f"{raw}: she has seen this exact image before.")
+                _print_image(img, args.width)
+                continue
+            report = {"calls": []}
+            try:
+                t0 = time.time()
+                img = _img.describe(engine, cfg, img["id"], key_fn=extract_keys, report=report) or img
+                print(f"{raw}: kept and described in {time.time() - t0:.0f} s.")
+            except (_img.ImageError, ReflectionError) as exc:
+                print(f"{raw}: kept as image #{img['id']}, but not described: {exc}")
+            _print_image(img, full=True)
+        waiting = _img.pending(engine)
+        if waiting["sections"]:
+            print(f"\n{waiting['sections']} part(s) waiting to be looked at. Run: hermes holonomic images process")
+    elif what == "process":
+        waiting = _img.pending(engine)
+        if not (waiting["images"] or waiting["sections"]):
+            print("Nothing is waiting.")
+            return
+        print(f"Describing {waiting['images']} image(s) and looking at {waiting['sections']} part(s) with {ic['image_model'] or '(no model)'} "
+              f"at {ic['image_host']} ...")
+        t0 = time.time()
+        report = _img.process(engine, cfg, key_fn=extract_keys)
+        _print_calls(report)
+        print(f"Described {len(report['described'])} image(s), looked at {report['sections']} part(s) in {time.time() - t0:.0f} s.")
+        for err in report["errors"]:
+            print(f"  stopped: {err}")
+        left = _img.pending(engine)
+        if left["images"] or left["sections"]:
+            print(f"  still waiting: {left['images']} image(s), {left['sections']} part(s)")
+    elif what == "look":
+        if len(items) < 2 or not items[0].isdigit():
+            print('Usage: hermes holonomic images look ID "question" [--section N]')
+            return
+        try:
+            print(_img.look(engine, cfg, int(items[0]), " ".join(items[1:]), section=args.section))
+        except (_img.ImageError, ReflectionError) as exc:
+            print(f"Could not look: {exc}")
+    elif what == "forget":
+        found = [_img.get_image(engine, int(raw)) for raw in items if raw.isdigit()]
+        found = [img for img in found if img]
+        if not found:
+            print("No such image. Usage: hermes holonomic images forget ID... [--yes] [--keep-files]")
+            return
+        for img in found:
+            _print_image(img, args.width)
+        if not args.yes:
+            print(f"Nothing removed. To forget {'this image' if len(found) == 1 else 'these images'} for good"
+                  f"{'' if args.keep_files else ', and delete the files'}, run the same command with --yes.")
+            return
+        for img in found:
+            _img.forget_image(engine, img["id"], delete_files=not args.keep_files)
+        print(f"Forgot image {', '.join('#' + str(i['id']) for i in found)}"
+              + (" (files kept on disk)." if args.keep_files else " and deleted the files. This cannot be undone."))
 
 
 def _print_calls(report) -> None:
@@ -385,6 +560,20 @@ def register_cli(subparser) -> None:
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
     ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (slow; can run away on small models)")
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
+    im = subs.add_parser("images", help="Image memory: what she has been shown")
+    im.add_argument("images_action", nargs="?", default="status",
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget"])
+    im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
+    im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
+    im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")
+    im.add_argument("--sections", choices=["idle", "now", "off"],
+                    help="With 'on': look at the parts of each image when the conversation is quiet (default), straight away, or not at all")
+    im.add_argument("--say", help="With 'add': what you would say when showing the image")
+    im.add_argument("--section", type=int, help="With 'look': a part number, to look closely at one part")
+    im.add_argument("-n", type=int, default=20, help="With 'list': how many (default 20)")
+    im.add_argument("--width", type=int, default=110, help="Characters of text to show")
+    im.add_argument("--yes", action="store_true", help="With 'forget': actually remove")
+    im.add_argument("--keep-files", action="store_true", help="With 'forget': leave the image files on disk")
     prof = subs.add_parser("profile", help="Show the profiles written by reflection")
     prof.add_argument("--history", action="store_true", help="Show earlier versions too")
     prof.add_argument("--set", nargs=2, metavar=("WHO", "TEXT"), help="Write a profile yourself: user, self or us")

@@ -261,7 +261,14 @@ def fade(engine, cfg: Dict[str, Any], report: Dict[str, Any], *, dry_run: bool, 
     for s in engine.sessions(RAW_KINDS):
         done = int(engine.kv_get("episode:" + s["session"], "0") or 0)
         ids += [m["id"] for m in engine.session_memories(s["session"], kinds=RAW_KINDS) if m["id"] <= done]
-    report["fade"] = {"factor": round(factor, 3), "eligible": len(ids), "changed": 0}
+    # What she saw in images fades the same way once it is at least one sleep old.  The files are untouched.
+    try:
+        from . import images as _images
+        seen = _images.memory_ids(engine, described_before=last)
+    except Exception:
+        seen = []
+    ids += seen
+    report["fade"] = {"factor": round(factor, 3), "eligible": len(ids), "images": len(seen), "changed": 0}
     if dry_run or factor > 0.999 or not ids:
         return
     report["fade"]["changed"] = engine.fade(ids, factor)

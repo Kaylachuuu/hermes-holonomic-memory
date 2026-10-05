@@ -236,6 +236,70 @@ hermes holonomic recall "..." --deep
 | `dream_min_words`, `dream_max_words` | `100`, `180` | Length of each dream |
 | `dream_reinforce` | `false` | Let a dream strengthen the old memories it touches |
 
+## Images
+
+Off by default. Turn it on with a model that can see:
+
+```
+hermes holonomic images on --model gemma4 [--host http://OTHER-OLLAMA:11434] [--sections idle|now|off]
+```
+
+When the user attaches an image to a message, three things are kept:
+
+- **The file.** The original bytes, unchanged, in `holonomic/images/`, plus a copy that fits inside
+  1024x768 (768x1024 for a portrait image) for looking at and showing. Showing the same file again
+  does not store it twice; it is counted as seen again, and she is told she has seen it before.
+- **A description of the whole image**, written by the vision model and stored as an ordinary memory
+  (kind `image`), linked to what was said when it was shown. It is recalled, fades and can be
+  reached by deep recall like any other memory.
+- **A description of each part.** The image is cut into a 3x3 grid of parts, each half the width and
+  height and overlapping its neighbours by half, so something cut in two by one part lies near the
+  middle of the next. Each part is shown to the model on its own, with the description of the whole
+  for context, and stored (kind `image_part`) unless the model says it shows nothing notable. Parts
+  are cut from the original when it is larger than the copy. By default this waits until the
+  conversation has been quiet for two minutes and stops when it resumes.
+
+Everything the model names in an image or a part is also filed as a label, so "every image with a
+cat in it" is an exact lookup: `hermes holonomic images find cat`, or the tool's `images` action
+with `label`. It lists every image in which the thing was noticed, and only those.
+
+A recalled image appears once, with its file and the parts that matched:
+
+```
+- [#77] (2026-10-05, image #3 you were shown; file: C:\...\holonomic\images\ab12.view.jpg) A photo of a black cat asleep on a grey sofa...
+    in the top left [#79]: A window with a blue curtain and a spider plant on the sill.
+```
+
+The agent shows an image by writing `MEDIA:` and the file path in its reply (Hermes' own
+convention; the desktop app and messaging platforms display it inline, the terminal does not).
+The tool's `look` action shows a stored image to the vision model again with a question.
+
+```
+hermes holonomic images                       # status, and what is waiting to be described
+hermes holonomic images add photo.jpg --say "This is my cat"     # keep and describe an image from the terminal
+hermes holonomic images process               # describe everything that is waiting
+hermes holonomic images list | show 3 | find cat | labels
+hermes holonomic images look 3 "what colour is the car?" [--section 4]
+hermes holonomic images forget 3 --yes [--keep-files]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `image_enabled` | `false` | Keep and describe images |
+| `image_model`, `image_host` | reflection's | Vision model and its Ollama server |
+| `image_view_width`, `image_view_height` | `1024`, `768` | Size of the copy |
+| `image_sections` | `true` | Also describe the image part by part |
+| `image_grid` | `3` | Parts per side (3 = nine parts) |
+| `image_sections_when` | `idle` | `idle`: when the conversation is quiet; `now`: straight away |
+| `image_idle_seconds` | `120` | How quiet |
+| `image_from_original` | `true` | Cut parts from the original, not the copy |
+| `image_section_min_side` | `640` | Smaller images are not cut into parts |
+
+If the vision model cannot be reached the image is still kept, and described when the model is
+back. Reflection does not read image descriptions: what a picture shows is not something the user
+said. Each image and part has an empty place for a vector, reserved for fingerprints from a vision
+embedding model (recognising similar pictures and things within them without words).
+
 ## Inspecting the store
 
 ```
@@ -267,6 +331,9 @@ this folder.
 - Forgetting removes a memory's text and vector. Its traces stay in the plates as faint noise.
 - Changing the embedding model, plate dimension or capacity requires a new store.
 - One user. Everyone who talks to the agent is treated as the same person.
+- An image is found through what the vision model wrote about it. A thing it did not mention is not
+  found until she looks at the image again. Two different files of the same picture are two images.
+- Only images the user attaches are kept, not images that tools return.
 - Tested against Hermes Agent v0.21.5 (commit bd0affe5).
 
 ## Roadmap
@@ -274,6 +341,9 @@ this folder.
 - Rebuild long-term plates from what survives, so old plates can be retired.
 - A deeper reflection level for stronger models: older linked memories as context, and periodic
   re-derivation of the profiles from all stored facts.
+- Fingerprints for images and their parts from a vision embedding model, with names bound to them,
+  so people, places and things are recognised across images without words.
+- Dreams with images.
 - More than one user.
 
 ## Licence

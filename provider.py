@@ -21,8 +21,10 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_prompt, spawn_context_thread
 
-from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, REFLECT_DEFAULTS, SUBJECTS, IdleReflector,
-                      read_foundation)
+from . import images as _images
+from .images import IMAGE_DEFAULTS
+from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, IMAGE, IMAGE_KINDS, IMAGE_PART, REFLECT_DEFAULTS,
+                      SUBJECTS, IdleReflector, read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ DEFAULTS: Dict[str, Any] = {
 
 DEFAULTS.update(REFLECT_DEFAULTS)
 DEFAULTS.update(SLEEP_DEFAULTS)
+DEFAULTS.update(IMAGE_DEFAULTS)
 
 _DREAM_WORD_RE = re.compile(r"\bdream(?:s|t|ed|ing)?\b", re.IGNORECASE)
 
@@ -67,12 +70,23 @@ TOOL_SCHEMA = {
         "- feedback: rate `memory_id` as `helpful` or `wrong`. Wrong memories sink, helpful ones rise.\n"
         "- forget: permanently remove `memory_id`. Only when asked to, or when a memory is clearly false.\n"
         "- dreams: your recent dreams and what you made of them. Dreams are not things that happened.\n"
+        "- images: images you have been shown. With `label`, every image in which that thing was noticed (e.g. 'cat'); "
+        "with `query`, images whose description matches; with `image_id`, one image and what is in each part of it; "
+        "with none of these, the most recent. Each result has a `file`: to show the image to the user, write "
+        "MEDIA: followed by that file path on a line of its own in your reply.\n"
+        "- look: look at a stored image again (`image_id`) to answer a `question` its description does not cover. "
+        "Optional `section` (a part number from 'images') to look closely at one part.\n"
         "- stats: size of the memory store."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["recall", "remember", "related", "feedback", "forget", "dreams", "stats"]},
+            "action": {"type": "string", "enum": ["recall", "remember", "related", "feedback", "forget", "dreams", "images",
+                                                  "look", "stats"]},
+            "label": {"type": "string", "description": "A thing to find in images, e.g. 'cat' (images)."},
+            "image_id": {"type": "integer", "description": "An image id as shown, e.g. image #3 (images, look)."},
+            "question": {"type": "string", "description": "What you want to know about the image (look)."},
+            "section": {"type": "integer", "description": "A part of the image to look at closely (look)."},
             "deep": {"type": "boolean", "description": "Recall only: also search faded memories and follow links further."},
             "query": {"type": "string", "description": "What to search for (recall)."},
             "subject": {"type": "string", "enum": ["user", "self", "us"],
@@ -93,7 +107,7 @@ _KIND_LABEL = {DREAM_TALK_USER: "user said, talking about a dream of yours",
                DREAM_TALK_ASSISTANT: "you said, describing a dream you had; not something that happened",
                EPISODE: "your account of a past conversation", DREAM: "a dream you had",
                DREAM_INSIGHT: "what you made of a dream", "fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
-               "insight": "insight",
+               "insight": "insight", IMAGE: "an image you were shown", IMAGE_PART: "part of an image you were shown",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
 
@@ -138,6 +152,7 @@ def extract_keys(text: str, limit: int = 4) -> List[str]:
 
 def clean_for_storage(text: str, max_chars: int) -> str:
     text = _CONTEXT_RE.sub("", text or "")
+    text = _images.strip_image_markers(text)          # Hermes' notes about an attached image are not the user's words
     text = _CODE_BLOCK_RE.sub("[code omitted]", text)
     text = re.sub(r"[ \t]+", " ", text).strip()
     return text[:max_chars]
@@ -196,7 +211,7 @@ def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "min_strength": float(cfg.get("fade_threshold", 0.35)),      # faded memories need deep recall
             "lexical": float(cfg.get("lexical_weight", 0.2)),
             "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75)),
-                             DREAM_TALK_ASSISTANT: 0.5, DREAM_TALK_USER: 0.75}}
+                             DREAM_TALK_ASSISTANT: 0.5, DREAM_TALK_USER: 0.75, IMAGE_PART: 0.9}}
 
 
 # The user referring to a dream of the agent's ("your dream", "did you dream"), as opposed to "my dream job".
@@ -416,7 +431,19 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "are associated with something that was. Recalled memories can be incomplete or out of date: weigh them, "
                 "don't recite them. Use the holonomic_memory tool to search deeper, to store something important "
                 "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'."
-                + self._profile_block(engine) + self._latest_dream_block(engine))
+                + self._images_block(engine) + self._profile_block(engine) + self._latest_dream_block(engine))
+
+    def _images_block(self, engine) -> str:
+        if not self._cfg.get("image_enabled"):
+            return ""
+        try:
+            n = _images.count_images(engine)
+        except Exception:
+            return ""
+        return (f"\nImages you are shown are kept ({n} so far) along with a description of what you saw in each, so you "
+                "can recall them like anything else. A recalled image comes with its file: to show it to the user, write "
+                "MEDIA: followed by that file path on a line of its own. Use the tool's 'images' action to find images by "
+                "what is in them, and 'look' to look at one again when its description does not answer the question.")
 
     @staticmethod
     def _profile_block(engine) -> str:
@@ -479,32 +506,69 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         sid = session_id or self._session_id
         self._touch()
+        words = _images.strip_image_markers(query)       # recall on what was said, not on Hermes' note about a file
+        k = int(self._cfg["recall_k"])
+        hits = []
         try:
-            k = int(self._cfg["recall_k"])
-            hits = engine.recall(query[:2000], k=k * 3, min_score=float(self._cfg["min_score"]), **recall_options(self._cfg))
-            hits = select_for_injection([h for h in hits if self._visible(h, sid)], self._cfg)
+            if words and not is_trivial_prompt(words):
+                hits = engine.recall(words[:2000], k=k * 3, min_score=float(self._cfg["min_score"]), **recall_options(self._cfg))
+                hits = select_for_injection([h for h in hits if self._visible(h, sid)], self._cfg)
         except Exception as exc:
             logger.warning("holonomic: recall failed: %s", exc)
             return ""
-        lines, used = [], 0
-        for hit in hits:
-            if not self._visible(hit, sid):
-                continue
-            line = self._line(hit, int(self._cfg["max_item_chars"]))
+        lines, used, shown = [], 0, []
+        for hit, image_id, parts in _images.group_hits(hits):      # an image and its parts make one entry
+            line = (self._image_line(engine, hit, image_id, parts, int(self._cfg["max_item_chars"])) if image_id
+                    else self._line(hit, int(self._cfg["max_item_chars"])))
             if used + len(line) > int(self._cfg["max_context_chars"]) or len(lines) >= k:
                 break
             lines.append(line)
+            shown += [hit.id] + [p.id for p in parts]
             used += len(line) + 1
-        dream_block = self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else ""
+        extra = [b for b in (self._seen_before_block(engine, query),
+                             self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
         if not lines:
-            return dream_block
+            return "\n\n".join(extra)
         try:                                             # what gets used stays strong; what is never recalled fades
-            engine.reinforce([h.id for h in hits[:len(lines)]], 0.03)
+            engine.reinforce(shown, 0.03)
         except Exception:
             pass
         self._last_count = len(lines)
-        return ("## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)
-                + ("\n\n" + dream_block if dream_block else ""))
+        return "\n\n".join(["## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)] + extra)
+
+    def _image_line(self, engine, hit, image_id: int, parts: list, max_chars: int) -> str:
+        """One entry for an image: where its file is, what it shows, and which parts of it matched."""
+        when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at))
+        clip = lambda t: (lambda t: t if len(t) <= max_chars else t[:max_chars].rsplit(" ", 1)[0] + "…")(" ".join(t.split()))  # noqa: E731
+        try:
+            img = _images.get_image(engine, image_id)
+        except Exception:
+            img = None
+        if not img:
+            return self._line(hit, max_chars)
+        whole = hit.text if hit.kind == IMAGE else img["description"]
+        line = f"- [#{img['memory_id'] or hit.id}] ({when}, image #{image_id} you were shown; file: {img['file']}) {clip(whole)}"
+        for p in parts:
+            line += f"\n    in the {(p.meta or {}).get('place', 'image')} [#{p.id}]: {clip(p.text)}"
+        return line
+
+    def _seen_before_block(self, engine, query: str) -> str:
+        """If the image attached to this message is one she has already been shown, say so: the file is
+        identical, so this is certain."""
+        if not self._cfg.get("image_enabled"):
+            return ""
+        out = []
+        try:
+            for data, _ in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:4]:
+                img = _images.known(engine, data)
+                if img:
+                    when = time.strftime("%Y-%m-%d", time.localtime(img["created_at"]))
+                    out.append(f"- image #{img['id']}, first shown {when}, seen {img['seen']} time(s) before now"
+                               + (f": {' '.join(img['description'].split())}" if img["description"] else ""))
+        except Exception as exc:
+            logger.debug("holonomic: checking for a known image failed: %s", exc)
+        return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
+                + "\n".join(out)) if out else ""
 
     def _dream_block(self, engine, query: str) -> str:
         """Dreams are only brought up when the conversation turns to them, and always labelled."""
@@ -528,7 +592,32 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     # --------------------------------------------------------------- storing
 
-    def _store_turn(self, engine, user: str, assistant: str, sid: str) -> None:
+    def _store_turn(self, engine, user: str, assistant: str, sid: str, pictures: Optional[list] = None) -> None:
+        said = self._store_words(engine, user, assistant, sid)
+        if pictures:
+            self._store_images(engine, pictures, user, sid, said)
+
+    def _store_images(self, engine, pictures: list, user: str, sid: str, said: List[int]) -> None:
+        """Keep the images attached to this message, linked to what was said about them, and describe each
+        one now.  If the vision model cannot be reached the image is kept and described later."""
+        caption = clean_for_storage(user, 600)
+        for data, origin in pictures:
+            try:
+                img = _images.add_image(engine, data, self._cfg, origin=origin, caption=caption, session=sid, links=said[:2])
+            except Exception as exc:
+                logger.warning("holonomic: could not keep an image (%s)", exc)
+                continue
+            if not img["new"] or not _images.image_config(self._cfg)["image_model"]:
+                continue
+            try:
+                _images.describe(engine, self._cfg, img["id"], key_fn=extract_keys)
+            except Exception as exc:
+                logger.warning("holonomic: image #%s kept; describing it failed and will be retried (%s)", img["id"], exc)
+
+    def _store_words(self, engine, user: str, assistant: str, sid: str) -> List[int]:
+        """Store what was said.  Returns the ids: the user's first statement, then the reply's first part."""
+        said: List[int] = []
+        first_reply: List[int] = []
         max_chars = int(self._cfg["max_turn_chars"])
         from .engine import split_sentences
         user = clean_for_storage(user, max_chars)
@@ -548,6 +637,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                                       keys=[] if question else extract_keys(unit), salience=0.5 if question else 1.0,
                                       links=[previous] if previous and not question else [])
                 if ids and not question:
+                    said += ids[:1] if not said else []
                     previous = self._last_user[sid] = ids[-1]
                     mark_dream_talk(engine, ids[-1], unit, "said_user", self._cfg)
         if self._cfg.get("store_assistant", True):
@@ -559,35 +649,44 @@ class HolonomicMemoryProvider(MemoryProvider):
             if sum(len(p) for p in parts) >= (80 if only_questions else 20):
                 for part in parts:
                     for mid in engine.remember(part, kind="said_assistant", session=sid, keys=extract_keys(part), salience=0.8):
+                        first_reply += [mid] if not first_reply else []
                         stored = engine.get(mid)
                         if stored:
                             mark_dream_talk(engine, mid, stored["text"], "said_assistant", self._cfg, force=dream_turn)
+        return said + first_reply
 
     def _flush_backlog(self) -> None:
         engine = self._engine
         while engine is not None and self._backlog:
-            user, assistant, sid = self._backlog[0]
+            user, assistant, sid, pictures = self._backlog[0]
             try:
-                self._store_turn(engine, user, assistant, sid)
+                self._store_turn(engine, user, assistant, sid, pictures)
             except Exception:
                 return
             self._backlog.pop(0)
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **_: Any) -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
+                  messages: Optional[List[Dict[str, Any]]] = None, **_: Any) -> None:
         # Hermes already calls this on its background worker, one turn at a time.
         if not self._writes_enabled:
             return
         sid = session_id or self._session_id
+        pictures: list = []
+        if self._cfg.get("image_enabled"):
+            try:                                         # read now: Hermes may clear its upload folder later
+                pictures = _images.images_in_turn(user_content or "", messages, int(self._cfg.get("image_max_bytes", 30_000_000)))
+            except Exception as exc:
+                logger.warning("holonomic: could not read the attached image (%s)", exc)
         engine = self._ensure_engine()
         self._touch()
         try:
             if engine is None:
                 raise RuntimeError(self._last_error or "memory unavailable")
             self._flush_backlog()
-            self._store_turn(engine, user_content or "", assistant_content or "", sid)
+            self._store_turn(engine, user_content or "", assistant_content or "", sid, pictures)
         except Exception as exc:
             if len(self._backlog) < 50:
-                self._backlog.append((user_content or "", assistant_content or "", sid))
+                self._backlog.append((user_content or "", assistant_content or "", sid, pictures))
             logger.warning("holonomic: could not store turn (%s); %d waiting to retry", exc, len(self._backlog))
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
@@ -620,12 +719,62 @@ class HolonomicMemoryProvider(MemoryProvider):
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [TOOL_SCHEMA]
 
+    def _hit_json(self, hit) -> Dict[str, Any]:
+        out = {"id": hit.id, "text": hit.text, "kind": hit.kind,
+               "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.created_at)),
+               "score": round(hit.score, 3), "similar": round(hit.direct, 3), "linked": round(hit.assoc, 3),
+               "trust": round(hit.trust, 2)}
+        if hit.kind in IMAGE_KINDS and (hit.meta or {}).get("image_id") and self._engine is not None:
+            img = _images.get_image(self._engine, int(hit.meta["image_id"]))
+            if img:
+                out.update(image_id=img["id"], file=img["file"])
+                if hit.kind == IMAGE_PART:
+                    out["part_of_image"] = hit.meta.get("place", "")
+        return out
+
     @staticmethod
-    def _hit_json(hit) -> Dict[str, Any]:
-        return {"id": hit.id, "text": hit.text, "kind": hit.kind,
-                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.created_at)),
-                "score": round(hit.score, 3), "similar": round(hit.direct, 3), "linked": round(hit.assoc, 3),
-                "trust": round(hit.trust, 2)}
+    def _image_json(img: dict, **extra: Any) -> Dict[str, Any]:
+        out = {"image_id": img["id"], "shown": time.strftime("%Y-%m-%d %H:%M", time.localtime(img["created_at"])),
+               "file": img["file"], "size": f"{img['width']}x{img['height']}",
+               "description": img["description"] or "(not described yet)", "things_in_it": img["labels"]}
+        if img.get("caption"):
+            out["said_when_shown"] = img["caption"]
+        if img.get("seen", 1) > 1:
+            out["times_shown"] = img["seen"]
+        if img.get("sections_waiting"):
+            out["parts_not_yet_looked_at"] = img["sections_waiting"]
+        if "sections" in img:
+            out["parts"] = [{"section": s["section"], "place": s["place"], "description": s["description"]}
+                            for s in img["sections"] if s["description"]]
+        out.update({k: v for k, v in extra.items() if v})
+        return out
+
+    def _images_action(self, engine, args: Dict[str, Any], limit: int) -> str:
+        how = "To show an image to the user, write MEDIA: followed by its file path on a line of its own."
+        if args.get("image_id") is not None:
+            img = _images.get_image(engine, int(args["image_id"]), sections=True)
+            return json.dumps(dict(self._image_json(img), note=how)) if img else _error(f"No image with id {args['image_id']}")
+        if (args.get("label") or "").strip():
+            found = _images.find_by_label(engine, args["label"])
+            return json.dumps({"label": args["label"], "count": len(found), "note": how + " This is every image in which it was "
+                               "noticed; an image where it went unnoticed is not listed.",
+                               "images": [self._image_json(i, matched=i["matched"], noticed_in=i["matched_in"]) for i in found[:limit]],
+                               "more": max(0, len(found) - limit)})
+        if (args.get("query") or "").strip():
+            options = recall_options(self._cfg)
+            if args.get("deep"):
+                options.update(min_strength=0.0, reach=2)
+            hits = engine.recall(args["query"].strip(), k=limit * 3, min_score=0.1, only_kinds=IMAGE_KINDS, **options)
+            out = []
+            for hit, image_id, parts in _images.group_hits(hits)[:limit]:
+                img = _images.get_image(engine, image_id) if image_id else None
+                if img:
+                    out.append(self._image_json(img, score=round(hit.score, 3), matching_parts=[
+                        {"place": (p.meta or {}).get("place", ""), "description": p.text} for p in parts]))
+            return json.dumps({"count": len(out), "note": how, "images": out})
+        found = _images.list_images(engine, limit)
+        return json.dumps({"count": len(found), "total": _images.count_images(engine), "note": how,
+                           "images": [self._image_json(i) for i in found]})
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name != TOOL_SCHEMA["name"]:
@@ -684,6 +833,9 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if current is None:
                     return _error(f"No memory with id {mid}")
                 if action == "forget":
+                    image_id = (current.get("meta") or {}).get("image_id") if current["kind"] == IMAGE else None
+                    if image_id:            # forgetting what an image showed forgets the image; its file stays on disk
+                        return json.dumps({"forgotten": _images.forget_image(engine, int(image_id)), "image_id": image_id})
                     return json.dumps({"forgotten": engine.forget(mid)})
                 rating = args.get("rating")
                 if rating == "helpful":
@@ -700,8 +852,16 @@ class HolonomicMemoryProvider(MemoryProvider):
                     {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
                      "dream": d["text"], "what_you_made_of_it": d.get("thoughts", ""),
                      "connections_noticed": d.get("connections", [])} for d in found]})
+            if action == "images":
+                return self._images_action(engine, args, limit)
+            if action == "look":
+                if args.get("image_id") is None or not (args.get("question") or "").strip():
+                    return _error("look needs 'image_id' and 'question'")
+                answer = _images.look(engine, self._cfg, int(args["image_id"]), args["question"],
+                                      section=args.get("section") if args.get("section") is not None else None)
+                return json.dumps({"image_id": int(args["image_id"]), "answer": answer})
             if action == "stats":
-                return json.dumps(engine.stats())
+                return json.dumps(dict(engine.stats(), images=_images.count_images(engine)))
             return _error(f"Unknown action: {action}")
         except Exception as exc:
             logger.warning("holonomic: tool call failed: %s", exc)

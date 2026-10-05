@@ -51,6 +51,11 @@ WATERMARK = "reflect:last_id"
 DREAM_TALK_USER, DREAM_TALK_ASSISTANT = "dreamtalk_user", "dreamtalk_assistant"
 DREAM_TALK_KINDS = (DREAM_TALK_USER, DREAM_TALK_ASSISTANT)
 ASSISTANT_KINDS = ("said_assistant", DREAM_TALK_ASSISTANT)
+# What a vision model saw in an image the agent was shown, and in each part of it (see images.py).
+# Reflection does not read these: what is in a picture is not something the user said.
+IMAGE = "image"
+IMAGE_PART = "image_part"
+IMAGE_KINDS = (IMAGE, IMAGE_PART)
 
 REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_enabled": False,
@@ -241,10 +246,13 @@ LAST_CALL: Dict[str, Any] = {}      # timing and token counts of the most recent
 
 
 def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float, temperature: float,
-                max_tokens: int = 2000, think: bool = False, schema: Optional[dict] = None) -> str:
+                max_tokens: int = 2000, think: bool = False, schema: Optional[dict] = None,
+                images: Optional[List[str]] = None) -> str:
+    """`images` are base64-encoded pictures for a model that can see; they go with the user message."""
     payload = {"model": model, "stream": False, "format": schema or _SCHEMA, "think": think,
                "options": {"temperature": temperature, "num_predict": int(max_tokens)},
-               "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+               "messages": [{"role": "system", "content": system},
+                            dict({"role": "user", "content": user}, **({"images": list(images)} if images else {}))]}
 
     def post(body: dict) -> dict:
         req = urllib.request.Request(host + "/api/chat", data=json.dumps(body).encode(),
@@ -463,7 +471,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
         call = _wrap_test_llm(llm)
     budget = int(rc["reflect_max_tokens"])
     last = int(engine.kv_get(WATERMARK, "0") or 0)
-    batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS)
+    batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS + IMAGE_KINDS)
     report["read"] = len(batch)
     if not batch:
         return report
@@ -586,7 +594,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
 
 
 def pending(engine) -> int:
-    return engine.count_after(int(engine.kv_get(WATERMARK, "0") or 0), exclude_kinds=DERIVED_KINDS)
+    return engine.count_after(int(engine.kv_get(WATERMARK, "0") or 0), exclude_kinds=DERIVED_KINDS + IMAGE_KINDS)
 
 
 class IdleReflector:
@@ -601,6 +609,8 @@ class IdleReflector:
         self.poll_seconds = poll_seconds
         self.last_activity = time.time()
         self.last_error = ""
+        self.last_image_error = ""
+        self._images_retry_at = 0.0
         self._stop = threading.Event()
         self._busy = threading.Lock()
         maker = spawn or (lambda target, name: threading.Thread(target=target, name=name, daemon=True))
@@ -655,9 +665,42 @@ class IdleReflector:
         finally:
             self._busy.release()
 
+    def images_if_due(self) -> Optional[Dict[str, Any]]:
+        """Describe images that are waiting (see images.py): any whose description failed when it was shown,
+        and the parts of each image.  By default this waits for a pause, and stops when the conversation resumes."""
+        from . import images as _images                # images imports this module, so not at the top
+        cfg = self.load_cfg()
+        ic = _images.image_config(cfg)
+        if not ic["image_enabled"] or not ic["image_model"]:
+            return None
+        wait = 0.0 if ic["image_sections_when"] == "now" else float(ic["image_idle_seconds"])
+        idle = lambda: time.time() - self.last_activity >= wait       # noqa: E731
+        if not idle() or time.time() < self._images_retry_at:
+            return None
+        waiting = _images.pending(self.engine)
+        if not (waiting["images"] or (ic["image_sections"] and waiting["sections"])) or not self._busy.acquire(blocking=False):
+            return None
+        try:
+            report = _images.process(self.engine, cfg, key_fn=self.key_fn, should_stop=lambda: self._stop.is_set() or not idle())
+            self.last_image_error = "; ".join(report["errors"])
+            if report["errors"]:                       # the vision server is probably off: try again in a few minutes
+                self._images_retry_at = time.time() + 300.0
+                logger.warning("holonomic: describing images failed: %s", self.last_image_error)
+            elif report["described"] or report["sections"]:
+                logger.info("holonomic: described %d image(s) and %d part(s)", len(report["described"]), report["sections"])
+            return report
+        except Exception as exc:
+            self.last_image_error = str(exc)
+            self._images_retry_at = time.time() + 300.0
+            logger.warning("holonomic: describing images failed: %s", exc)
+            return None
+        finally:
+            self._busy.release()
+
     def _loop(self) -> None:
         while not self._stop.wait(self.poll_seconds):
             try:
+                self.images_if_due()
                 self.run_if_due()
                 self.sleep_if_due()
             except Exception as exc:                   # never let the worker die
