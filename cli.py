@@ -283,7 +283,11 @@ def _dream_images(cfg, args) -> None:
             print(f"The image generator did not produce a picture: {exc}")
             return
         out = home / "holonomic-test-picture.png"
-        out.write_bytes(data)
+        try:
+            out.write_bytes(data)
+        except OSError:              # Windows refuses to overwrite a picture that a viewer still has open
+            out = home / f"holonomic-test-picture-{time.strftime('%H%M%S')}.png"
+            out.write_bytes(data)
         print(f"Drew a picture in {time.time() - t0:.0f} s ({len(data) // 1024} KB). Nothing was stored in memory. Open it to look:\n  {out}")
         return
     mode = sc["dream_images"]
