@@ -15,6 +15,7 @@
     hermes holonomic images list [-n 20] | show ID | find cat | labels
     hermes holonomic images add photo.jpg [--say "This is my cat"]     keep an image and describe it now
     hermes holonomic images process               describe everything that is waiting
+    hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
     hermes holonomic images forget ID [--yes] [--keep-files]
     hermes holonomic profile [--history]
@@ -358,6 +359,25 @@ def _images_cmd(engine, cfg, args) -> None:
         left = _img.pending(engine)
         if left["images"] or left["sections"]:
             print(f"  still waiting: {left['images']} image(s), {left['sections']} part(s)")
+    elif what == "redo":
+        if not items or not all(raw.isdigit() for raw in items):
+            print('Usage: hermes holonomic images redo ID... [--fix "what the description got wrong"] [--say "what was said when it was shown"]')
+            return
+        for raw in items:
+            try:
+                t0 = time.time()
+                img = _img.redescribe(engine, cfg, int(raw), correction=args.fix or "", caption=args.say, key_fn=extract_keys)
+            except (_img.ImageError, ReflectionError, OSError) as exc:
+                print(f"image #{raw}: could not be described again: {exc}")
+                continue
+            if not img:
+                print(f"image #{raw}: no such image")
+                continue
+            print(f"image #{raw}: described again in {time.time() - t0:.0f} s.")
+            _print_image(img, full=True)
+        waiting = _img.pending(engine)
+        if waiting["sections"]:
+            print(f"\n{waiting['sections']} part(s) waiting to be looked at again. Run: hermes holonomic images process")
     elif what == "look":
         if len(items) < 2 or not items[0].isdigit():
             print('Usage: hermes holonomic images look ID "question" [--section N]')
@@ -562,13 +582,14 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")
     im.add_argument("--sections", choices=["idle", "now", "off"],
                     help="With 'on': look at the parts of each image when the conversation is quiet (default), straight away, or not at all")
-    im.add_argument("--say", help="With 'add': what you would say when showing the image")
+    im.add_argument("--say", help="With 'add': what you would say when showing the image. With 'redo': replaces what was said")
+    im.add_argument("--fix", help="With 'redo': something the description got wrong, in your words; it is taken as true")
     im.add_argument("--section", type=int, help="With 'look': a part number, to look closely at one part")
     im.add_argument("-n", type=int, default=20, help="With 'list': how many (default 20)")
     im.add_argument("--width", type=int, default=110, help="Characters of text to show")

@@ -369,6 +369,10 @@ def test_cli_images(tmp_path):
         out = run("images", "show", "1", "7")
         assert "part 4 (centre)" in out and "part 0 (top left): nothing notable" in out and "image #7: no such image" in out
         assert run("images", "look", "1", "What colour is the cat?").strip() == "The cat is black."
+        out = run("images", "redo", "1", "9", "--fix", "The sofa is green.", "--say", "This is Pixel on the green sofa.")
+        assert "image #1: described again" in out and "said when shown: This is Pixel on the green sofa." in out and "image #9: no such image" in out
+        assert "9 part(s) waiting to be looked at again" in out and "looked at 9 part(s)" in run("images", "process")
+        assert "Usage: hermes holonomic images redo" in run("images", "redo")
         assert "images: 1" in run("stats")
         assert "Nothing removed." in run("images", "forget", "1") and "images kept: 1" in run("images")
         assert "Forgot image #1 and deleted the files" in run("images", "forget", "1", "--yes")
@@ -417,3 +421,57 @@ def test_the_vision_model_is_sent_the_picture(tmp_path):
         assert images.image_config({"ollama_host": "http://o:2"})["image_host"] == "http://o:2"
     finally:
         server.shutdown()
+
+
+def test_a_wrong_description_can_be_corrected(tmp_path):
+    from holonomic import images
+    m = store(tmp_path)
+    img = images.add_image(m, picture(), CFG, caption="This is Sushi.", session="s1")
+    lap = {"description": "A photo of a cat named Sushi sitting on a person's lap covered in denim.", "labels": ["cat", "denim pants", "whisker"], "text": ""}
+    parts = {"centre": {"description": "A cat's face with long whiskers.", "labels": ["cats", "whiskers", "nose"]}}
+    seen = []
+    images.process(m, CFG, see=eyes(parts, whole=lap, seen=seen))
+    assert "it can be mistaken about what things are" in seen[1][1]              # a part is not bound by the whole description
+    first = images.get_image(m, img["id"], sections=True)
+    assert first["labels"] == ["cat", "denim pants", "whisker", "nose"]          # 'cats' and 'whiskers' were already there in another form
+    assert images.find_by_label(m, "whiskers")[0]["matched_in"] == ["centre"] and m.stats()["memories"] == 2
+    couch = {"description": "A photo of a cat named Sushi sitting on a blue couch.", "labels": ["cat", "couch"], "text": ""}
+    seen.clear()
+    again = images.redescribe(m, CFG, img["id"], correction="That is a couch,  not someone's lap.", see=eyes(whole=couch, seen=seen),
+                              key_fn=lambda t: ["Sushi"])
+    assert "The person who showed it said: This is Sushi." in seen[0][1]
+    assert "the person who showed it corrected it: That is a couch, not someone's lap." in seen[0][1]
+    assert again["description"].endswith("sitting on a blue couch.") and again["labels"] == ["cat", "couch"] and again["sections_waiting"] == 9
+    assert m.get(first["memory_id"]) is None and m.stats()["memories"] == 1 and images.find_by_label(m, "denim pants") == []
+    assert images.process(m, CFG, see=eyes(parts))["sections"] == 9 and m.stats()["memories"] == 2
+    renamed = images.redescribe(m, CFG, img["id"], caption="This is my daughter's cat, Sushi.", see=eyes(whole=couch, seen=seen))
+    assert renamed["caption"] == "This is my daughter's cat, Sushi." and "corrected it: That is a couch" in seen[-1][1]     # the correction is kept
+    assert images.redescribe(m, CFG, 99, see=eyes()) is None
+
+
+def test_the_desktop_app_marks_an_image_its_own_way(tmp_path):
+    from holonomic import images
+    a, spaced = tmp_path / "IMG_0570_6e0c47.jpg", tmp_path / "my photo.jpg"
+    a.write_bytes(picture(fmt="JPEG"))
+    spaced.write_bytes(picture(fmt="JPEG", colour=(3, 3, 3)))
+    text = f"This is me! @image:{a}"
+    assert images.attached_paths(text) == [str(a)] and images.strip_image_markers(text) == "This is me!"
+    assert images.attached_paths(f'@image:"{spaced}"\n@image:`{a}`\n\nTwo of them') == [str(spaced), str(a)]
+    assert images.strip_image_markers(f'@image:"{spaced}"\n\nTwo of them [screenshot]') == "Two of them"
+    assert [origin for _, origin in images.images_in_turn(text)] == [str(a)]       # read from the file: the original, with its name
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    p._cfg.update(CFG)
+    keep = images._seer
+    images._seer = lambda ic, report: eyes()
+    try:
+        p.sync_turn(text, "It is lovely to finally see you. I really like your glasses.", session_id="s1")
+        img = images.list_images(p._engine)[0]
+        assert img["caption"] == "This is me!" and img["origin"] == "IMG_0570_6e0c47.jpg"
+        assert [r["text"] for r in p._engine.recent(9) if r["kind"] == "said_user"] == ["This is me!"]
+        assert "## An image you have seen before" in p.prefetch(f"Who is this? @image:{a}", session_id="s2")
+        fixed = tool(p, action="images", image_id=img["id"], correction="I am in my car, not a bus.")
+        assert fixed["image_id"] == img["id"] and "looked at again" in fixed["note"]
+    finally:
+        images._seer = keep
+        p.shutdown()

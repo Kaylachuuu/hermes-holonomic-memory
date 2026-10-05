@@ -280,6 +280,7 @@ hermes holonomic images add photo.jpg --say "This is my cat"     # keep and desc
 hermes holonomic images process               # describe everything that is waiting
 hermes holonomic images list | show 3 | find cat | labels
 hermes holonomic images look 3 "what colour is the car?" [--section 4]
+hermes holonomic images redo 3 --fix "That is a couch, not someone's lap"      # describe again, with a correction taken as true
 hermes holonomic images forget 3 --yes [--keep-files]
 ```
 

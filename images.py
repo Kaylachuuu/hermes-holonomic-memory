@@ -120,10 +120,13 @@ Write:
 
 _NOTE = ("\nThe person who showed it said: {caption}\nIf those words name someone or something that is visible, use that name. "
          "Take nothing else from them.")
+_CORRECTED = ("\nAn earlier description of this image got something wrong, and the person who showed it corrected it: {correction}\n"
+              "Treat what they say as true and describe the image accordingly.")
 
 _PART = """\
 This is one part of a larger image: the {place}.
 The whole image was described as: {whole}
+That description is only there to tell you where you are; it can be mistaken about what things are. Go by what you can see in this part.
 
 Write:
 - notable: false if this part shows nothing worth recording on its own (plain background, sky, wall, floor, blur, or only the edge of something); otherwise true.
@@ -145,9 +148,11 @@ _LOOK_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, 
 # Hermes marks a message that carries an image in one of two ways.  For a model that can see, the picture
 # goes in the message and the text gets `[Image attached at: <path>]`.  For one it believes cannot, it has
 # another model describe the picture and puts that description, and the path, in the text instead.
-_HINT_RE = re.compile(r"\[Image attached at: ([^\]\r\n]+)\]|\bimage_url: ([^\]\r\n]+)\]")
-_MARKER_RE = re.compile(r"\[Image attached(?: at)?: [^\]\r\n]+\]|\[\d+ images?\]"
-                        r"|\[The user attached an image.*?\bimage_url: [^\]\r\n]+\]", re.DOTALL)
+# The desktop app writes a third form into the message itself: `@image:<path>`, the path quoted if it has spaces.
+_REF = r"@image:(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|(\S+))"
+_HINT_RE = re.compile(r"\[Image attached at: ([^\]\r\n]+)\]|\bimage_url: ([^\]\r\n]+)\]|" + _REF)
+_MARKER_RE = re.compile(r"\[Image attached(?: at)?: [^\]\r\n]+\]|\[\d+ images?\]|\[screenshot\]|" + _REF
+                        + r"|\[The user attached an image.*?\bimage_url: [^\]\r\n]+\]", re.DOTALL)
 _DEFAULT_CAPTION = "What do you see in this image?"          # Hermes supplies this when an image is sent without words
 _EXT = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "BMP": ".bmp", "TIFF": ".tif",
         "HEIF": ".heic", "AVIF": ".avif"}
@@ -266,7 +271,7 @@ def strip_image_markers(text: str) -> str:
 
 
 def attached_paths(text: str) -> List[str]:
-    return list(dict.fromkeys((a or b).strip() for a, b in _HINT_RE.findall(text or "")))
+    return list(dict.fromkeys(next(g for g in groups if g).strip() for groups in _HINT_RE.findall(text or "")))
 
 
 def _data_url_bytes(url: str) -> Optional[bytes]:
@@ -433,6 +438,9 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
     try:
         img, _ = open_image((engine.path / row["file"]).read_bytes())
         note = _NOTE.format(caption=row["caption"]) if row["caption"] else ""
+        corrections = [c for c in json.loads(row["meta"] or "{}").get("corrections", []) if c]
+        if corrections:
+            note += _CORRECTED.format(correction=" ".join(corrections))
         prompt = _WHOLE.format(note=note, n=int(ic["image_max_labels"]))
         data = _parse(see("image", _SYSTEM, prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
                           int(ic["image_max_tokens"])))
@@ -442,7 +450,7 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
         labels = clean_labels(data.get("labels"), int(ic["image_max_labels"]))
         written = " ".join(str(data.get("text") or "").split())[:300]
         text = description + (f" Writing in the image: {written}" if written else "")
-        named = key_fn(row["caption"]) if key_fn and row["caption"] else []
+        named = key_fn(" ".join([row["caption"]] + corrections)) if key_fn and (row["caption"] or corrections) else []
         links = [i for i in json.loads(row["meta"] or "{}").get("links", []) if engine.get(int(i))]
         ids = engine.remember(text, kind=IMAGE, realm=row["realm"], session=row["session"], chain=False, whole=True,
                               keys=list(dict.fromkeys(labels[:8] + named)), links=links, trust=0.6,
@@ -491,6 +499,9 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
                               int(ic["image_max_tokens"])))
             description = _sentence(data.get("description")) if data.get("notable") else ""
             labels = clean_labels(data.get("labels"), 6) if description else []
+            with engine._lock:            # 'whiskers' when the image already has 'whisker' is filed under the one it has
+                have = [r["label"] for r in _db(engine).execute("SELECT DISTINCT label FROM image_labels WHERE image_id = ?", (int(image_id),))]
+            labels = list(dict.fromkeys(next((h for h in have if h in label_forms(l)), l) for l in labels))
             mid = None
             if len(description) >= 15:
                 mid = engine.remember(description, kind=IMAGE_PART, realm=row["realm"], session=row["session"], chain=False,
@@ -513,6 +524,36 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
         if not db.execute("SELECT 1 FROM image_sections WHERE image_id = ? AND notable IS NULL", (int(image_id),)).fetchone():
             db.execute("UPDATE images SET sections_at = ? WHERE id = ?", (time.time(), int(image_id)))
     return done
+
+
+def redescribe(engine, cfg: Dict[str, Any], image_id: int, *, correction: str = "", caption: Optional[str] = None,
+               see: Optional[Callable[..., str]] = None, key_fn: Optional[Callable[[str], List[str]]] = None,
+               report: Optional[Dict[str, Any]] = None) -> Optional[dict]:
+    """Look at an image afresh: what was written about it and its parts is forgotten and written again.
+    `correction` is something the person said was wrong; it is kept with the image and given to the model
+    as true.  `caption` replaces what was said when the image was shown.  The parts are left waiting."""
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return None
+    meta = json.loads(row["meta"] or "{}")
+    correction = " ".join((correction or "").split())[:600]
+    if correction:
+        meta["corrections"] = (meta.get("corrections", []) + [correction])[-5:]
+    with engine._lock:
+        db = _db(engine)
+        old = [row["memory_id"]] + [r["memory_id"] for r in db.execute("SELECT memory_id FROM image_sections WHERE image_id = ?", (row["id"],))]
+    for mid in old:
+        if mid:
+            engine.forget(int(mid))
+    with engine._lock:
+        db = _db(engine)
+        db.execute("DELETE FROM image_labels WHERE image_id = ?", (row["id"],))
+        db.execute("UPDATE image_sections SET notable = NULL, memory_id = NULL, described_at = NULL, claimed_at = NULL WHERE image_id = ?",
+                   (row["id"],))
+        db.execute("UPDATE images SET memory_id = NULL, described_at = NULL, sections_at = NULL, claimed_at = NULL, meta = ?, caption = ? "
+                   "WHERE id = ?", (json.dumps(meta), row["caption"] if caption is None else " ".join(strip_image_markers(caption).split())[:600],
+                                    row["id"]))
+    return describe(engine, cfg, image_id, see=see, key_fn=key_fn, report=report)
 
 
 def pending(engine) -> Dict[str, int]:
