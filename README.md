@@ -314,13 +314,14 @@ embedding model (recognising similar pictures and things within them without wor
 
 ```
 hermes holonomic dreams images                 # what is set now
-hermes holonomic dreams images from_images --api a1111 --host http://10.0.0.21:7860 --size 768x512 --count 3
+hermes holonomic dreams images from_images --api comfyui --host http://10.0.0.21:8188 --size 768x512 --count 3
 hermes holonomic dreams images --people yes    # allow images with real people in them to be drawn from
 ```
 
-The plugin does not draw. It asks a server you run, through the Stable Diffusion WebUI API (`a1111`:
-AUTOMATIC1111, Forge, SD.Next) or the OpenAI images API (`openai`), which several local servers
-speak. Pictures of a dream are kept in the dream realm: they are not listed among images she was
+The plugin does not draw. It asks a server you run: ComfyUI (`comfyui`), the Stable Diffusion WebUI
+API (`a1111`: AUTOMATIC1111, Forge, SD.Next) or the OpenAI images API (`openai`), which several
+local servers speak. `hermes holonomic dreams images --test "a cat asleep in a greenhouse"` draws
+one picture to a file, storing nothing, to check the connection. Pictures of a dream are kept in the dream realm: they are not listed among images she was
 shown, are not described as one, and reach her only with the dream they belong to, labelled as
 pictures of a dream. She can show them the same way as any image.
 

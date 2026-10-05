@@ -703,7 +703,66 @@ def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
         saved = json.loads((home / "holonomic.json").read_text())
         assert saved["dream_images"] == "from_images" and saved["dream_image_use_people"] is True and saved["dream_image_width"] == 640
         assert "are not drawn from" in run("dreams", "images", "--people", "no")
+        out = run("dreams", "images", "--api", "comfyui", "--host", "http://127.0.0.1:9", "--test", "a cat asleep in a greenhouse")
+        assert "The image generator did not produce a picture: Could not reach the image server" in out
         assert "Choose one of" in run("dreams", "images", "sometimes") and "WIDTHxHEIGHT" in run("dreams", "images", "--size", "big")
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+def test_painter_for_comfyui(tmp_path):
+    import http.server, threading, urllib.parse
+    from holonomic import paint
+    got, png, polls = [], picture(64, 64), {"n": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def reply(self, data, raw=False):
+            self.send_response(200); self.end_headers(); self.wfile.write(data if raw else json.dumps(data).encode())
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            got.append((self.path, raw))
+            if self.path == "/upload/image":
+                return self.reply({"name": "holonomic_start.png", "subfolder": "", "type": "input"})
+            self.reply({"prompt_id": "job-1"} if b"refuse" not in raw else {"error": "bad graph"})
+
+        def do_GET(self):
+            got.append((self.path, b""))
+            if self.path.startswith("/object_info"):
+                return self.reply({"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["v1-5-pruned-emaonly-fp16.safetensors", "other.safetensors"]]}}}})
+            if self.path.startswith("/history"):
+                polls["n"] += 1
+                if polls["n"] % 2:                       # not finished the first time it is asked
+                    return self.reply({})
+                return self.reply({"job-1": {"outputs": {"7": {"images": [{"filename": "holonomic_dream_00001_.png", "subfolder": "", "type": "output"}]}},
+                                             "status": {"completed": True}}})
+            self.reply(png, raw=True)
+
+        def log_message(self, *a):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sc = {"dream_image_api": "comfyui", "dream_image_host": f"http://127.0.0.1:{server.server_port}", "dream_image_width": 768,
+          "dream_image_height": 512, "dream_image_strength": 0.55, "dream_image_poll_seconds": 0.01, "dream_image_negative": "text"}
+    try:
+        draw = paint.make_painter(sc)
+        assert draw("a cat in a greenhouse", None) == png
+        paths = [p for p, _ in got]
+        assert paths[0] == "/object_info/CheckpointLoaderSimple" and paths[1] == "/prompt" and paths[2] == paths[3] == "/history/job-1"
+        assert urllib.parse.parse_qs(paths[4].split("?")[1]) == {"filename": ["holonomic_dream_00001_.png"], "type": ["output"]}
+        graph = json.loads(got[1][1])["prompt"]
+        assert graph["1"]["inputs"]["ckpt_name"] == "v1-5-pruned-emaonly-fp16.safetensors"       # none named: the server's first
+        assert graph["2"]["inputs"]["text"] == "a cat in a greenhouse" and graph["3"]["inputs"]["text"] == "text"
+        assert graph["4"] == {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 512, "batch_size": 1}}
+        assert graph["5"]["inputs"]["denoise"] == 1.0 and graph["5"]["inputs"]["steps"] == 20 and graph["7"]["class_type"] == "SaveImage"
+        got.clear()
+        assert paint.make_painter(dict(sc, dream_image_model="dreamy.safetensors", dream_image_steps=12))("a cat", b"START") == png
+        assert [p for p, _ in got][:2] == ["/upload/image", "/prompt"] and b"START" in got[0][1]
+        graph = json.loads(got[1][1])["prompt"]
+        assert graph["1"]["inputs"]["ckpt_name"] == "dreamy.safetensors" and graph["8"]["inputs"]["image"] == "holonomic_start.png"
+        assert graph["4"]["class_type"] == "VAEEncode" and graph["5"]["inputs"]["denoise"] == 0.55 and graph["5"]["inputs"]["steps"] == 12
+        with pytest.raises(paint.PaintError):
+            paint.make_painter(dict(sc, dream_image_model="x"))("refuse this", None)
+    finally:
+        server.shutdown()

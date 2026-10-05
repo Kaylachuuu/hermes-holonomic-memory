@@ -73,7 +73,7 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_images": "words",
     "dream_image_seeds": 2,           # recent images a dream draws on
     "dream_image_use_people": False,  # from_images: may an image with real people in it be drawn from?
-    "dream_image_api": "",            # 'a1111' or 'openai' (see paint.py)
+    "dream_image_api": "",            # 'comfyui', 'a1111' or 'openai' (see paint.py)
     "dream_image_host": "",
     "dream_image_model": "",
     "dream_image_count": 3,           # pictures per dream

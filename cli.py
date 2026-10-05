@@ -8,7 +8,7 @@
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
-    hermes holonomic dreams images [off|words|pictures|from_images] [--api a1111|openai] [--host URL] [--model NAME]
+    hermes holonomic dreams images [off|words|pictures|from_images] [--api comfyui|a1111|openai] [--host URL] [--model NAME]
                                    [--size 768x512] [--count 3] [--people yes|no]      what images do in dreams
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
@@ -269,6 +269,18 @@ def _dream_images(cfg, args) -> None:
         write_config(home, values)
         cfg = load_config(home)
     sc = sleep_config(cfg)
+    if args.test:
+        from .paint import PaintError, make_painter
+        try:
+            t0 = time.time()
+            data = make_painter(sc)(args.test + (", " + sc["dream_image_style"] if sc["dream_image_style"] else ""), None)
+        except PaintError as exc:
+            print(f"The image generator did not produce a picture: {exc}")
+            return
+        out = home / "holonomic-test-picture.png"
+        out.write_bytes(data)
+        print(f"Drew a picture in {time.time() - t0:.0f} s ({len(data) // 1024} KB). Nothing was stored in memory. Open it to look:\n  {out}")
+        return
     mode = sc["dream_images"]
     print(f"Images in dreams: {mode}")
     print({"off": "  Images play no part in dreams.",
@@ -632,8 +644,9 @@ def register_cli(subparser) -> None:
     drm.add_argument("dreams_action", nargs="?", choices=["show", "images"], default="show")
     drm.add_argument("mode", nargs="?", help="With 'images': off, words, pictures or from_images")
     drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
-    drm.add_argument("--api", choices=["a1111", "openai"], help="With 'images': which interface the image generator speaks")
-    drm.add_argument("--host", help="With 'images': address of the image generator, e.g. http://10.0.0.21:7860")
+    drm.add_argument("--api", choices=["comfyui", "a1111", "openai"], help="With 'images': which interface the image generator speaks")
+    drm.add_argument("--host", help="With 'images': address of the image generator, e.g. http://10.0.0.21:8188")
+    drm.add_argument("--test", metavar="WORDS", help="With 'images': draw one picture from these words now, to check the image generator")
     drm.add_argument("--model", help="With 'images': model or checkpoint name, if the server needs one")
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")

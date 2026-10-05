@@ -1,8 +1,9 @@
 """Making a picture from words, for dreams.
 
 The plugin does not draw.  It asks an image-generation server that the user runs, through one of two
-widely supported interfaces:
+of three interfaces:
 
+  comfyui  ComfyUI: a job is queued at /prompt, watched at /history and its picture fetched from /view
   a1111    the Stable Diffusion WebUI API (AUTOMATIC1111, Forge, SD.Next):  /sdapi/v1/txt2img, /sdapi/v1/img2img
   openai   the OpenAI images API, which several local servers also speak:   /v1/images/generations, /v1/images/edits
 
@@ -16,23 +17,28 @@ from __future__ import annotations
 
 import base64
 import json
+import random
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, Callable, Dict, Optional
 
-APIS = ("a1111", "openai")
+APIS = ("comfyui", "a1111", "openai")
 
 
 class PaintError(RuntimeError):
     pass
 
 
-def _post(url: str, body: bytes, content_type: str, timeout: float) -> Dict[str, Any]:
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": content_type})
+def _post(url: str, body: Optional[bytes], content_type: str, timeout: float, raw: bool = False) -> Any:
+    """POST `body`, or GET when there is none.  Returns the parsed JSON reply, or the bytes when `raw`."""
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": content_type} if body is not None else {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            data = resp.read()
+            return data if raw else json.loads(data)
     except urllib.error.HTTPError as exc:
         raise PaintError(f"The image server returned {exc.code} for {url}: {exc.read().decode(errors='replace')[:300]}") from exc
     except TimeoutError as exc:
@@ -66,12 +72,13 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     api = str(sc.get("dream_image_api") or "").lower()
     host = str(sc.get("dream_image_host") or "").rstrip("/")
     if api not in APIS or not host:
-        raise PaintError("No image generator is set. Run: hermes holonomic dreams images pictures --api a1111|openai --host URL")
+        raise PaintError("No image generator is set. Run: hermes holonomic dreams images pictures --api comfyui|a1111|openai --host URL")
     model = str(sc.get("dream_image_model") or "")
     width, height = int(sc.get("dream_image_width") or 768), int(sc.get("dream_image_height") or 512)
     steps, timeout = int(sc.get("dream_image_steps") or 0), float(sc.get("dream_image_timeout") or 600)
     strength = min(max(float(sc.get("dream_image_strength") or 0.6), 0.05), 1.0)
     negative = str(sc.get("dream_image_negative") or "")
+    poll = float(sc.get("dream_image_poll_seconds") or 1.0)
 
     def a1111(prompt: str, start: Optional[bytes]) -> bytes:
         body: Dict[str, Any] = {"prompt": prompt, "width": width, "height": height, "batch_size": 1, "n_iter": 1}
@@ -107,4 +114,55 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
                 raise PaintError(f"Could not fetch the picture the image server made: {exc}") from exc
         raise PaintError("The image server replied without a picture.")
 
-    return a1111 if api == "a1111" else openai
+    def comfyui(prompt: str, start: Optional[bytes]) -> bytes:
+        checkpoint = model
+        if not checkpoint:                       # none named: use the first one the server has
+            info = _post(f"{host}/object_info/CheckpointLoaderSimple", None, "", min(timeout, 60))
+            try:
+                names = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+            except (KeyError, IndexError, TypeError):
+                names = []
+            if not names or not isinstance(names, list):
+                raise PaintError("ComfyUI has no checkpoint to draw with. Put a model file in ComfyUI/models/checkpoints.")
+            checkpoint = names[0]
+        graph: Dict[str, Any] = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["1", 1]}},
+            "5": {"class_type": "KSampler", "inputs": {
+                "seed": random.getrandbits(48), "steps": steps or 20, "cfg": 7.0, "sampler_name": "euler", "scheduler": "normal",
+                "denoise": strength if start else 1.0, "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
+                "latent_image": ["4", 0]}},
+            "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+            "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "holonomic_dream", "images": ["6", 0]}},
+        }
+        if start:
+            body, content_type = _multipart({"overwrite": "true"}, "image", f"holonomic_{uuid.uuid4().hex[:12]}.png", start, "image/png")
+            uploaded = _post(f"{host}/upload/image", body, content_type, timeout)
+            name = "/".join(p for p in (uploaded.get("subfolder"), uploaded.get("name")) if p)
+            graph["8"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            graph["9"] = {"class_type": "ImageScale", "inputs": {"image": ["8", 0], "upscale_method": "lanczos", "width": width,
+                                                                 "height": height, "crop": "center"}}
+            graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["9", 0], "vae": ["1", 2]}}
+        else:
+            graph["4"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
+        queued = _post(f"{host}/prompt", json.dumps({"prompt": graph, "client_id": "holonomic"}).encode(), "application/json", min(timeout, 60))
+        job = queued.get("prompt_id")
+        if not job:
+            raise PaintError(f"ComfyUI did not accept the job: {json.dumps(queued)[:300]}")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            entry = (_post(f"{host}/history/{job}", None, "", min(timeout, 60)) or {}).get(job)
+            if entry:
+                for output in (entry.get("outputs") or {}).values():
+                    for image in output.get("images") or []:
+                        query = urllib.parse.urlencode({"filename": image.get("filename", ""), "subfolder": image.get("subfolder", ""),
+                                                        "type": image.get("type", "output")})
+                        return _post(f"{host}/view?{query}", None, "", min(timeout, 60), raw=True)
+                status = entry.get("status") or {}
+                if status.get("completed") or status.get("status_str") == "error":
+                    raise PaintError(f"ComfyUI finished without a picture: {json.dumps(status)[:300]}")
+            time.sleep(poll)
+        raise PaintError(f"The image server did not finish within {timeout:.0f} s")
+
+    return {"a1111": a1111, "openai": openai, "comfyui": comfyui}[api]
