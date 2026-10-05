@@ -247,7 +247,7 @@ hermes holonomic images on --model gemma4 [--host http://OTHER-OLLAMA:11434] [--
 When the user attaches an image to a message, three things are kept:
 
 - **The file.** The original bytes, unchanged, in `holonomic/images/`, plus a copy that fits inside
-  1024x768 (768x1024 for a portrait image) for looking at and showing. Showing the same file again
+  2048x1536 (1536x2048 for a portrait image), keeping its shape, for looking at and showing. Showing the same file again
   does not store it twice; it is counted as seen again, and she is told she has seen it before.
 - **A description of the whole image**, written by the vision model and stored as an ordinary memory
   (kind `image`), linked to what was said when it was shown. It is recalled, fades and can be
@@ -287,7 +287,7 @@ hermes holonomic images forget 3 --yes [--keep-files]
 |---|---|---|
 | `image_enabled` | `false` | Keep and describe images |
 | `image_model`, `image_host` | reflection's | Vision model and its Ollama server |
-| `image_view_width`, `image_view_height` | `1024`, `768` | Size of the copy |
+| `image_view_width`, `image_view_height` | `2048`, `1536` | The copy fits inside this; existing copies are not remade |
 | `image_sections` | `true` | Also describe the image part by part |
 | `image_grid` | `3` | Parts per side (3 = nine parts) |
 | `image_sections_when` | `idle` | `idle`: when the conversation is quiet; `now`: straight away |

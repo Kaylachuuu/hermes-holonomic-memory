@@ -6,7 +6,7 @@ from test_provider import HAVE_HERMES, make, tool
 from conftest import track
 from holonomic import HolonomicMemory, HashEmbedder
 
-CFG = {"image_enabled": True, "image_model": "eyes"}
+CFG = {"image_enabled": True, "image_model": "eyes", "image_view_width": 1024, "image_view_height": 768}
 
 
 def store(tmp_path):
@@ -70,6 +70,10 @@ def test_an_image_is_kept_once_with_a_standard_size_copy(tmp_path):
     assert small["file"] == small["original"] and small["sections_total"] == 0
     with pytest.raises(images.ImageError):
         images.add_image(m, b"this is not a picture", CFG)
+    # the default copy is larger, and a portrait photo keeps its shape inside the box turned on its side
+    photo = images.add_image(m, picture(3000, 4000, "JPEG", colour=(4, 4, 4)), {"image_enabled": True})
+    assert size_of(open(photo["file"], "rb").read()) == (1536, 2048) and size_of(open(photo["original"], "rb").read()) == (3000, 4000)
+    images.forget_image(m, photo["id"], delete_files=True)
     with pytest.raises(images.ImageError):
         images.add_image(m, data, dict(CFG, image_max_bytes=1000))
     assert images.count_images(m) == 3
@@ -396,7 +400,7 @@ def test_the_vision_model_is_sent_the_picture(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         m = store(tmp_path)
-        cfg = {"image_enabled": True, "image_model": "gemma-eyes", "image_host": f"http://127.0.0.1:{server.server_port}/",
+        cfg = {"image_view_width": 1024, "image_view_height": 768, "image_enabled": True, "image_model": "gemma-eyes", "image_host": f"http://127.0.0.1:{server.server_port}/",
                "reflect_model": "other", "reflect_host": "http://127.0.0.1:9"}
         img = images.add_image(m, picture(), cfg)
         report = {}

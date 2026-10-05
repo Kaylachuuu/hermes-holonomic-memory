@@ -38,8 +38,8 @@ IMAGE_DEFAULTS: Dict[str, Any] = {
     "image_enabled": False,          # keep and describe images shown in conversation
     "image_model": "",               # vision model; empty = the reflection model
     "image_host": "",                # Ollama server for it; empty = the reflection server
-    "image_view_width": 1024,        # the copy she looks at fits inside this (turned on its side for a portrait image)
-    "image_view_height": 768,
+    "image_view_width": 2048,        # the copy she looks at and shows fits inside this, keeping its shape
+    "image_view_height": 1536,       # (the box is turned on its side for a portrait image)
     "image_sections": True,          # also look at the image part by part
     "image_grid": 3,                 # 3 = nine parts, each half the width and height, overlapping by half
     "image_section_min_side": 640,   # smaller images are not cut up: there is nothing more to see
