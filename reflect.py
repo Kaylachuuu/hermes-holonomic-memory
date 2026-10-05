@@ -283,7 +283,8 @@ def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float
     LAST_CALL.clear()
     LAST_CALL.update({"seconds": time.time() - started, "prompt_tokens": data.get("prompt_eval_count"),
                       "reply_tokens": data.get("eval_count"), "done_reason": data.get("done_reason"),
-                      "reply_chars": len(content), "think": think})
+                      "reply_chars": len(content), "think": think,
+                      "thinking": " ".join(str((data.get("message") or {}).get("thinking") or "").split())})
     if data.get("done_reason") == "length":
         raise ReflectionError(f"The model hit the {max_tokens}-token reply limit without finishing. "
                               f"Its reply began: {content[:300]!r}")

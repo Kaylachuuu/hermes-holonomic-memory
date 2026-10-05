@@ -426,11 +426,15 @@ def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
     if not ic["image_model"]:
         raise ImageError("No vision model is set.")
 
-    def look_at(prompt: str, jpegs: List[bytes], schema: dict, max_tokens: int) -> str:
-        out = _reflect.ollama_chat(ic["image_host"], ic["image_model"], "You are choosing between pictures of your own dream. "
-                                   "Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt, timeout=float(ic["image_timeout"]),
-                                   temperature=0.2, max_tokens=max_tokens, think=False, schema=schema,
-                                   images=[base64.b64encode(j).decode() for j in jpegs])
+    def look_at(prompt: str, jpegs: List[bytes], schema: dict, max_tokens: int, think: bool = False) -> str:
+        try:
+            out = _reflect.ollama_chat(ic["image_host"], ic["image_model"], "You are choosing between pictures of your own dream. "
+                                       "Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt, timeout=float(ic["image_timeout"]) * (3 if think else 1),
+                                       temperature=0.2, max_tokens=max_tokens, think=think, schema=schema,
+                                       images=[base64.b64encode(j).decode() for j in jpegs])
+        except Exception as exc:
+            report.setdefault("calls", []).append({"step": "choose", "think": think, "failed": str(exc)[:120]})
+            raise
         report.setdefault("calls", []).append(dict(_reflect.LAST_CALL, step="choose"))
         return out
     return look_at
@@ -439,7 +443,10 @@ def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
 def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
               report: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
     """Which of several attempts at a dream picture she keeps: (index, her reason).  She looks at them all and
-    chooses.  If she cannot look (no vision model, the server is off, a reply that makes no sense) it is the first."""
+    chooses.  If she cannot look (no vision model, the server is off, a reply that makes no sense) it is the first.
+
+    With `dream_image_choose_think` she reasons before answering.  Reasoning ran away when it was tried for
+    reflection, so it has a fixed allowance here, and if she uses it up she is asked once more without it."""
     from .reflect import _parse
     if len(pictures) < 2:
         return 0, ""
@@ -447,12 +454,19 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
         look_at = _chooser(image_config(cfg), report if report is not None else {})
         small = [_jpeg(open_image(p)[0], (768, 768)) for p in pictures]
         note = f"\nIt draws on something you remember: {remembered}" if remembered else ""
-        data = _parse(look_at(_CHOOSE.format(n=len(pictures), scene=scene, remembered=note), small, _CHOOSE_SCHEMA, 200))
-        best = int(data.get("best") or 0)
-        if 1 <= best <= len(pictures):
-            return best - 1, _sentence(data.get("why"))[:300]
+        prompt = _CHOOSE.format(n=len(pictures), scene=scene, remembered=note)
     except Exception as exc:
         logger.debug("holonomic: choosing between dream pictures failed: %s", exc)
+        return 0, ""
+    for think in ([True, False] if cfg.get("dream_image_choose_think") else [False]):
+        try:
+            data = _parse(look_at(prompt, small, _CHOOSE_SCHEMA, int(cfg.get("dream_image_choose_think_tokens") or 3000), think=True)
+                          if think else look_at(prompt, small, _CHOOSE_SCHEMA, 200))
+            best = int(data.get("best") or 0)
+            if 1 <= best <= len(pictures):
+                return best - 1, _sentence(data.get("why"))[:300]
+        except Exception as exc:
+            logger.debug("holonomic: choosing between dream pictures failed (thinking %s): %s", think, exc)
     return 0, ""
 
 

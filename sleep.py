@@ -87,6 +87,8 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_count": 3,           # pictures per dream
     # Each picture is drawn this many times and she keeps the one she thinks shows the moment best (needs a vision model).
     "dream_image_candidates": 3,
+    "dream_image_choose_think": False,        # let her reason before choosing (slower; falls back to choosing without)
+    "dream_image_choose_think_tokens": 3000,  # allowance for that reasoning and the answer together
     # For one graphics card shared with the language model: unload the language models while pictures are drawn, then
     # ask the image server to free the card and load them again, exactly as they were, before the dream step ends.
     "dream_image_swap": False,

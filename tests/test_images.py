@@ -717,6 +717,7 @@ def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
         saved = json.loads((home / "holonomic.json").read_text())
         assert saved["dream_images"] == "from_images" and saved["dream_image_use_people"] is True and saved["dream_image_width"] == 640
         assert "are not drawn from" in run("dreams", "images", "--people", "no")
+        assert "reasoning before she chooses" in run("dreams", "images", "--think", "on") and "reasoning before" not in run("dreams", "images", "--think", "off")
         out = run("dreams", "images", "--attempts", "4", "--swap", "on")
         assert "each drawn 4 time(s) and she keeps the best" in out and "language models are unloaded while pictures are drawn" in out
         assert "language models are unloaded" not in run("dreams", "images", "--swap", "off", "--attempts", "1")
@@ -951,3 +952,44 @@ def test_one_graphics_card_is_shared_and_given_back(tmp_path):
     report = sleep_once(m2, dict(cfg, ollama_host="http://127.0.0.1:9", reflect_host="", dream_image_host="http://127.0.0.1:9"),
                         llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=draw)
     assert report["dreams"][0]["pictures"] and "could not make room" in report["errors"][0]            # no server to ask: the pictures are still drawn
+
+
+def test_she_can_reason_before_choosing(tmp_path):
+    """Against a stand-in for Ollama: reasoning is asked for with its own allowance; if it runs away she is asked
+    again without it; if that fails too the first attempt is kept."""
+    import http.server, threading
+    from holonomic import images
+    got, plan = [], []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            got.append(body)
+            reply = plan.pop(0)
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(reply).encode())
+
+        def log_message(self, *a):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    answer = lambda n, why, **extra: {"message": dict({"content": json.dumps({"best": n, "why": why})}, **extra), "done_reason": "stop"}
+    ran_away = {"message": {"content": "", "thinking": "Looking at the first picture again and again"}, "done_reason": "length"}
+    cfg = {"image_model": "gemma-eyes", "image_host": f"http://127.0.0.1:{server.server_port}", "dream_image_choose_think": True}
+    three = [picture(colour=(i, 0, 0)) for i in range(3)]
+    try:
+        plan[:] = [answer(3, "Only the third has the lake.", thinking="The first has no boat.  The second has no lake.")]
+        report = {}
+        assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (2, "Only the third has the lake.")
+        assert got[0]["think"] is True and got[0]["options"]["num_predict"] == 3000 and len(got[0]["messages"][1]["images"]) == 3
+        assert report["calls"][0]["think"] is True and report["calls"][0]["thinking"] == "The first has no boat. The second has no lake."
+        got.clear(); plan[:] = [ran_away, answer(2, "The second is clearest.")]
+        report = {}
+        assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (1, "The second is clearest.")
+        assert [g["think"] for g in got] == [True, False] and got[1]["options"]["num_predict"] == 200
+        assert "hit the 3000-token reply limit" in report["calls"][0]["failed"] and report["calls"][1]["think"] is False
+        got.clear(); plan[:] = [ran_away, ran_away]
+        assert images.pick_best(cfg, "A cat in a boat on a lake.", three) == (0, "")
+        got.clear(); plan[:] = [answer(1, "The first.")]
+        assert images.pick_best(dict(cfg, dream_image_choose_think=False), "A cat.", three) == (0, "The first.") and [g["think"] for g in got] == [False]
+    finally:
+        server.shutdown()

@@ -263,6 +263,8 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_candidates"] = max(1, min(args.attempts, 8))
     if args.swap:
         values["dream_image_swap"] = args.swap == "on"
+    if args.think:
+        values["dream_image_choose_think"] = args.think == "on"
     if args.encoder:
         values["dream_image_text_encoder_on"] = "cpu" if args.encoder == "cpu" else ""
     if args.strength is not None:
@@ -307,7 +309,8 @@ def _dream_images(cfg, args) -> None:
         print(f"  image generator: {sc['dream_image_api'] + ' at ' + sc['dream_image_host'] if ready else 'NOT SET (use --api and --host)'}"
               + (f", model {sc['dream_image_model']}" if sc["dream_image_model"] else ""))
         print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}, "
-              f"each drawn {sc['dream_image_candidates']} time(s)" + (" and she keeps the best" if int(sc["dream_image_candidates"]) > 1 else ""))
+              f"each drawn {sc['dream_image_candidates']} time(s)" + (" and she keeps the best" if int(sc["dream_image_candidates"]) > 1 else "")
+              + (", reasoning before she chooses (--think off to stop)" if sc["dream_image_choose_think"] and int(sc["dream_image_candidates"]) > 1 else ""))
         if sc["dream_image_swap"]:
             print("  one graphics card: the language models are unloaded while pictures are drawn and reloaded afterwards")
     if mode == "from_images":
@@ -508,8 +511,10 @@ def _images_cmd(engine, cfg, args) -> None:
 
 def _print_calls(report) -> None:
     for c in report["calls"]:
-        print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
+        print(f"  step {c['step']}{' (thinking)' if c.get('think') else ''}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
               f"reply {c.get('reply_tokens')} tokens, finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+        if c.get("step") == "choose" and c.get("thinking"):          # what she reasoned before choosing, to judge whether it helps
+            print(f"      her reasoning: {c['thinking'][:1200]}{'...' if len(c['thinking']) > 1200 else ''}")
 
 
 def _sleep(engine, cfg, args) -> None:
@@ -685,6 +690,7 @@ def register_cli(subparser) -> None:
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
+    drm.add_argument("--think", choices=["on", "off"], help="With 'images': let her reason before choosing between attempts")
     drm.add_argument("--swap", choices=["on", "off"], help="With 'images': for one graphics card: unload the language models while "
                                                            "pictures are drawn and reload them when the dream is over")
     drm.add_argument("--encoder", choices=["gpu", "cpu"], help="With 'images': Z-Image only: where the prompt is read. 'cpu' leaves "

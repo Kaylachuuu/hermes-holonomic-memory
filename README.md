@@ -349,6 +349,7 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
+| `dream_image_choose_think` | `false` | Let her reason before choosing; if the reasoning runs away she is asked again without it |
 | `dream_image_swap` | `false` | One graphics card: unload the language models while pictures are drawn, reload them after |
 | `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |
 | `dream_image_strength` | `0.75` | `from_images`: how far a picture may move from the images it starts from |
