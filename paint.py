@@ -79,6 +79,8 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     strength = min(max(float(sc.get("dream_image_strength") or 0.6), 0.05), 1.0)
     negative = str(sc.get("dream_image_negative") or "")
     poll = float(sc.get("dream_image_poll_seconds") or 1.0)
+    family = str(sc.get("dream_image_family") or "").lower()          # comfyui: '' (work it out from the model's name), 'checkpoint', 'zimage'
+    text_encoder, vae = str(sc.get("dream_image_text_encoder") or ""), str(sc.get("dream_image_vae") or "")
 
     def a1111(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
         width, height = size or (default_width, default_height)
@@ -119,6 +121,9 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     def comfyui(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
         width, height = size or (default_width, default_height)
         checkpoint = model
+        zimage = family == "zimage" or (not family and "z_image" in model.lower().replace("-", "_"))
+        if not checkpoint and zimage:
+            checkpoint = "z_image_turbo_bf16.safetensors"
         if not checkpoint:                       # none named: use the first one the server has
             info = _post(f"{host}/object_info/CheckpointLoaderSimple", None, "", min(timeout, 60))
             try:
@@ -128,17 +133,33 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
             if not names or not isinstance(names, list):
                 raise PaintError("ComfyUI has no checkpoint to draw with. Put a model file in ComfyUI/models/checkpoints.")
             checkpoint = names[0]
-        graph: Dict[str, Any] = {
-            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
-            "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
-            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["1", 1]}},
-            "5": {"class_type": "KSampler", "inputs": {
-                "seed": random.getrandbits(48), "steps": steps or 20, "cfg": 7.0, "sampler_name": "euler", "scheduler": "normal",
-                "denoise": strength if start else 1.0, "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
-                "latent_image": ["4", 0]}},
-            "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        if zimage:
+            # Z-Image-Turbo comes as three files (the model, a language model that reads the prompt, and a decoder)
+            # and is drawn in a few steps with no negative prompt.
+            model_out, clip_out, vae_out, empty = ["13", 0], ["11", 0], ["12", 0], "EmptySD3LatentImage"
+            graph: Dict[str, Any] = {
+                "10": {"class_type": "UNETLoader", "inputs": {"unet_name": checkpoint, "weight_dtype": "default"}},
+                "11": {"class_type": "CLIPLoader", "inputs": {"clip_name": text_encoder or "qwen_3_4b.safetensors", "type": "lumina2"}},
+                "12": {"class_type": "VAELoader", "inputs": {"vae_name": vae or "ae.safetensors"}},
+                "13": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["10", 0], "shift": 3.0}},
+                "3": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["2", 0]}},
+            }
+            sampler = {"steps": steps or 9, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple"}
+        else:
+            model_out, clip_out, vae_out, empty = ["1", 0], ["1", 1], ["1", 2], "EmptyLatentImage"
+            graph = {
+                "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
+                "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": clip_out}},
+            }
+            sampler = {"steps": steps or 20, "cfg": 7.0, "sampler_name": "euler", "scheduler": "normal"}
+        graph.update({
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": clip_out}},
+            "5": {"class_type": "KSampler", "inputs": dict(
+                sampler, seed=random.getrandbits(48), denoise=strength if start else 1.0, model=model_out, positive=["2", 0],
+                negative=["3", 0], latent_image=["4", 0])},
+            "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": vae_out}},
             "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "holonomic_dream", "images": ["6", 0]}},
-        }
+        })
         if start:
             body, content_type = _multipart({"overwrite": "true"}, "image", f"holonomic_{uuid.uuid4().hex[:12]}.png", start, "image/png")
             uploaded = _post(f"{host}/upload/image", body, content_type, timeout)
@@ -146,9 +167,9 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
             graph["8"] = {"class_type": "LoadImage", "inputs": {"image": name}}
             graph["9"] = {"class_type": "ImageScale", "inputs": {"image": ["8", 0], "upscale_method": "lanczos", "width": width,
                                                                  "height": height, "crop": "center"}}
-            graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["9", 0], "vae": ["1", 2]}}
+            graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["9", 0], "vae": vae_out}}
         else:
-            graph["4"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
+            graph["4"] = {"class_type": empty, "inputs": {"width": width, "height": height, "batch_size": 1}}
         queued = _post(f"{host}/prompt", json.dumps({"prompt": graph, "client_id": "holonomic"}).encode(), "application/json", min(timeout, 60))
         job = queued.get("prompt_id")
         if not job:

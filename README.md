@@ -321,7 +321,12 @@ hermes holonomic dreams images --people yes    # allow images with real people i
 The plugin does not draw. It asks a server you run: ComfyUI (`comfyui`), the Stable Diffusion WebUI
 API (`a1111`: AUTOMATIC1111, Forge, SD.Next) or the OpenAI images API (`openai`), which several
 local servers speak. `hermes holonomic dreams images --test "a cat asleep in a greenhouse"` draws
-one picture to a file, storing nothing, to check the connection. Pictures of a dream are kept in the dream realm: they are not listed among images she was
+one picture to a file, storing nothing, to check the connection.
+
+With ComfyUI, a single-file model (Stable Diffusion 1.5, SDXL) in `models/checkpoints` is used as it
+is; with none named, the first one the server lists. Z-Image-Turbo is chosen by naming it:
+`--model z_image_turbo_bf16.safetensors` (it also needs `qwen_3_4b.safetensors` in
+`models/text_encoders` and `ae.safetensors` in `models/vae`). Pictures of a dream are kept in the dream realm: they are not listed among images she was
 shown, are not described as one, and reach her only with the dream they belong to, labelled as
 pictures of a dream. She can show them the same way as any image.
 

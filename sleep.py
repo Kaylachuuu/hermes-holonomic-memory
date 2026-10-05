@@ -77,6 +77,11 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_api": "",            # 'comfyui', 'a1111' or 'openai' (see paint.py)
     "dream_image_host": "",
     "dream_image_model": "",
+    # comfyui only: how the model is loaded.  '' works it out from the model's name; 'checkpoint' is one file
+    # (Stable Diffusion 1.5, SDXL); 'zimage' is Z-Image-Turbo, which also needs a text encoder and a decoder.
+    "dream_image_family": "",
+    "dream_image_text_encoder": "",   # zimage: empty = qwen_3_4b.safetensors
+    "dream_image_vae": "",            # zimage: empty = ae.safetensors
     "dream_image_count": 3,           # pictures per dream
     "dream_image_width": 768,
     "dream_image_height": 512,

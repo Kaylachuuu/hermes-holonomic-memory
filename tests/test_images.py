@@ -768,6 +768,22 @@ def test_painter_for_comfyui(tmp_path):
         graph = json.loads(got[1][1])["prompt"]
         assert graph["1"]["inputs"]["ckpt_name"] == "dreamy.safetensors" and graph["8"]["inputs"]["image"] == "holonomic_start.png"
         assert graph["4"]["class_type"] == "VAEEncode" and graph["5"]["inputs"]["denoise"] == 0.55 and graph["5"]["inputs"]["steps"] == 12
+        # Z-Image-Turbo, recognised by its name: three files, few steps, no negative prompt
+        got.clear()
+        assert paint.make_painter(dict(sc, dream_image_model="z_image_turbo_bf16.safetensors"))("a cat", None, size=(768, 1024)) == png
+        graph = json.loads(got[0][1])["prompt"]
+        assert graph["10"] == {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors", "weight_dtype": "default"}}
+        assert graph["11"]["inputs"] == {"clip_name": "qwen_3_4b.safetensors", "type": "lumina2"} and graph["12"]["inputs"]["vae_name"] == "ae.safetensors"
+        assert graph["2"]["inputs"] == {"text": "a cat", "clip": ["11", 0]} and graph["3"]["class_type"] == "ConditioningZeroOut" and "1" not in graph
+        assert graph["4"] == {"class_type": "EmptySD3LatentImage", "inputs": {"width": 768, "height": 1024, "batch_size": 1}}
+        k = graph["5"]["inputs"]
+        assert (k["steps"], k["cfg"], k["sampler_name"], k["scheduler"], k["model"], k["denoise"]) == (9, 1.0, "euler", "simple", ["13", 0], 1.0)
+        assert graph["6"]["inputs"]["vae"] == ["12", 0] and graph["13"]["inputs"] == {"model": ["10", 0], "shift": 3.0}
+        got.clear()
+        paint.make_painter(dict(sc, dream_image_family="zimage", dream_image_text_encoder="qwen_fp8.safetensors"))("a cat", b"START")
+        graph = json.loads(got[1][1])["prompt"]
+        assert graph["10"]["inputs"]["unet_name"] == "z_image_turbo_bf16.safetensors" and graph["11"]["inputs"]["clip_name"] == "qwen_fp8.safetensors"
+        assert graph["4"] == {"class_type": "VAEEncode", "inputs": {"pixels": ["9", 0], "vae": ["12", 0]}} and graph["5"]["inputs"]["denoise"] == 0.55
         with pytest.raises(paint.PaintError):
             paint.make_painter(dict(sc, dream_image_model="x"))("refuse this", None)
     finally:
