@@ -82,6 +82,7 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_family": "",
     "dream_image_text_encoder": "",   # zimage: empty = qwen_3_4b.safetensors
     "dream_image_vae": "",            # zimage: empty = ae.safetensors
+    "dream_image_text_encoder_on": "",  # zimage: 'cpu' = read the prompt on the processor, leaving the card to the drawing model
     "dream_image_count": 3,           # pictures per dream
     "dream_image_width": 768,
     "dream_image_height": 512,

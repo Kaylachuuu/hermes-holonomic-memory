@@ -779,6 +779,10 @@ def test_painter_for_comfyui(tmp_path):
         k = graph["5"]["inputs"]
         assert (k["steps"], k["cfg"], k["sampler_name"], k["scheduler"], k["model"], k["denoise"]) == (9, 1.0, "euler", "simple", ["13", 0], 1.0)
         assert graph["6"]["inputs"]["vae"] == ["12", 0] and graph["13"]["inputs"] == {"model": ["10", 0], "shift": 3.0}
+        assert "device" not in graph["11"]["inputs"]
+        got.clear()
+        paint.make_painter(dict(sc, dream_image_family="zimage", dream_image_text_encoder_on="cpu"))("a cat", None)
+        assert json.loads(got[0][1])["prompt"]["11"]["inputs"]["device"] == "cpu"
         got.clear()
         paint.make_painter(dict(sc, dream_image_family="zimage", dream_image_text_encoder="qwen_fp8.safetensors"))("a cat", b"START")
         graph = json.loads(got[1][1])["prompt"]

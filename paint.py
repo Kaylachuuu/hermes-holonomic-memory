@@ -81,6 +81,7 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     poll = float(sc.get("dream_image_poll_seconds") or 1.0)
     family = str(sc.get("dream_image_family") or "").lower()          # comfyui: '' (work it out from the model's name), 'checkpoint', 'zimage'
     text_encoder, vae = str(sc.get("dream_image_text_encoder") or ""), str(sc.get("dream_image_vae") or "")
+    encoder_on = str(sc.get("dream_image_text_encoder_on") or "").lower()       # zimage: 'cpu' reads the prompt on the processor
 
     def a1111(prompt: str, start: Optional[bytes], size: Optional[tuple] = None) -> bytes:
         width, height = size or (default_width, default_height)
@@ -139,7 +140,11 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
             model_out, clip_out, vae_out, empty = ["13", 0], ["11", 0], ["12", 0], "EmptySD3LatentImage"
             graph: Dict[str, Any] = {
                 "10": {"class_type": "UNETLoader", "inputs": {"unet_name": checkpoint, "weight_dtype": "default"}},
-                "11": {"class_type": "CLIPLoader", "inputs": {"clip_name": text_encoder or "qwen_3_4b.safetensors", "type": "lumina2"}},
+                # On a 16 GB card the language model and the drawing model do not fit together: each new prompt swaps
+                # them, and what is left of one crowds the other.  Reading the prompt on the processor avoids both.
+                "11": {"class_type": "CLIPLoader", "inputs": dict(
+                    {"clip_name": text_encoder or "qwen_3_4b.safetensors", "type": "lumina2"},
+                    **({"device": "cpu"} if encoder_on == "cpu" else {}))},
                 "12": {"class_type": "VAELoader", "inputs": {"vae_name": vae or "ae.safetensors"}},
                 "13": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["10", 0], "shift": 3.0}},
                 "3": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["2", 0]}},

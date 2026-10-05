@@ -259,6 +259,8 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_count"] = args.count
     if args.people:
         values["dream_image_use_people"] = args.people == "yes"
+    if args.encoder:
+        values["dream_image_text_encoder_on"] = "cpu" if args.encoder == "cpu" else ""
     if args.strength is not None:
         values["dream_image_strength"] = min(max(args.strength, 0.1), 1.0)
     if args.style is not None:
@@ -674,6 +676,8 @@ def register_cli(subparser) -> None:
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
+    drm.add_argument("--encoder", choices=["gpu", "cpu"], help="With 'images': Z-Image only: where the prompt is read. 'cpu' leaves "
+                                                               "the graphics card to the drawing model")
     drm.add_argument("--strength", type=float, help="With 'images': from_images: how far a picture may move from the images it "
                                                      "starts from, 0.1 (barely) to 1.0 (entirely)")
     drm.add_argument("--style", help="With 'images': words added to every scene, e.g. \"dreamlike, soft light\"")
