@@ -22,6 +22,7 @@
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
     hermes holonomic images forget ID [--yes] [--keep-files]
+    hermes holonomic tidy [--apply]               find stored messages that are Hermes' notes about attachments, and remove them
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -65,7 +66,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
@@ -93,6 +94,28 @@ def holonomic_command(args) -> None:
             _sleep(engine, cfg, args)
         elif action == "images":
             _images_cmd(engine, cfg, args)
+        elif action == "tidy":
+            from .images import strip_image_markers
+            from .sleep import RAW_KINDS
+            found = []
+            for s in engine.sessions(RAW_KINDS):
+                noted = False                            # inside Hermes' footer about attached files
+                for m in engine.session_memories(s["session"], kinds=("said_user", "asked_user"), limit=100000):
+                    text = m["text"]
+                    if text.startswith("--- Attached Context ---") or text.startswith("--- Context Warnings ---"):
+                        noted = True
+                    elif noted and not (text.startswith("📎") or text.startswith("It is available on disk at")
+                                        or text.startswith("Use your tools to work with it")):
+                        noted = False
+                    if noted or not strip_image_markers(text):
+                        found.append(m)
+            print(f"{len(found)} stored message(s) are Hermes' notes about attachments, not something you said" + (":" if found else "."))
+            for m in found:
+                print(f"  [#{m['id']}] {_clip(m['text'], args.width)}")
+                if args.apply:
+                    engine.forget(m["id"])
+            if found:
+                print("Removed." if args.apply else "Nothing changed. Run again with --apply to remove them.")
         elif action == "relabel":
             to_dream = {"said_user": "dreamtalk_user", "said_assistant": "dreamtalk_assistant"}
             to_said = {v: k for k, v in to_dream.items()}
@@ -686,6 +709,9 @@ def register_cli(subparser) -> None:
     slp.add_argument("sleep_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
     slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
+    td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
+    td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
+    td.add_argument("--width", type=int, default=110, help="Characters of text to show")
     rl = subs.add_parser("relabel", help="Correct whether pieces of conversation are labelled as dream talk")
     rl.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     rl.add_argument("--as", dest="to", choices=["said", "dream"], required=True,

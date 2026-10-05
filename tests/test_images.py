@@ -1018,3 +1018,88 @@ def test_dreaming_from_an_image_can_be_decided_image_by_image(tmp_path):
     images.set_dream_use(m, ids["me"], None)
     assert not images.may_dream_from(m, ids["me"], False)                             # back to the general rule
     assert images.has_people(m, ids["me"])                                            # saying it may be dreamt from does not change what is in it
+
+
+def file_message(path, words="Here is another picture from Nashville. The city looks like a circuit board from above."):
+    ref = f"@file:`Downloads/New Pictures/{path.name}`"
+    return (f"{ref}\n\n{words}\n\n--- Attached Context ---\n\n📎 {ref} (image/heic, 2.5 MB) — binary file, not inlined as text. "
+            f"It is available on disk at `{path}`. Use your tools to work with it (read or convert it, extract its text, or view/render it "
+            "as needed); do not tell the user the file type is unsupported.")
+
+
+def test_a_picture_attached_as_a_file_is_still_a_picture(tmp_path):
+    from holonomic import images
+    photo, notes = tmp_path / "IMG_9469.HEIC", tmp_path / "notes.pdf"
+    photo.write_bytes(picture())                       # the name says HEIC; what matters is that it opens as a picture
+    notes.write_bytes(b"%PDF-1.4")
+    text = file_message(photo)
+    assert images.attached_as_files(text) == [str(photo)] and images.attached_paths(text) == [str(photo)]
+    assert images.strip_image_markers(text) == "Here is another picture from Nashville. The city looks like a circuit board from above."
+    assert [origin for _, origin in images.images_in_turn(text)] == [str(photo)]
+    other = file_message(notes, "Can you summarise this?")
+    assert images.attached_as_files(other) == [] and images.strip_image_markers(other) == "@file:`Downloads/New Pictures/notes.pdf`\n\nCan you summarise this?"
+    if not HAVE_HERMES: return
+    p = make(tmp_path)
+    p._cfg.update(CFG)
+    keep = images._seer
+    images._seer = lambda ic, report: eyes(whole={"description": "An aerial photo of a city at dusk, its roads lit like traces on a circuit board.",
+                                                  "labels": ["city", "road"], "text": "", "people": False})
+    try:
+        block = p.prefetch(text, session_id="s1")          # she is told what the picture shows before she replies
+        assert "## The picture attached to this message (you were not shown it directly" in block
+        assert "image #1 (IMG_9469.HEIC; file: " in block and "An aerial photo of a city at dusk" in block
+        img = images.list_images(p._engine)[0]
+        assert img["caption"].startswith("Here is another picture from Nashville") and img["seen"] == 1 and img["session"] == "s1"
+        p.sync_turn(text, "From up there the roads really do look like traces on a board.", session_id="s1")
+        assert images.count_images(p._engine) == 1 and images.get_image(p._engine, img["id"])["seen"] == 1      # one showing, not two
+        said = [r["text"] for r in p._engine.recent(20) if r["kind"] == "said_user"]
+        assert sorted(said) == ["Here is another picture from Nashville.", "The city looks like a circuit board from above."]
+        again = p.prefetch(text, session_id="s2")          # shown again later: recognised, not looked at afresh
+        assert "## An image you have seen before" in again and "you were not shown it directly" not in again
+        p.sync_turn(text, "That is the Nashville picture again, the one that looks like a circuit board.", session_id="s2")
+        assert images.get_image(p._engine, img["id"])["seen"] == 2
+        images._seer = lambda ic, report: (_ for _ in ()).throw(images.ImageError("the vision model is off"))
+        other = tmp_path / "IMG_1039.heic"
+        other.write_bytes(picture(colour=(9, 1, 1)))
+        assert "it could not be looked at just now" in p.prefetch(file_message(other, "A sunset behind my old apartment."), session_id="s3")
+        assert images.pending(p._engine)["images"] == 1                         # kept, and waiting to be described
+    finally:
+        images._seer = keep
+        p.shutdown()
+
+
+def test_cli_tidy(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib
+    p = make(tmp_path)
+    e = p._engine
+    keepers = [e.remember(t, kind="said_user", session="s1")[0] for t in
+               ["This was a sunset, taken out back of the apartment I used to live in.", "I love the brilliant orange sunlight on the clouds."]]
+    junk = [e.remember(t, kind="said_user", session="s1")[0] for t in
+            ["@file:`Downloads/New Pictures/IMG_1039.heic`", "--- Attached Context ---",
+             "📎 @file:`Downloads/New Pictures/IMG_1039.heic` (image/heic, 637.0 KB) — binary file, not inlined as text.",
+             "It is available on disk at `C:\\Users\\Kayla\\Downloads\\New Pictures\\IMG_1039.heic`.",
+             "Use your tools to work with it (read or convert it, extract its text, or view/render it as needed); do not tell the user the file type is unsupported."]]
+    after = e.remember("Use your tools to find out what the weather is like in Casper today.", kind="said_user", session="s1")[0]
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        out = run("tidy")
+        assert "5 stored message(s) are Hermes' notes" in out and "Nothing changed." in out and all(f"[#{j}]" in out for j in junk)
+        assert not any(f"[#{k}]" in out for k in keepers + [after])
+        assert "Removed." in run("tidy", "--apply") and "0 stored message(s)" in run("tidy")
+        assert "brilliant orange" in run("show", str(keepers[1])) and "weather" in run("show", str(after))
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)

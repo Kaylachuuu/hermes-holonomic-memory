@@ -160,6 +160,13 @@ _REF = r"@image:(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|(\S+))"
 _HINT_RE = re.compile(r"\[Image attached at: ([^\]\r\n]+)\]|\bimage_url: ([^\]\r\n]+)\]|" + _REF)
 _MARKER_RE = re.compile(r"\[Image attached(?: at)?: [^\]\r\n]+\]|\[\d+ images?\]|\[screenshot\]|" + _REF
                         + r"|\[The user attached an image.*?\bimage_url: [^\]\r\n]+\]", re.DOTALL)
+# The desktop app only treats a few formats as pictures.  Anything else, a phone's HEIC photo included, is attached
+# as a file: the message gets an `@file:` token and a footer saying where the file is on disk, and the model is
+# not shown the picture at all.
+IMAGE_SUFFIXES = (".heic", ".heif", ".avif", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff")
+_ON_DISK_RE = re.compile(r"It is available on disk at `([^`\r\n]+)`")
+_FILE_REF_RE = re.compile(r"@file:(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|(\S+))")
+_FOOTER_RE = re.compile(r"\n*--- (?:Context Warnings|Attached Context) ---\s*\n.*", re.DOTALL)
 _DEFAULT_CAPTION = "What do you see in this image?"          # Hermes supplies this when an image is sent without words
 _EXT = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "BMP": ".bmp", "TIFF": ".tif",
         "HEIF": ".heic", "AVIF": ".avif"}
@@ -273,12 +280,20 @@ def _crop(img, x: float, y: float, w: float, h: float, max_side: int) -> bytes:
 
 def strip_image_markers(text: str) -> str:
     """Remove what Hermes adds to a message that carries an image, leaving the user's own words."""
-    text = _MARKER_RE.sub("", text or "")
+    text = _FOOTER_RE.sub("", text or "")               # Hermes' note about attached files is not something the user said
+    text = _FILE_REF_RE.sub(lambda m: "" if next(g for g in m.groups() if g).lower().endswith(IMAGE_SUFFIXES) else m.group(0), text)
+    text = _MARKER_RE.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text.replace(_DEFAULT_CAPTION, "")).strip()
 
 
 def attached_paths(text: str) -> List[str]:
-    return list(dict.fromkeys(next(g for g in groups if g).strip() for groups in _HINT_RE.findall(text or "")))
+    found = [next(g for g in groups if g).strip() for groups in _HINT_RE.findall(text or "")]
+    return list(dict.fromkeys(found + attached_as_files(text)))
+
+
+def attached_as_files(text: str) -> List[str]:
+    """Pictures that were attached as plain files, which the model was told about but not shown."""
+    return list(dict.fromkeys(p.strip() for p in _ON_DISK_RE.findall(text or "") if p.strip().lower().endswith(IMAGE_SUFFIXES)))
 
 
 def _data_url_bytes(url: str) -> Optional[bytes]:
@@ -340,7 +355,7 @@ def known(engine, data: bytes) -> Optional[dict]:
 
 
 def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", caption: str = "", session: str = "",
-              source: str = "user", realm: str = "waking", links: Tuple[int, ...] | List[int] = ()) -> dict:
+              source: str = "user", realm: str = "waking", links: Tuple[int, ...] | List[int] = (), count: bool = True) -> dict:
     """Keep an image.  Showing the same file again does not store it twice: it counts as seen again.
     Returns the image with 'new' saying which happened.  Nothing is described here."""
     ic = image_config(cfg)
@@ -353,7 +368,8 @@ def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", cap
     with engine._lock:
         row = db.execute("SELECT id, forgotten FROM images WHERE sha256 = ?", (sha,)).fetchone()
         if row and not row["forgotten"]:
-            db.execute("UPDATE images SET seen = seen + 1, last_seen = ? WHERE id = ?", (now, row["id"]))
+            if count:
+                db.execute("UPDATE images SET seen = seen + 1, last_seen = ? WHERE id = ?", (now, row["id"]))
             return dict(get_image(engine, row["id"]), new=False)
     img, fmt = open_image(data)
     width, height = img.size

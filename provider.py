@@ -361,6 +361,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         self._compressed_at: Dict[str, float] = {}      # session -> time of last context compression
         self._backlog: List[tuple] = []                 # turns that failed to store, retried later
         self._last_user: Dict[str, int] = {}            # session -> id of the user's previous message
+        self._looked_at: set = set()                    # images kept while preparing a reply, not to be counted twice
 
     # ------------------------------------------------------------- lifecycle
 
@@ -537,7 +538,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             lines.append(line)
             shown += [hit.id] + [p.id for p in parts]
             used += len(line) + 1
-        extra = [b for b in (self._seen_before_block(engine, query),
+        extra = [b for b in (self._seen_before_block(engine, query), self._unseen_block(engine, query, sid),
                              self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
         if not lines:
             return "\n\n".join(extra)
@@ -584,6 +585,36 @@ class HolonomicMemoryProvider(MemoryProvider):
         return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
                 + "\n".join(out)) if out else ""
 
+    def _unseen_block(self, engine, query: str, sid: str) -> str:
+        """A picture attached as a plain file (the desktop app does this with a phone's HEIC photos) is never
+        shown to the model: it is only told a file exists.  So it is looked at here, before she replies, and
+        she is given what was seen, instead of answering about a picture she has not seen."""
+        if not self._cfg.get("image_enabled") or not self._writes_enabled:
+            return ""
+        out = []
+        caption = clean_for_storage(query, 600)
+        for path in _images.attached_as_files(query)[:3]:
+            try:
+                p = Path(path)
+                if not p.is_file() or p.stat().st_size > int(self._cfg.get("image_max_bytes", 30_000_000)):
+                    continue
+                data = p.read_bytes()
+                if _images.known(engine, data):
+                    continue                             # the seen-before block covers it
+                img = _images.add_image(engine, data, self._cfg, origin=path, caption=caption, session=sid)
+                self._looked_at.add(img["id"])
+                try:
+                    img = _images.describe(engine, self._cfg, img["id"], key_fn=extract_keys) or img
+                except Exception as exc:
+                    logger.warning("holonomic: image #%s kept; describing it failed and will be retried (%s)", img["id"], exc)
+                out.append(f"- image #{img['id']} ({p.name}; file: {img['file']}): "
+                           + (" ".join(img["description"].split()) if img.get("description")
+                              else "it could not be looked at just now. Say so; do not describe it from the user's words."))
+            except Exception as exc:
+                logger.warning("holonomic: could not look at an attached picture (%s)", exc)
+        return ("## The picture attached to this message (you were not shown it directly; this is what you saw when it was "
+                "looked at for you just now)\n" + "\n".join(out)) if out else ""
+
     def _dream_block(self, engine, query: str) -> str:
         """Dreams are only brought up when the conversation turns to them, and always labelled."""
         try:
@@ -618,7 +649,10 @@ class HolonomicMemoryProvider(MemoryProvider):
         caption = clean_for_storage(user, 600)
         for data, origin in pictures:
             try:
-                img = _images.add_image(engine, data, self._cfg, origin=origin, caption=caption, session=sid, links=said[:2])
+                before = _images.known(engine, data)
+                img = _images.add_image(engine, data, self._cfg, origin=origin, caption=caption, session=sid, links=said[:2],
+                                        count=not (before and before["id"] in self._looked_at))
+                self._looked_at.discard(img["id"])       # it was kept while preparing this reply: one showing, not two
             except Exception as exc:
                 logger.warning("holonomic: could not keep an image (%s)", exc)
                 continue
