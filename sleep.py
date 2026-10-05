@@ -129,6 +129,22 @@ def _voice(kind: str) -> str:
     return _VOICE.get(kind, "I recall")
 
 
+# Where a dream can start.  Ordinary places, so that what the fragments bring is what makes it strange.
+_OPENINGS = (
+    "in a kitchen late at night", "on a train crossing open country", "underwater, in clear shallow water",
+    "on a rooftop at dawn", "in a crowded street market", "in a small boat on a still lake", "in a field of tall grass",
+    "in a library after closing", "on a beach at low tide", "in a workshop full of half-built things",
+    "in a classroom with the chairs stacked", "in a garden gone to seed", "on a mountain path in fog",
+    "in an attic full of boxes", "at a long dinner table set for many", "in a forest just after rain",
+    "in a stairwell that smells of rain", "on a bridge over a slow river", "in a greenhouse in winter",
+    "in a parked car at night", "in an empty theatre", "at the edge of a frozen pond", "in a laundromat at midnight",
+    "in a desert at dusk", "in a harbour among moored boats", "in a child's bedroom with the light off",
+    "on a ferry in the rain", "in an orchard at harvest", "in a waiting room with no clock", "in a cellar lit by one bulb",
+    "in a snowed-in cabin", "at a bus stop on an empty road", "in a museum after hours", "on a hillside under stars",
+    "in a bakery before sunrise", "in a tent in a storm",
+)
+
+
 def sleep_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(SLEEP_DEFAULTS)
     out.update({k: cfg[k] for k in SLEEP_DEFAULTS if k in cfg})
@@ -328,12 +344,14 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     low, high = int(sc["dream_min_words"]), max(int(sc["dream_max_words"]), int(sc["dream_min_words"]) + 20)
     limit = max(1800, high * 9)
     listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
-    # Left alone, the model opens every dream the same way (five real dreams in a row began "I am
-    # walking through a corridor").  Show it how its last dreams began and send it somewhere else.
-    earlier = [d["text"] for d in report.get("dreams", [])] + [d["text"] for d in engine.recent(3, realm=DREAM_REALM, kind=DREAM)]
-    openings = [re.split(r"(?<=[.!?])\s", " ".join(t.split()), maxsplit=1)[0][:140] for t in earlier[:4]]
-    variety = ("\n\nYour last dreams began like this. Tonight's dream begins differently, in a different kind of place, "
-               "and not by walking through anything:\n" + "\n".join(f"- {o}" for o in openings)) if openings else ""
+    # Left alone, the model opens every dream the same way: seven real dreams in a row began in a
+    # corridor or a hall, and asking it to "begin differently" only changed walking to drifting.  So the
+    # place a dream starts in is chosen here, and not reused while it is one of the last few.
+    used = [(engine.get(d["id"]) or {}).get("meta", {}).get("opens") for d in engine.recent(8, realm=DREAM_REALM, kind=DREAM)]
+    used += [d.get("opens") for d in report.get("dreams", [])]
+    opens = rng.choice([o for o in _OPENINGS if o not in used] or _OPENINGS)
+    variety = (f"\n\nThis dream begins {opens}. Start there, in your first sentence, and let it change from there. "
+               "Do not begin in a corridor, a hall or a hallway.")
     who = engine.profile("user") or user_profile      # in a dry run the profile from this cycle is not stored yet
     try:
         text = _ask_text(call, "dream" + label, "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
@@ -360,7 +378,7 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
             thoughts = trim_to_sentence(thoughts)
     connections = [c for c in _reflect._clean_items(woke.get("connections"), recent_ids | older_ids, 2)
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
-    result = {"text": text[:limit], "thoughts": thoughts, "connections": connections,
+    result = {"text": text[:limit], "thoughts": thoughts, "connections": connections, "opens": opens,
               "fragments": [{"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])}
                             for f in fragments]}
     if dry_run:
@@ -369,7 +387,7 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     # written on dream plates, which waking recall never reads.
     ids = engine.remember(text[:limit], kind=DREAM, realm=DREAM_REALM, session="dreams", chain=True, whole=True,
                           links=sorted(recent_ids | older_ids)[:6], salience=1.0, trust=0.5, created_at=now,
-                          meta={"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids)})
+                          meta={"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids), "opens": opens})
     result["id"] = ids[0] if ids else None
     for c in connections:
         engine.remember(c["text"], kind=DREAM_INSIGHT, realm=DREAM_REALM, session="dreams", chain=False,
