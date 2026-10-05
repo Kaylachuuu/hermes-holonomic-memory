@@ -594,10 +594,20 @@ def test_dream_pictures_drawn_from_images_she_has_seen(tmp_path):
     assert f"[{ids['me']}]" not in offered                                           # an image with a real person in it is not offered
     first, second = report["dreams"][0]["pictures"]
     assert first["from"] == [ids["cat"], ids["old"]] and second["from"] == []        # at most two, and only ones that were offered
+    # what she remembers of the images a picture starts from is added to the scene; a picture from words alone gets the scene only
+    assert painted[0][0] == ("A black cat asleep on a couch that is also a sofa, in two kinds of light. As remembered: A photo of a black cat "
+                             "asleep on a green couch beside a window. A photo of a black cat asleep on a grey sofa in the afternoon sun")
+    assert painted[1][0] == "A woman with glasses in a parked car full of tomato plants."
     assert size_of(painted[0][1]) == (768, 512) and painted[1][1] is None            # the first starts from the two laid over each other
     assert images.dream_pictures(m, report["dreams"][0]["id"])[0]["from"] == [ids["cat"], ids["old"]]
     before = open(images.get_image(m, ids["cat"])["original"], "rb").read()
     assert before == picture(colour=(2, 2, 2))                                       # the stored image is only read
+    painted.clear()
+    sleep_once(m, dict(cfg, dream_image_describe_source=False, dream_image_style="soft light"), llm=dreamer(scenes), steps=["dream"],
+               rng=random.Random(1), now=now + 5, paint=paint)
+    assert painted[0][0] == "A black cat asleep on a couch that is also a sofa, in two kinds of light., soft light"
+    sleep_once(m, dict(cfg, dream_image_style="soft light"), llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now + 7, paint=paint)
+    assert painted[3][0].endswith("asleep on a grey sofa in the afternoon sun. soft light") and painted[4][0].endswith("tomato plants., soft light")
     seen.clear(); painted.clear()
     sleep_once(m, dict(cfg, dream_image_use_people=True), llm=dreamer(scenes, seen), steps=["dream"], rng=random.Random(1), now=now + 9, paint=paint)
     assert f"[{ids['me']}]" in seen["scenes"][0].split("IMAGES:")[1] and painted[1][1] is not None     # allowed when the user says so

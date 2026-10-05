@@ -74,6 +74,7 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_images": "words",
     "dream_image_seeds": 2,           # recent images a dream draws on
     "dream_image_use_people": False,  # from_images: may an image with real people in it be drawn from?
+    "dream_image_describe_source": True,   # from_images: also tell the generator what she remembers the image showing
     "dream_image_api": "",            # 'comfyui', 'a1111' or 'openai' (see paint.py)
     "dream_image_host": "",
     "dream_image_model": "",
@@ -533,7 +534,15 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             turned = bool(s["from"]) and sized and _images.is_portrait(engine, s["from"][0]) != (size[1] > size[0])
             shape = (size[1], size[0]) if turned else size
             start = _images.blend(engine, s["from"], shape) if s["from"] else None
-            words = s["scene"] + (", " + style if style else "")
+            # The scene says what the dream did; what she remembers of the image says what the thing looks like.
+            # Without it a long-haired cat came out short-haired, because the scene only said "a cat".
+            recalled = ""
+            if start and sc["dream_image_describe_source"]:
+                recalled = " ".join(" ".join(usable[i].split("Writing in the image:")[0].split())[:400] for i in s["from"] if i in usable)
+            if recalled:
+                words = s["scene"] + " As remembered: " + recalled.rstrip(". ") + (". " + style if style else "")
+            else:
+                words = s["scene"] + (", " + style if style else "")
             picture = painter(words, start, size=shape) if sized else painter(words, start)
             img = _images.add_dream_image(engine, picture, cfg, dream_id=one["id"], scene=s["scene"], sources=s["from"] if start else [])
         except Exception as exc:                 # the server is off, or sent back something that is not a picture

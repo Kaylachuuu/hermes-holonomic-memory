@@ -344,6 +344,7 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_strength` | `0.75` | `from_images`: how far a picture may move from the images it starts from |
 | `dream_image_style` | `dreamlike, soft light, slightly out of focus` | Added to every scene |
 | `dream_image_use_people` | `false` | `from_images`: may images with real people be drawn from |
+| `dream_image_describe_source` | `true` | `from_images`: add her description of the source image to the scene, so its details are asked for |
 
 ## Inspecting the store
 
