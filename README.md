@@ -259,6 +259,13 @@ When the user attaches an image to a message, three things are kept:
   are cut from the original when it is larger than the copy. By default this waits until the
   conversation has been quiet for two minutes and stops when it resumes.
 
+Writing in an image is kept only when two separate looks agree on it, or the user stated it. A
+vision model asked what a small sign says will often supply something plausible instead of saying it
+cannot read it, and such inventions come from a single look, while a legible sign is read the same
+way by overlapping parts. Writing reported once is replaced by `[writing I could not read for
+certain]` and labels made from it are dropped. Parts are not told what writing the overall
+description quoted, so each reads for itself; they are told what the user said about the image.
+
 Everything the model names in an image or a part is also filed as a label, so "every image with a
 cat in it" is an exact lookup: `hermes holonomic images find cat`, or the tool's `images` action
 with `label`. It lists every image in which the thing was noticed, and only those.

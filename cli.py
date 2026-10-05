@@ -469,7 +469,9 @@ def _images_cmd(engine, cfg, args) -> None:
     elif what == "process":
         waiting = _img.pending(engine)
         if not (waiting["images"] or waiting["sections"]):
-            print("Nothing is waiting.")
+            unclear = _img.process(engine, cfg, key_fn=extract_keys).get("unclear", 0)      # nothing to look at; writing may need checking
+            print("Nothing is waiting." + (f" {unclear} piece(s) of writing reported by only one look are now marked as not read for certain."
+                                           if unclear else ""))
             return
         print(f"Describing {waiting['images']} image(s) and looking at {waiting['sections']} part(s) with {ic['image_model'] or '(no model)'} "
               f"at {ic['image_host']} ...")
@@ -477,6 +479,8 @@ def _images_cmd(engine, cfg, args) -> None:
         report = _img.process(engine, cfg, key_fn=extract_keys)
         _print_calls(report)
         print(f"Described {len(report['described'])} image(s), looked at {report['sections']} part(s) in {time.time() - t0:.0f} s.")
+        if report.get("unclear"):
+            print(f"  {report['unclear']} piece(s) of writing were reported by only one look and are now marked as not read for certain.")
         for err in report["errors"]:
             print(f"  stopped: {err}")
         left = _img.pending(engine)

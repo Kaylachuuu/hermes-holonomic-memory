@@ -127,7 +127,7 @@ _CORRECTED = ("\nAn earlier description of this image got something wrong, and t
 _PART = """\
 This is one part of a larger image: the {place}.
 The whole image was described as: {whole}
-That description is only there to tell you where you are; it can be mistaken about what things are. Go by what you can see in this part.
+That description is only there to tell you where you are; it can be mistaken about what things are. Go by what you can see in this part.{said}
 
 Write:
 - notable: false if this part shows nothing worth recording on its own (plain background, sky, wall, floor, blur, or only the edge of something); otherwise true.
@@ -587,7 +587,11 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
     row = _row(engine, image_id)
     if row is None or row["forgotten"] or not row["memory_id"]:
         return 0
-    whole = (engine.get(int(row["memory_id"])) or {}).get("text") or ""
+    # Writing quoted in the description of the whole is kept from the parts: each part must read a sign for
+    # itself, so that two looks agreeing on what it says means something.
+    whole = _without_writing((engine.get(int(row["memory_id"])) or {}).get("text") or "")
+    told = " ".join([row["caption"]] + [c for c in json.loads(row["meta"] or "{}").get("corrections", []) if c]).strip()
+    said = f"\nThe person who showed the image said this about it, which is true: {told[:600]}" if told else ""
     with engine._lock:
         todo = _db(engine).execute("SELECT * FROM image_sections WHERE image_id = ? AND notable IS NULL ORDER BY idx",
                                    (int(image_id),)).fetchall()
@@ -604,7 +608,7 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
             continue
         try:
             jpeg = _crop(img, s["x"], s["y"], s["w"], s["h"], int(ic["image_section_max_side"]))
-            data = _parse(_look_once_more(see, "image_part", _PART.format(place=s["place"], whole=whole), jpeg, _PART_SCHEMA,
+            data = _parse(_look_once_more(see, "image_part", _PART.format(place=s["place"], whole=whole, said=said), jpeg, _PART_SCHEMA,
                                           int(ic["image_max_tokens"])))
             description = _sentence(data.get("description")) if data.get("notable") else ""
             labels = clean_labels(data.get("labels"), 6) if description else []
@@ -630,9 +634,107 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
             raise
     with engine._lock:
         db = _db(engine)
-        if not db.execute("SELECT 1 FROM image_sections WHERE image_id = ? AND notable IS NULL", (int(image_id),)).fetchone():
+        finished = not db.execute("SELECT 1 FROM image_sections WHERE image_id = ? AND notable IS NULL", (int(image_id),)).fetchone()
+        if finished:
             db.execute("UPDATE images SET sections_at = ? WHERE id = ?", (time.time(), int(image_id)))
+    if finished:
+        report["unclear"] = report.get("unclear", 0) + len(settle_writing(engine, image_id))
     return done
+
+
+# ---------------------------------------------------------- writing in images
+
+UNCLEAR = "[writing I could not read for certain]"
+_WRITTEN = " Writing in the image: "
+
+
+def _quotes(text: str) -> List[str]:
+    from .reflect import _QUOTED_RE
+    return [next(g for g in m.groups() if g) for m in _QUOTED_RE.finditer(text or "")]
+
+
+def _letters(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _without_writing(text: str) -> str:
+    """A description with the writing it quotes taken out."""
+    from .reflect import _QUOTED_RE
+    return _QUOTED_RE.sub("[writing]", (text or "").split(_WRITTEN.strip())[0]).strip()
+
+
+def settle_writing(engine, image_id: int) -> List[str]:
+    """Keep only the writing that two separate looks at the image agree on, or that the user stated.
+
+    A vision model asked what a small sign says will often supply something plausible instead of saying it
+    cannot read it: one street photo was given a 'Country Music Square', a 'Tiger Beer', a 'Budweiser' and a
+    'T.J. Maxx' that were not there, each reported by a single look.  The real signs were each read the same
+    way by two overlapping parts.  So writing seen in only one look is replaced by a note that it could not be
+    read for certain, and labels made from it are dropped.  Returns what was taken out."""
+    from .reflect import _QUOTED_RE
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"] or not row["memory_id"]:
+        return []
+    meta = json.loads(row["meta"] or "{}")
+    if meta.get("writing_settled"):
+        return []
+    with engine._lock:
+        parts = _db(engine).execute("SELECT idx, place, memory_id FROM image_sections WHERE image_id = ? AND memory_id IS NOT NULL "
+                                    "ORDER BY idx", (row["id"],)).fetchall()
+    whole = engine.get(int(row["memory_id"])) or {}
+    whole_text = whole.get("text") or ""
+    described, _, written = whole_text.partition(_WRITTEN)
+    items = [w.strip() for w in re.split(r"[,;\n]", written) if w.strip()]
+    texts = {p["idx"]: (engine.get(int(p["memory_id"])) or {}).get("text") or "" for p in parts}
+    seen: Dict[str, set] = {}
+    for q in _quotes(described) + items:
+        seen.setdefault(_letters(q), set()).add("whole")
+    for idx, text in texts.items():
+        for q in _quotes(text):
+            seen.setdefault(_letters(q), set()).add(idx)
+    stated = _letters(" ".join([row["caption"]] + meta.get("corrections", [])))
+    doubtful = {q for q, where in seen.items() if q and len(where) < 2 and q not in stated}
+    removed: List[str] = []
+
+    def clean(text: str) -> str:
+        def swap(m):
+            quote = next(g for g in m.groups() if g)
+            if _letters(quote) in doubtful:
+                removed.append(quote)
+                return UNCLEAR
+            return m.group(0)
+        return _QUOTED_RE.sub(swap, text)
+    new_described = clean(described)
+    kept = [w for w in items if _letters(w) not in doubtful]
+    removed += [w for w in items if _letters(w) in doubtful and w not in removed]
+    new_whole = new_described + (_WRITTEN + ", ".join(kept) if kept else "")
+    whole_id = int(row["memory_id"])
+    with engine._lock:
+        labels = [r["label"] for r in _db(engine).execute("SELECT DISTINCT label FROM image_labels WHERE image_id = ? AND section = -1", (row["id"],))]
+    if new_whole != whole_text:
+        engine.forget(whole_id)
+        links = [i for i in meta.get("links", []) if engine.get(int(i))]
+        whole_id = engine.remember(new_whole, kind=IMAGE, realm=row["realm"], session=row["session"], chain=False, whole=True,
+                                   keys=[l for l in labels if not any(d in _letters(l) for d in doubtful)][:8], links=links, trust=0.6,
+                                   meta={"image_id": int(image_id)})[0]
+    for p in parts:
+        new_text = clean(texts[p["idx"]])
+        if new_text == texts[p["idx"]] and whole_id == int(row["memory_id"]):
+            continue
+        engine.forget(int(p["memory_id"]))          # re-stored so that its text, and its link to the whole, are right
+        mid = engine.remember(new_text, kind=IMAGE_PART, realm=row["realm"], session=row["session"], chain=False, whole=True,
+                              links=[whole_id], salience=0.7, trust=0.6,
+                              meta={"image_id": int(image_id), "section": int(p["idx"]), "place": p["place"]})[0]
+        with engine._lock:
+            _db(engine).execute("UPDATE image_sections SET memory_id = ? WHERE image_id = ? AND idx = ?", (mid, row["id"], p["idx"]))
+    meta["writing_settled"] = True
+    with engine._lock:
+        db = _db(engine)
+        for label in [r["label"] for r in db.execute("SELECT DISTINCT label FROM image_labels WHERE image_id = ?", (row["id"],))]:
+            if any(d in _letters(label) for d in doubtful):
+                db.execute("DELETE FROM image_labels WHERE image_id = ? AND label = ?", (row["id"], label))
+        db.execute("UPDATE images SET memory_id = ?, meta = ? WHERE id = ?", (whole_id, json.dumps(meta), row["id"]))
+    return list(dict.fromkeys(removed))
 
 
 def redescribe(engine, cfg: Dict[str, Any], image_id: int, *, correction: str = "", caption: Optional[str] = None,
@@ -646,6 +748,7 @@ def redescribe(engine, cfg: Dict[str, Any], image_id: int, *, correction: str = 
         return None
     meta = json.loads(row["meta"] or "{}")
     correction = " ".join((correction or "").split())[:600]
+    meta.pop("writing_settled", None)
     if correction:
         meta["corrections"] = (meta.get("corrections", []) + [correction])[-5:]
     with engine._lock:
@@ -677,7 +780,7 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
             should_stop: Optional[Callable[[], bool]] = None, key_fn: Optional[Callable[[str], List[str]]] = None) -> Dict[str, Any]:
     """Describe everything that is waiting: whole images first, then their parts.  A failure (the vision
     server is off, say) ends the pass; what was not done stays waiting."""
-    report: Dict[str, Any] = {"described": [], "sections": 0, "errors": [], "calls": []}
+    report: Dict[str, Any] = {"described": [], "sections": 0, "errors": [], "calls": [], "unclear": 0}
     with engine._lock:
         db = _db(engine)
         whole = [r["id"] for r in db.execute("SELECT id FROM images WHERE forgotten = 0 AND memory_id IS NULL AND source != 'dream' ORDER BY id")]
@@ -705,6 +808,11 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
             report["errors"].append(f"image #{image_id}: {exc}")
             if _unreachable(exc):
                 return report
+    with engine._lock:                           # images finished before writing was checked this way
+        finished = [r["id"] for r in _db(engine).execute(
+            "SELECT id FROM images WHERE forgotten = 0 AND source != 'dream' AND sections_at IS NOT NULL AND meta NOT LIKE '%writing_settled%'")]
+    for image_id in finished:
+        report["unclear"] = report.get("unclear", 0) + len(settle_writing(engine, image_id))
     return report
 
 

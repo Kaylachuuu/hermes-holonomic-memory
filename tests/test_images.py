@@ -1131,3 +1131,41 @@ def test_one_image_that_runs_long_does_not_hold_up_the_rest(tmp_path):
     report = images.process(m, CFG, see=never)
     assert report["described"] == [calm["id"]] and len(report["errors"]) == 1 and report["errors"][0].startswith(f"image #{busy['id']}: ")
     assert images.pending(m)["images"] == 1                                # the one that failed waits; the other was not held up
+
+
+def test_writing_is_kept_only_when_two_looks_agree(tmp_path):
+    from holonomic import images
+    m = store(tmp_path)
+    said = m.remember("Here is another picture from Nashville", kind="said_user", session="s1")[0]
+    img = images.add_image(m, picture(), CFG, caption="A street in Nashville at night.", session="s1", links=[said])
+    whole = {"description": "A night photograph of a busy street with a 'Country Music Square' sign and a 'Hilton' building.",
+             "labels": ["street", "country music square", "hilton sign"], "text": "Hilton, Country Music Square", "people": True}
+    parts = {"top centre": {"description": "A building with a red 'Hilton' sign.", "labels": ["hilton sign"]},
+             "top right": {"description": "A lower building with a 'Bridgestone Arena' sign and a 'T.J. Maxx' sign.", "labels": ["tj maxx sign", "arena sign"]},
+             "centre": {"description": "A brick building with neon signs, including one that says 'TIGER BEER'.", "labels": ["tiger beer sign", "brick building"]},
+             "middle right": {"description": "A tall sign for 'Bridgestone Arena' with a crowd beneath it.", "labels": ["crowd"]},
+             "bottom centre": {"description": "A white SUV marked 'POLICE' beside a dark one. It's parked at the kerb.", "labels": ["suv"]}}
+    seen = []
+    report = images.process(m, CFG, see=eyes(parts, whole=whole, seen=seen))
+    part_prompt = seen[1][1]
+    assert "Country Music Square" not in part_prompt and "Hilton" not in part_prompt and "a busy street with a [writing] sign and a [writing] building." in part_prompt
+    assert "The person who showed the image said this about it, which is true: A street in Nashville at night." in part_prompt
+    assert report["unclear"] == 4                                   # Country Music Square, T.J. Maxx, TIGER BEER and POLICE: one look each
+    got = images.get_image(m, img["id"], sections=True)
+    by_place = {s["place"]: s["description"] for s in got["sections"] if s["description"]}
+    assert got["description"] == (f"A night photograph of a busy street with a {images.UNCLEAR} sign and a 'Hilton' building. "
+                                  "Writing in the image: Hilton")
+    assert by_place["top right"] == f"A lower building with a 'Bridgestone Arena' sign and a {images.UNCLEAR} sign."      # two parts read the arena sign
+    assert by_place["centre"] == f"A brick building with neon signs, including one that says {images.UNCLEAR}."
+    assert by_place["top centre"] == "A building with a red 'Hilton' sign." and "It's parked at the kerb." in by_place["bottom centre"]
+    assert set(got["labels"]) == {"street", "hilton sign", "arena sign", "brick building", "crowd", "suv"}       # labels made from doubtful writing go too
+    assert m.stats()["memories"] == 7 and said in [h.id for h in m.associates(got["memory_id"])]        # still linked to what was said
+    assert got["memory_id"] in [h.id for h in m.associates(next(s["memory_id"] for s in got["sections"] if s["place"] == "centre"), k=3)]
+    assert images.settle_writing(m, img["id"]) == [] and images.process(m, CFG, see=eyes())["unclear"] == 0      # done once
+    # what the user states is never doubted, even if only one look reported it
+    seen.clear()
+    images.redescribe(m, CFG, img["id"], correction="The white SUV is marked POLICE. The big sign says Bridgestone Arena.", see=eyes(whole=whole))
+    report = images.process(m, CFG, see=eyes(parts, seen=seen))
+    assert "which is true: A street in Nashville at night. The white SUV is marked POLICE." in seen[0][1]
+    again = {s["place"]: s["description"] for s in images.get_image(m, img["id"], sections=True)["sections"] if s["description"]}
+    assert "marked 'POLICE'" in again["bottom centre"] and images.UNCLEAR in again["centre"] and report["unclear"] == 3
