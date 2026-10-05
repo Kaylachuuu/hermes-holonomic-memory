@@ -116,7 +116,7 @@ Look at this image.{note}
 Write:
 - description: three to six sentences saying what the image shows: what kind of image it is (photo, screenshot, drawing, diagram, document), its main subject, the setting, and notable details such as colours, positions, expressions and anything unusual.
 - labels: up to {n} short lowercase names for the distinct things visible, each a singular noun or short noun phrase (for example: cat, sofa, window, laptop, mountain). Use an adjective only when it is needed to tell two things apart.
-- text: the most prominent writing visible in the image, copied exactly, a few lines at most, or an empty string if there is none.
+- text: writing in the image that you can read clearly, copied exactly, a few lines at most. Leave out anything you cannot make out for certain: do not guess at what a sign probably says. An empty string if there is none.
 - people: true if one or more real people can be seen in the image, otherwise false."""
 
 _NOTE = ("\nThe person who showed it said: {caption}\nIf those words name someone or something that is visible, use that name. "
@@ -131,7 +131,7 @@ That description is only there to tell you where you are; it can be mistaken abo
 
 Write:
 - notable: false if this part shows nothing worth recording on its own (plain background, sky, wall, floor, blur, or only the edge of something); otherwise true.
-- description: one to three sentences on what is visible in this part, giving detail that the description of the whole lacks. An empty string if not notable.
+- description: one to three sentences on what is visible in this part, giving detail that the description of the whole lacks. An empty string if not notable. Quote writing only if you can read it clearly; do not guess at what a sign says.
 - labels: up to 6 short lowercase names for the distinct things visible in this part, each a singular noun or short noun phrase. An empty list if not notable."""
 
 _LOOK = """\
