@@ -330,6 +330,14 @@ is; with none named, the first one the server lists. Z-Image-Turbo is chosen by 
 shown, are not described as one, and reach her only with the dream they belong to, labelled as
 pictures of a dream. She can show them the same way as any image.
 
+Each picture is drawn several times and the vision model, shown all the attempts with the scene they
+are meant to show, chooses which one is kept; the others are discarded. With one graphics card
+shared between the language model and the image generator, `--swap on` unloads the language models
+(not the embedding model) while pictures are drawn, asks the image server to free the card when it
+is done, and loads them again exactly as they were, so the agent is ready to talk when the dream
+step ends. A message sent while pictures are being drawn makes Ollama load the model again at once;
+the drawing may then fail for lack of memory, and the dream is kept without those pictures.
+
 In `from_images` mode, images in which the vision model saw real people are not drawn from unless
 `dream_image_use_people` is set; a scene with a person in it is then drawn from words alone. Stored
 images are only read. If the image generator cannot be reached the dream is kept without pictures.
@@ -340,6 +348,8 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_seeds` | `2` | Recent images a dream draws on |
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
+| `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
+| `dream_image_swap` | `false` | One graphics card: unload the language models while pictures are drawn, reload them after |
 | `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |
 | `dream_image_strength` | `0.75` | `from_images`: how far a picture may move from the images it starts from |
 | `dream_image_style` | `dreamlike, soft light, slightly out of focus` | Added to every scene |

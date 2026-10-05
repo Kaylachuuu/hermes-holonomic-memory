@@ -68,6 +68,24 @@ def _multipart(fields: Dict[str, str], name: str, filename: str, data: bytes, mi
     return out, f"multipart/form-data; boundary={boundary}"
 
 
+def release(sc: Dict[str, Any]) -> bool:
+    """Ask the image server to unload its models and give the graphics card back.  True if it was asked."""
+    api, host = str(sc.get("dream_image_api") or "").lower(), str(sc.get("dream_image_host") or "").rstrip("/")
+    try:
+        if api == "comfyui" and host:
+            req = urllib.request.Request(f"{host}/free", data=json.dumps({"unload_models": True, "free_memory": True}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=60).read()
+            return True
+        if api == "a1111" and host:
+            urllib.request.urlopen(urllib.request.Request(f"{host}/sdapi/v1/unload-checkpoint", data=b"{}",
+                                                          headers={"Content-Type": "application/json"}), timeout=60).read()
+            return True
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+    return False
+
+
 def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     api = str(sc.get("dream_image_api") or "").lower()
     host = str(sc.get("dream_image_host") or "").rstrip("/")

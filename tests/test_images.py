@@ -6,7 +6,7 @@ from test_provider import HAVE_HERMES, make, tool
 from conftest import track
 from holonomic import HolonomicMemory, HashEmbedder
 
-CFG = {"image_enabled": True, "image_model": "eyes", "image_view_width": 1024, "image_view_height": 768}
+CFG = {"image_enabled": True, "image_model": "eyes", "image_view_width": 1024, "image_view_height": 768, "dream_image_candidates": 1}
 
 
 def store(tmp_path):
@@ -717,6 +717,9 @@ def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
         saved = json.loads((home / "holonomic.json").read_text())
         assert saved["dream_images"] == "from_images" and saved["dream_image_use_people"] is True and saved["dream_image_width"] == 640
         assert "are not drawn from" in run("dreams", "images", "--people", "no")
+        out = run("dreams", "images", "--attempts", "4", "--swap", "on")
+        assert "each drawn 4 time(s) and she keeps the best" in out and "language models are unloaded while pictures are drawn" in out
+        assert "language models are unloaded" not in run("dreams", "images", "--swap", "off", "--attempts", "1")
         out = run("dreams", "images", "--strength", "7", "--style", "ink wash, mist")
         assert "may move from the images it starts from: 1.0" in out and "style added to every scene: ink wash, mist" in out
         out = run("dreams", "images", "--api", "comfyui", "--host", "http://127.0.0.1:9", "--test", "a cat asleep in a greenhouse")
@@ -841,3 +844,110 @@ def test_a_cat_with_a_face_is_not_a_person(tmp_path):
     assert images.set_people(m, img["id"], True) and images.has_people(m, img["id"]) and not images.set_people(m, 99, True)
     m._db.execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps({"people": True, "people_said": False}), img["id"]))
     assert not images.has_people(m, img["id"])                                       # what the user said wins over what the model judged
+
+
+def test_each_picture_is_drawn_several_times_and_she_keeps_one(tmp_path):
+    import random
+    from holonomic import images
+    from holonomic.sleep import sleep_config, sleep_once
+    m, ids, now = dream_store(tmp_path)
+    assert sleep_config({})["dream_image_candidates"] == 3 and sleep_config({})["dream_image_swap"] is False
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=2, dream_image_candidates=3, dream_image_style="")
+    drawn, asked = [], []
+
+    def paint(prompt, start, size=None):
+        drawn.append(prompt)
+        return picture(768, 512, colour=(len(drawn) * 20, 0, 0))                # every attempt is a different picture
+    keep = images._chooser
+
+    def chooser(ic, report):
+        def look_at(prompt, jpegs, schema, max_tokens):
+            asked.append((prompt, [size_of(j) for j in jpegs]))
+            return json.dumps({"best": 2 if len(asked) == 1 else 7, "why": "The couch is green and the cat is long-haired"})
+        return look_at
+    images._chooser = chooser
+    scenes = [{"picture": "A black cat asleep on a couch in a greenhouse.", "images": [ids["cat"]]},
+              {"picture": "Car windows fogging over with basil leaves.", "images": []}]
+    try:
+        report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    finally:
+        images._chooser = keep
+    first, second = report["dreams"][0]["pictures"]
+    assert len(drawn) == 6 and drawn[0] == drawn[1] == drawn[2] and drawn[3] == drawn[5]      # all drawn before any is chosen
+    assert "Here are 3 pictures" in asked[0][0] and "A black cat asleep on a couch in a greenhouse." in asked[0][0]
+    assert "It draws on something you remember: A photo of a black cat asleep on a green couch" in asked[0][0] and asked[0][1] == [(768, 512)] * 3
+    assert "It draws on something you remember" not in asked[1][0]
+    assert (first["chosen"], first["of"], first["why"]) == (2, 3, "The couch is green and the cat is long-haired")
+    assert open(first["file"], "rb").read() == picture(768, 512, colour=(40, 0, 0))            # the second attempt is the one kept
+    assert (second["chosen"], second["of"], second["why"]) == (1, 3, "")                       # an answer that makes no sense: the first
+    assert images.count_images(m, "dream") == 2                                                # the others are not kept
+    assert images.pick_best(cfg, "x", [picture()]) == (0, "") and images.pick_best({"image_enabled": True}, "x", [picture(), picture()]) == (0, "")
+
+
+def test_one_graphics_card_is_shared_and_given_back(tmp_path):
+    """Against stand-ins for Ollama and ComfyUI: the language model leaves before pictures are drawn and is back,
+    loaded the way it was, before she is asked to choose between them."""
+    import http.server, random, threading
+    from holonomic import images, paint
+    from holonomic.sleep import sleep_once
+    log, loaded = [], {"gemma4-64k:latest": "2318-01-01T00:00:00Z", "nomic-embed-text:latest": "2318-01-01T00:00:00Z", "tiny:latest": "2026-10-05T12:00:00Z"}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def reply(self, data):
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(data).encode())
+
+        def do_GET(self):
+            log.append("ps")
+            self.reply({"models": [{"name": k, "expires_at": v} for k, v in loaded.items()]})
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            if self.path == "/free":
+                log.append(("free", body))
+            elif body.get("keep_alive") == 0:
+                log.append(("unload", body["model"])); loaded.pop(body["model"], None)
+            else:
+                log.append(("load", body["model"], body.get("keep_alive")))
+                loaded[body["model"]] = "2318-01-01T00:00:00Z" if body.get("keep_alive") == -1 else "2026-10-05T12:00:00Z"
+            self.reply({})
+
+        def log_message(self, *a):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{server.server_port}"
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=1, dream_image_candidates=2, dream_image_swap=True, ollama_host=host,
+               reflect_host=host + "/", dream_image_api="comfyui", dream_image_host=host, embed_model="nomic-embed-text")
+    keep = images._chooser
+
+    def chooser(ic, report):
+        def look_at(prompt, jpegs, schema, max_tokens):
+            log.append("choose")
+            return json.dumps({"best": 1, "why": "It is the clearer one."})
+        return look_at
+    images._chooser = chooser
+
+    def draw(prompt, start, size=None):
+        log.append("draw")
+        return picture(768, 512, colour=(len(log), 0, 0))
+    try:
+        report = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=draw)
+        assert log == ["ps", ("unload", "gemma4-64k:latest"), ("unload", "tiny:latest"), "draw", "draw",
+                       ("free", {"unload_models": True, "free_memory": True}),
+                       ("load", "gemma4-64k:latest", -1), ("load", "tiny:latest", None), "choose"]      # the embedding model never left
+        assert report["dreams"][0]["pictures"][0]["of"] == 2 and not report["errors"]
+        log.clear()
+
+        def broken(prompt, start, size=None):
+            raise RuntimeError("out of memory")
+        report = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(2), now=now + 9, paint=broken)
+        assert ("load", "gemma4-64k:latest", -1) in log and report["errors"] == ["dream pictures: out of memory"]      # she comes back even so
+        assert paint.release({"dream_image_api": "openai", "dream_image_host": host}) is False
+    finally:
+        images._chooser = keep
+        server.shutdown()
+    m2, _, _ = dream_store(tmp_path / "b")
+    report = sleep_once(m2, dict(cfg, ollama_host="http://127.0.0.1:9", reflect_host="", dream_image_host="http://127.0.0.1:9"),
+                        llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=draw)
+    assert report["dreams"][0]["pictures"] and "could not make room" in report["errors"][0]            # no server to ask: the pictures are still drawn

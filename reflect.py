@@ -290,6 +290,36 @@ def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float
     return content
 
 
+def _ollama(host: str, path: str, body: Optional[dict], timeout: float) -> dict:
+    req = urllib.request.Request(host.rstrip("/") + path, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json"} if body is not None else {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def ollama_loaded(host: str, timeout: float = 15.0) -> List[dict]:
+    """Models an Ollama server has in memory now: [{"name", "forever"}].  `forever` is whether the model was set
+    never to unload, so that it can be put back the same way."""
+    out = []
+    for m in _ollama(host, "/api/ps", None, timeout).get("models") or []:
+        try:
+            forever = int(str(m.get("expires_at") or "")[:4]) > time.gmtime().tm_year + 1
+        except ValueError:
+            forever = False
+        if m.get("name"):
+            out.append({"name": m["name"], "forever": forever})
+    return out
+
+
+def ollama_unload(host: str, name: str, timeout: float = 60.0) -> None:
+    _ollama(host, "/api/generate", {"model": name, "keep_alive": 0}, timeout)
+
+
+def ollama_load(host: str, name: str, forever: bool = False, timeout: float = 600.0) -> None:
+    """Load a model and wait until it is ready.  With no prompt Ollama loads the model and returns."""
+    _ollama(host, "/api/generate", dict({"model": name}, **({"keep_alive": -1} if forever else {})), timeout)
+
+
 def _parse(raw: str) -> Dict[str, Any]:
     try:
         data = json.loads(raw)

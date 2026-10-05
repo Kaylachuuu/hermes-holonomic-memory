@@ -259,6 +259,10 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_count"] = args.count
     if args.people:
         values["dream_image_use_people"] = args.people == "yes"
+    if args.attempts:
+        values["dream_image_candidates"] = max(1, min(args.attempts, 8))
+    if args.swap:
+        values["dream_image_swap"] = args.swap == "on"
     if args.encoder:
         values["dream_image_text_encoder_on"] = "cpu" if args.encoder == "cpu" else ""
     if args.strength is not None:
@@ -302,7 +306,10 @@ def _dream_images(cfg, args) -> None:
         ready = sc["dream_image_api"] in APIS and sc["dream_image_host"]
         print(f"  image generator: {sc['dream_image_api'] + ' at ' + sc['dream_image_host'] if ready else 'NOT SET (use --api and --host)'}"
               + (f", model {sc['dream_image_model']}" if sc["dream_image_model"] else ""))
-        print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}")
+        print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}, "
+              f"each drawn {sc['dream_image_candidates']} time(s)" + (" and she keeps the best" if int(sc["dream_image_candidates"]) > 1 else ""))
+        if sc["dream_image_swap"]:
+            print("  one graphics card: the language models are unloaded while pictures are drawn and reloaded afterwards")
     if mode == "from_images":
         print(f"  images with real people in them: {'may be drawn from' if sc['dream_image_use_people'] else 'are not drawn from (--people yes to allow)'}")
         print(f"  how far a picture may move from the images it starts from: {sc['dream_image_strength']} (--strength)")
@@ -555,6 +562,7 @@ def _sleep(engine, cfg, args) -> None:
             print(f"  IMAGES    drew on what she saw in image {', '.join('#' + str(i) for i in seen)}")
         for p in d.get("pictures") or []:
             print(f"  PICTURE   {p['scene']}" + (f"   <- from image {', '.join('#' + str(i) for i in p['from'])}" if p.get("from") else "")
+                  + (f"\n            she chose attempt {p['chosen']} of {p['of']}" + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
                   + (f"\n            {p['file']}" if p.get("file") else ""))
     for err in report["errors"]:
         print(f"  ERROR     {err}")
@@ -676,6 +684,9 @@ def register_cli(subparser) -> None:
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
+    drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
+    drm.add_argument("--swap", choices=["on", "off"], help="With 'images': for one graphics card: unload the language models while "
+                                                           "pictures are drawn and reload them when the dream is over")
     drm.add_argument("--encoder", choices=["gpu", "cpu"], help="With 'images': Z-Image only: where the prompt is read. 'cpu' leaves "
                                                                "the graphics card to the drawing model")
     drm.add_argument("--strength", type=float, help="With 'images': from_images: how far a picture may move from the images it "

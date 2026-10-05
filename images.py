@@ -407,6 +407,55 @@ def _seer(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
     return see
 
 
+_CHOOSE = """\
+Here are {n} pictures, numbered in the order given. Each is an attempt to show this moment from a dream you had:
+{scene}{remembered}
+
+Choose the one that shows the moment best. What the moment describes should be there, things should look right (no \
+malformed faces, hands or animals), and it should feel like the dream.
+
+Write:
+- best: the number of the picture you choose, from 1 to {n}.
+- why: one sentence on why that one."""
+
+_CHOOSE_SCHEMA = {"type": "object", "properties": {"best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best", "why"]}
+
+
+def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
+    from . import reflect as _reflect
+    if not ic["image_model"]:
+        raise ImageError("No vision model is set.")
+
+    def look_at(prompt: str, jpegs: List[bytes], schema: dict, max_tokens: int) -> str:
+        out = _reflect.ollama_chat(ic["image_host"], ic["image_model"], "You are choosing between pictures of your own dream. "
+                                   "Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt, timeout=float(ic["image_timeout"]),
+                                   temperature=0.2, max_tokens=max_tokens, think=False, schema=schema,
+                                   images=[base64.b64encode(j).decode() for j in jpegs])
+        report.setdefault("calls", []).append(dict(_reflect.LAST_CALL, step="choose"))
+        return out
+    return look_at
+
+
+def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
+              report: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
+    """Which of several attempts at a dream picture she keeps: (index, her reason).  She looks at them all and
+    chooses.  If she cannot look (no vision model, the server is off, a reply that makes no sense) it is the first."""
+    from .reflect import _parse
+    if len(pictures) < 2:
+        return 0, ""
+    try:
+        look_at = _chooser(image_config(cfg), report if report is not None else {})
+        small = [_jpeg(open_image(p)[0], (768, 768)) for p in pictures]
+        note = f"\nIt draws on something you remember: {remembered}" if remembered else ""
+        data = _parse(look_at(_CHOOSE.format(n=len(pictures), scene=scene, remembered=note), small, _CHOOSE_SCHEMA, 200))
+        best = int(data.get("best") or 0)
+        if 1 <= best <= len(pictures):
+            return best - 1, _sentence(data.get("why"))[:300]
+    except Exception as exc:
+        logger.debug("holonomic: choosing between dream pictures failed: %s", exc)
+    return 0, ""
+
+
 def clean_labels(labels: Any, limit: int) -> List[str]:
     out: List[str] = []
     for raw in labels if isinstance(labels, list) else []:
