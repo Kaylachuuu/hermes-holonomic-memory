@@ -48,7 +48,7 @@ IMAGE_DEFAULTS: Dict[str, Any] = {
     "image_sections_when": "idle",   # 'idle': when the conversation has gone quiet; 'now': straight away
     "image_idle_seconds": 120,
     "image_timeout": 180,
-    "image_max_tokens": 700,
+    "image_max_tokens": 1000,
     "image_temperature": 0.2,
     "image_max_labels": 12,
     "image_max_bytes": 30_000_000,
@@ -116,7 +116,7 @@ Look at this image.{note}
 Write:
 - description: three to six sentences saying what the image shows: what kind of image it is (photo, screenshot, drawing, diagram, document), its main subject, the setting, and notable details such as colours, positions, expressions and anything unusual.
 - labels: up to {n} short lowercase names for the distinct things visible, each a singular noun or short noun phrase (for example: cat, sofa, window, laptop, mountain). Use an adjective only when it is needed to tell two things apart.
-- text: any writing visible in the image, copied exactly, or an empty string if there is none.
+- text: the most prominent writing visible in the image, copied exactly, a few lines at most, or an empty string if there is none.
 - people: true if one or more real people can be seen in the image, otherwise false."""
 
 _NOTE = ("\nThe person who showed it said: {caption}\nIf those words name someone or something that is visible, use that name. "
@@ -486,6 +486,26 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
     return 0, ""
 
 
+_BRIEFLY = ("\n\nYour last answer ran too long and was cut off. Be brief this time: at most four sentences of description, and for "
+            "writing in the image only the few most prominent words.")
+
+
+def _look_once_more(see: Callable[..., str], step: str, prompt: str, jpeg: bytes, schema: dict, max_tokens: int) -> str:
+    """Ask the vision model, and if its answer ran past the limit ask again for a shorter one with more room.
+    A night street full of signs made the model copy out every sign and run out of space before it finished."""
+    try:
+        return see(step, _SYSTEM, prompt, jpeg, schema, max_tokens)
+    except ReflectionError as exc:
+        if "reply limit" not in str(exc):
+            raise
+        return see(step + " (again, briefly)", _SYSTEM, prompt + _BRIEFLY, jpeg, schema, max_tokens * 2)
+
+
+def _unreachable(exc: Exception) -> bool:
+    """Whether a failure means the vision server itself is the problem, so there is no point trying the next image."""
+    return isinstance(exc, OSError) or "Could not reach" in str(exc) or "No vision model" in str(exc)
+
+
 def clean_labels(labels: Any, limit: int) -> List[str]:
     out: List[str] = []
     for raw in labels if isinstance(labels, list) else []:
@@ -528,8 +548,8 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
         if corrections:
             note += _CORRECTED.format(correction=" ".join(corrections))
         prompt = _WHOLE.format(note=note, n=int(ic["image_max_labels"]))
-        data = _parse(see("image", _SYSTEM, prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
-                          int(ic["image_max_tokens"])))
+        data = _parse(_look_once_more(see, "image", prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
+                                      int(ic["image_max_tokens"])))
         description = _sentence(data.get("description"))
         if len(description) < 20:
             raise ImageError("The description came back empty or cut short; it will be tried again.")
@@ -584,8 +604,8 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
             continue
         try:
             jpeg = _crop(img, s["x"], s["y"], s["w"], s["h"], int(ic["image_section_max_side"]))
-            data = _parse(see("image_part", _SYSTEM, _PART.format(place=s["place"], whole=whole), jpeg, _PART_SCHEMA,
-                              int(ic["image_max_tokens"])))
+            data = _parse(_look_once_more(see, "image_part", _PART.format(place=s["place"], whole=whole), jpeg, _PART_SCHEMA,
+                                          int(ic["image_max_tokens"])))
             description = _sentence(data.get("description")) if data.get("notable") else ""
             labels = clean_labels(data.get("labels"), 6) if description else []
             with engine._lock:            # 'whiskers' when the image already has 'whisker' is filed under the one it has
@@ -664,18 +684,27 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
         parts = [r["id"] for r in db.execute(
             "SELECT DISTINCT i.id FROM images i JOIN image_sections s ON s.image_id = i.id "
             "WHERE i.forgotten = 0 AND s.notable IS NULL ORDER BY i.id")]
-    try:
-        for image_id in whole:
-            if should_stop and should_stop():
-                return report
+    # One image that cannot be described must not hold up the rest: it is reported and the pass moves on.
+    # Only a failure of the server itself ends the pass.
+    for image_id in whole:
+        if should_stop and should_stop():
+            return report
+        try:
             if describe(engine, cfg, image_id, see=see, key_fn=key_fn, report=report):
                 report["described"].append(image_id)
-        for image_id in (parts if sections and image_config(cfg)["image_sections"] else []):
-            if should_stop and should_stop():
+        except (ImageError, ReflectionError, OSError) as exc:
+            report["errors"].append(f"image #{image_id}: {exc}")
+            if _unreachable(exc):
                 return report
+    for image_id in (parts if sections and image_config(cfg)["image_sections"] else []):
+        if should_stop and should_stop():
+            return report
+        try:
             report["sections"] += describe_sections(engine, cfg, image_id, see=see, should_stop=should_stop, report=report)
-    except (ImageError, ReflectionError, OSError) as exc:
-        report["errors"].append(str(exc))
+        except (ImageError, ReflectionError, OSError) as exc:
+            report["errors"].append(f"image #{image_id}: {exc}")
+            if _unreachable(exc):
+                return report
     return report
 
 
@@ -697,8 +726,8 @@ def look(engine, cfg: Dict[str, Any], image_id: int, question: str, *, section: 
         if s is None:
             raise ImageError(f"Image {image_id} has no section {section}")
         jpeg = _crop(img, s["x"], s["y"], s["w"], s["h"], int(ic["image_section_max_side"]))
-    data = _parse(see("look", _SYSTEM, _LOOK.format(question=" ".join(question.split())[:600]), jpeg, _LOOK_SCHEMA,
-                      int(ic["image_max_tokens"])))
+    data = _parse(_look_once_more(see, "look", _LOOK.format(question=" ".join(question.split())[:600]), jpeg, _LOOK_SCHEMA,
+                                  int(ic["image_max_tokens"])))
     return " ".join(str(data.get("answer") or "").split())
 
 

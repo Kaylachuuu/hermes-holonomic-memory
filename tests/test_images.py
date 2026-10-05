@@ -157,7 +157,7 @@ def test_a_description_that_fails_is_tried_again(tmp_path):
     with pytest.raises(images.ImageError):
         images.describe(m, {"image_enabled": True}, img["id"])              # no model named
     report = images.process(m, CFG, see=off)
-    assert report["errors"] == ["Could not reach model 'eyes'"] and report["described"] == [] and images.pending(m)["images"] == 1
+    assert report["errors"] == ["image #1: Could not reach model 'eyes'"] and report["described"] == [] and images.pending(m)["images"] == 1
     calls = []
     stop = lambda: len(calls) >= 4                                           # the conversation resumes after a few parts
     report = images.process(m, CFG, see=eyes({"centre": {"description": "A cat.  It is asleep.", "labels": ["cat"]}}, seen=calls), should_stop=stop)
@@ -418,7 +418,7 @@ def test_the_vision_model_is_sent_the_picture(tmp_path):
         assert images.describe(m, cfg, img["id"], report=report)["labels"] == ["black cat", "cushion", "sofa", "window"]
         path, body = got[0]
         assert path == "/api/chat" and body["model"] == "gemma-eyes" and body["think"] is False and body["stream"] is False
-        assert body["format"]["required"] == ["description", "labels", "text", "people"] and body["options"]["num_predict"] == 700
+        assert body["format"]["required"] == ["description", "labels", "text", "people"] and body["options"]["num_predict"] == 1000
         user = body["messages"][1]
         assert user["role"] == "user" and size_of(base64.b64decode(user["images"][0])) == (1024, 768) and "Look at this image." in user["content"]
         assert report["calls"][0]["step"] == "image"
@@ -1103,3 +1103,31 @@ def test_cli_tidy(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+def test_one_image_that_runs_long_does_not_hold_up_the_rest(tmp_path):
+    from holonomic import images
+    from holonomic.reflect import ReflectionError
+    m = store(tmp_path)
+    busy = images.add_image(m, picture(colour=(1, 1, 1)), dict(CFG, image_sections=False), caption="A street in Nashville at night.")
+    calm = images.add_image(m, picture(colour=(2, 2, 2)), dict(CFG, image_sections=False))
+    asked = []
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        asked.append((step, max_tokens, "Be brief this time" in prompt))
+        if "Nashville" in prompt and "Be brief this time" not in prompt:
+            raise ReflectionError("The model hit the 1000-token reply limit without finishing. Its reply began: '{'")
+        return json.dumps(WHOLE)
+    report = images.process(m, CFG, see=see)
+    assert asked == [("image", 1000, False), ("image (again, briefly)", 2000, True), ("image", 1000, False)]      # asked again, shorter, with more room
+    assert report["described"] == [busy["id"], calm["id"]] and report["errors"] == []
+
+    def never(step, system, prompt, jpeg, schema, max_tokens):
+        if "Nashville" in prompt:
+            raise ReflectionError("The model hit the reply limit without finishing.")
+        return json.dumps(WHOLE)
+    for i in (busy["id"], calm["id"]):
+        m._db.execute("UPDATE images SET memory_id = NULL, described_at = NULL WHERE id = ?", (i,))
+    report = images.process(m, CFG, see=never)
+    assert report["described"] == [calm["id"]] and len(report["errors"]) == 1 and report["errors"][0].startswith(f"image #{busy['id']}: ")
+    assert images.pending(m)["images"] == 1                                # the one that failed waits; the other was not held up
