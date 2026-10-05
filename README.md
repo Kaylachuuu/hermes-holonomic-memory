@@ -389,6 +389,57 @@ python scripts/bench.py
 Provider tests need the Hermes source: set `HERMES_SRC` or keep a `hermes-agent` checkout next to
 this folder.
 
+## Using a different model
+
+This plugin was developed and tuned against one setup. On anything very different, expect to
+re-tune before trusting what it stores.
+
+| Role | Model it was tuned with |
+|---|---|
+| Chat, reflection, dreaming, describing images | Gemma 4 through Ollama, 64k context, on a 16 GB Tesla V100 |
+| Embeddings | `nomic-embed-text` through Ollama |
+| Dream pictures | Z-Image-Turbo (and SDXL, Stable Diffusion 1.5) through ComfyUI |
+
+**What carries over to any model.** The safeguards are rules in code, applied after the model
+answers: facts about the user must cite something the user said; writing in an image is kept only
+when two looks agree or the user stated it; a reply cut off mid-sentence is retried or trimmed; a
+failed step falls back to something safe. A stronger model trips these less often; a weaker one
+more.
+
+**What was tuned to this model and may need changing.**
+
+| Setting or behaviour | Why it is the way it is | With another model |
+|---|---|---|
+| `reflect_think`, `dream_image_choose_think` off | Reasoning ran past its allowance without answering | A stronger model may reason well; test with `--think` |
+| `reflect_max_tokens`, `image_max_tokens` | Sized to this model's typical replies | May be too tight or too generous |
+| `reflect_depth` 3 | A second pass that checks each item was needed | Depth 2 may be enough; a weaker model may need 1 |
+| "Never use the double quotation mark" in prompts | This model ended its JSON early at a quote | Harmless elsewhere |
+| Dream openings chosen in code | Every dream began in a corridor | May be unnecessary |
+| `dream_temperature` 1.0, word limits | What produced dreams and not summaries here | Adjust to taste |
+| The two-look rule for writing in images | This model invents sign text it cannot read | Discards some true text; a better vision model may not need it |
+| `dream_image_strength`, steps, size | Right for Z-Image-Turbo; SDXL wanted a different strength | Re-tune for each image model |
+| `dream_talk_similarity`, `min_score`, `score_band` | Measured with `nomic-embed-text` | Re-measure with a different embedding model |
+
+**The embedding model cannot be swapped freely.** Stored memories are indexed by it, so changing it
+means a new store. Chat, vision and image models can be changed at any time.
+
+**A model that cannot see** cannot describe images or choose between dream pictures: set
+`image_model` to one that can, or leave image memory off.
+
+**How to check a new model before trusting it.** Back up the data folder, then compare against
+what you know to be true:
+
+```
+hermes holonomic reflect now --dry-run       # are the facts things you actually said?
+hermes holonomic sleep now --dry-run         # is the account of each conversation accurate? does the dream read as a dream?
+hermes holonomic images redo ID              # on a photo you know well: is anything invented?
+hermes holonomic dreams images --test "..."  # does the image generator draw what was asked?
+```
+
+The prompts themselves are in `reflect.py`, `sleep.py` and `images.py`. They were written by
+watching this model fail and correcting for it, so wording that steers Gemma 4 may not steer
+another family as well.
+
 ## Limits
 
 - The plates hold associations only. Text and one embedding per memory are stored conventionally,
