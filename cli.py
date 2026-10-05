@@ -8,6 +8,8 @@
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
+    hermes holonomic dreams images [off|words|pictures|from_images] [--api a1111|openai] [--host URL] [--model NAME]
+                                   [--size 768x512] [--count 3] [--people yes|no]      what images do in dreams
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
     hermes holonomic images                       image memory: status, and what is waiting to be described
@@ -124,6 +126,8 @@ def holonomic_command(args) -> None:
                     mark_dream_talk(engine, m["id"], m["text"], m["kind"], cfg, force=bool(m.get("force")))
             if found:
                 print("Labelled as dream talk." if args.apply else "Nothing changed. Run again with --apply to label them.")
+        elif action == "dreams" and args.dreams_action == "images":
+            _dream_images(cfg, args)
         elif action == "dreams":
             from .sleep import dreams
             found = dreams(engine, args.n)
@@ -134,6 +138,8 @@ def holonomic_command(args) -> None:
                     print(f"  What she made of it: {d['thoughts']}")
                 for c in d.get("connections", []):
                     print(f"  Connection she noticed: {c}")
+                for p in d.get("pictures", []):
+                    print(f"  Picture: {p['scene']}\n    {p['file']}")
         elif action in ("show", "forget"):
             found = [(mid, engine.get(mid)) for mid in args.ids]
             for mid, mem in found:
@@ -228,6 +234,58 @@ def holonomic_command(args) -> None:
                 print("  (nothing stored matches)")
     finally:
         engine.close()
+
+
+def _dream_images(cfg, args) -> None:
+    from hermes_constants import get_hermes_home
+    from .paint import APIS
+    from .provider import load_config, write_config
+    from .sleep import DREAM_IMAGE_MODES, sleep_config
+    home = get_hermes_home()
+    values = {}
+    if args.mode:
+        if args.mode not in DREAM_IMAGE_MODES:
+            print(f"Choose one of: {', '.join(DREAM_IMAGE_MODES)}")
+            return
+        values["dream_images"] = args.mode
+    if args.api:
+        values["dream_image_api"] = args.api
+    if args.host:
+        values["dream_image_host"] = args.host.rstrip("/")
+    if args.model is not None:
+        values["dream_image_model"] = args.model
+    if args.count:
+        values["dream_image_count"] = args.count
+    if args.people:
+        values["dream_image_use_people"] = args.people == "yes"
+    if args.size:
+        try:
+            w, h = (int(v) for v in args.size.lower().split("x"))
+            values.update(dream_image_width=w, dream_image_height=h)
+        except ValueError:
+            print("Give the size as WIDTHxHEIGHT, for example 768x512")
+            return
+    if values:
+        write_config(home, values)
+        cfg = load_config(home)
+    sc = sleep_config(cfg)
+    mode = sc["dream_images"]
+    print(f"Images in dreams: {mode}")
+    print({"off": "  Images play no part in dreams.",
+           "words": "  What she saw in recent images, and in older images they resemble, joins what a dream is made from.",
+           "pictures": "  As 'words', and scenes from each dream are drawn from her description of them.",
+           "from_images": "  As 'pictures', and a scene that resembles images she has seen is drawn starting from those images."}[mode])
+    if mode in ("pictures", "from_images"):
+        ready = sc["dream_image_api"] in APIS and sc["dream_image_host"]
+        print(f"  image generator: {sc['dream_image_api'] + ' at ' + sc['dream_image_host'] if ready else 'NOT SET (use --api and --host)'}"
+              + (f", model {sc['dream_image_model']}" if sc["dream_image_model"] else ""))
+        print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}")
+    if mode == "from_images":
+        print(f"  images with real people in them: {'may be drawn from' if sc['dream_image_use_people'] else 'are not drawn from (--people yes to allow)'}")
+    if not cfg.get("image_enabled"):
+        print("  Image memory is off, so there are no images to dream of. Turn on with: hermes holonomic images on")
+    if values:
+        print("Restart Hermes for a running session to pick this up.")
 
 
 def _images_toggle(args) -> None:
@@ -455,6 +513,12 @@ def _sleep(engine, cfg, args) -> None:
         print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
         for c in d["connections"]:
             print(f"  CONNECTION {c['text']}   <- {', '.join('#' + str(s) for s in c['sources'])}")
+        seen = sorted({f["image_id"] for f in d["fragments"] if f.get("image_id")})
+        if seen:
+            print(f"  IMAGES    drew on what she saw in image {', '.join('#' + str(i) for i in seen)}")
+        for p in d.get("pictures") or []:
+            print(f"  PICTURE   {p['scene']}" + (f"   <- from image {', '.join('#' + str(i) for i in p['from'])}" if p.get("from") else "")
+                  + (f"\n            {p['file']}" if p.get("file") else ""))
     for err in report["errors"]:
         print(f"  ERROR     {err}")
 
@@ -564,8 +628,16 @@ def register_cli(subparser) -> None:
     dt = subs.add_parser("dreamtalk", help="Find stored conversation that is talk about a dream, and label it")
     dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
     dt.add_argument("--width", type=int, default=110, help="Characters of text to show")
-    drm = subs.add_parser("dreams", help="Show recent dreams")
+    drm = subs.add_parser("dreams", help="Show recent dreams, or set what images do in dreams")
+    drm.add_argument("dreams_action", nargs="?", choices=["show", "images"], default="show")
+    drm.add_argument("mode", nargs="?", help="With 'images': off, words, pictures or from_images")
     drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
+    drm.add_argument("--api", choices=["a1111", "openai"], help="With 'images': which interface the image generator speaks")
+    drm.add_argument("--host", help="With 'images': address of the image generator, e.g. http://10.0.0.21:7860")
+    drm.add_argument("--model", help="With 'images': model or checkpoint name, if the server needs one")
+    drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
+    drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
+    drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     show = subs.add_parser("show", help="Full text of memories and what each is linked to")
     show.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     fg = subs.add_parser("forget", help="Remove memories for good")

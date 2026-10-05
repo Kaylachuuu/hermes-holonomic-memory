@@ -301,6 +301,44 @@ back. Reflection does not read image descriptions: what a picture shows is not s
 said. Each image and part has an empty place for a vector, reserved for fingerprints from a vision
 embedding model (recognising similar pictures and things within them without words).
 
+### Images in dreams
+
+`dream_images` sets what images do when she dreams. Each level includes the ones before it.
+
+| Mode | What happens | Needs |
+|---|---|---|
+| `off` | Images play no part in dreams | |
+| `words` (default) | What she saw in recent images, and in older images they resemble, joins the fragments a dream is made from | Image memory on |
+| `pictures` | Scenes from each dream are drawn by an image generator, from her own description of them | An image generator |
+| `from_images` | A scene that resembles images she has seen is drawn starting from those images, laid over each other | An image generator that can rework a picture |
+
+```
+hermes holonomic dreams images                 # what is set now
+hermes holonomic dreams images from_images --api a1111 --host http://10.0.0.21:7860 --size 768x512 --count 3
+hermes holonomic dreams images --people yes    # allow images with real people in them to be drawn from
+```
+
+The plugin does not draw. It asks a server you run, through the Stable Diffusion WebUI API (`a1111`:
+AUTOMATIC1111, Forge, SD.Next) or the OpenAI images API (`openai`), which several local servers
+speak. Pictures of a dream are kept in the dream realm: they are not listed among images she was
+shown, are not described as one, and reach her only with the dream they belong to, labelled as
+pictures of a dream. She can show them the same way as any image.
+
+In `from_images` mode, images in which the vision model saw real people are not drawn from unless
+`dream_image_use_people` is set; a scene with a person in it is then drawn from words alone. Stored
+images are only read. If the image generator cannot be reached the dream is kept without pictures.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dream_images` | `words` | `off`, `words`, `pictures` or `from_images` |
+| `dream_image_seeds` | `2` | Recent images a dream draws on |
+| `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
+| `dream_image_count` | `3` | Pictures per dream |
+| `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |
+| `dream_image_strength` | `0.6` | `from_images`: how far a picture may move from the images it starts from |
+| `dream_image_style` | `dreamlike, soft light, slightly out of focus` | Added to every scene |
+| `dream_image_use_people` | `false` | `from_images`: may images with real people be drawn from |
+
 ## Inspecting the store
 
 ```
@@ -344,7 +382,7 @@ this folder.
   re-derivation of the profiles from all stored facts.
 - Fingerprints for images and their parts from a vision embedding model, with names bound to them,
   so people, places and things are recognised across images without words.
-- Dreams with images.
+- Video dreams; unloading the chat model while pictures are drawn, for a single GPU.
 - More than one user.
 
 ## Licence

@@ -411,7 +411,7 @@ def test_the_vision_model_is_sent_the_picture(tmp_path):
         assert images.describe(m, cfg, img["id"], report=report)["labels"] == ["black cat", "cushion", "sofa", "window"]
         path, body = got[0]
         assert path == "/api/chat" and body["model"] == "gemma-eyes" and body["think"] is False and body["stream"] is False
-        assert body["format"]["required"] == ["description", "labels", "text"] and body["options"]["num_predict"] == 700
+        assert body["format"]["required"] == ["description", "labels", "text", "people"] and body["options"]["num_predict"] == 700
         user = body["messages"][1]
         assert user["role"] == "user" and size_of(base64.b64decode(user["images"][0])) == (1024, 768) and "Look at this image." in user["content"]
         assert report["calls"][0]["step"] == "image"
@@ -475,3 +475,235 @@ def test_the_desktop_app_marks_an_image_its_own_way(tmp_path):
     finally:
         images._seer = keep
         p.shutdown()
+
+
+# ------------------------------------------------------------------ dreams
+
+def dream_store(tmp_path, people=False):
+    """A day of talk, two images seen today (one of a cat, one optionally with a person) and an older, related image."""
+    from holonomic import images
+    m = store(tmp_path)
+    now = time.time()
+    for i, text in enumerate(["The tomato plants in the garden finally have fruit this week",
+                              "I also planted an assembly of herbs beside the tomato plants",
+                              "Tomorrow I will water the garden early before work"]):
+        m.remember(text, kind="said_user", session="s-today", created_at=now - 3600 + i)
+    def show(colour, whole, when):
+        img = images.add_image(m, picture(colour=colour), CFG, session="s-today")
+        images.describe(m, CFG, img["id"], see=eyes(whole=whole))
+        mid = images.get_image(m, img["id"])["memory_id"]
+        m._db.execute("UPDATE memories SET created_at = ? WHERE id = ?", (when, mid))
+        return img["id"]
+    old = show((1, 1, 1), {"description": "A photo of a black cat asleep on a grey sofa in the afternoon sun.", "labels": ["cat", "sofa"], "text": "", "people": False}, now - 30 * 86400)
+    cat = show((2, 2, 2), {"description": "A photo of a black cat asleep on a green couch beside a window.", "labels": ["cat", "couch"], "text": "", "people": False}, now - 1800)
+    me = show((3, 3, 3), {"description": "A photo of a woman with glasses sitting in a parked car.", "labels": ["woman", "car"], "text": "", "people": people}, now - 1700)
+    m.close(); m2 = track(HolonomicMemory(tmp_path / "m", HashEmbedder()))       # reload, so the changed dates are what is in memory
+    return m2, {"old": old, "cat": cat, "me": me}, now
+
+
+def dreamer(scenes=None, seen=None):
+    def llm(system, user, step):
+        if seen is not None:
+            seen.setdefault(step.split(" ")[0], []).append(user)
+        if step.startswith("dream"):
+            return json.dumps({"dream": "I am in a greenhouse in winter and the cat on the green couch is asleep among the tomato plants, and the car windows fog over with basil."})
+        if step.startswith("wake"):
+            return json.dumps({"thoughts": "An odd one, mostly the garden and the cat.", "connections": []})
+        return json.dumps({"scenes": scenes if scenes is not None else [
+            {"picture": "A black cat asleep on a green couch inside a winter greenhouse, tomato vines growing over the cushions.", "images": []}]})
+    return llm
+
+
+def test_images_join_what_a_dream_is_made_from(tmp_path):
+    import random
+    from holonomic.sleep import gather_fragments, sleep_once, sleep_config
+    m, ids, now = dream_store(tmp_path)
+    assert sleep_config({})["dream_images"] == "words" and sleep_config({"dream_images": "nonsense"})["dream_images"] == "words"
+    got = gather_fragments(m, {}, random.Random(1), now)
+    pictures = [f for f in got if f["kind"] == "image"]
+    assert {f["image_id"] for f in pictures if f["age"] == "RECENT"} == {ids["cat"], ids["me"]}        # what she saw lately
+    assert [f["image_id"] for f in pictures if f["age"] == "OLDER"] == [ids["old"]]                    # and an older image it resembles
+    assert not any(f["kind"] == "image_part" for f in got) and len([f for f in got if f["kind"] == "said_user"]) == 3
+    assert [f for f in gather_fragments(m, {"dream_images": "off"}, random.Random(1), now) if f["kind"] == "image"] == []
+    assert len([f for f in gather_fragments(m, {"dream_image_seeds": 1}, random.Random(1), now) if f["kind"] == "image" and f["age"] == "RECENT"]) == 1
+    seen = {}
+    report = sleep_once(m, {}, llm=dreamer(seen=seen), steps=["dream"], rng=random.Random(1), now=now)
+    assert "- (I saw this in an image I was shown) A photo of a black cat asleep on a green couch beside a window." in seen["dream"][0]
+    assert "(I saw this in an image I was shown): A photo of a woman with glasses" in seen["wake"][0]
+    d = report["dreams"][0]
+    assert d["pictures"] == [] and "scenes" not in seen and not report["errors"]             # words only: nothing is drawn
+    assert sorted(f["image_id"] for f in d["fragments"] if f.get("image_id")) == sorted(ids.values())
+    assert m.get(ids and __import__("holonomic.images", fromlist=["x"]).get_image(m, ids["old"])["memory_id"])["strength"] == 1.0     # nothing strengthened
+
+
+def test_dream_pictures_from_words(tmp_path):
+    import random
+    from holonomic import images
+    from holonomic.sleep import dreams, latest_dream, sleep_once
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=2, dream_image_style="soft light")
+    painted, seen = [], {}
+
+    def paint(prompt, start):
+        painted.append((prompt, start))
+        return picture(768, 512, colour=(len(painted) * 40, 10, 10))
+    scenes = [{"picture": "A black cat asleep on a green couch inside a winter greenhouse.", "images": [ids["cat"]]},
+              {"picture": "Car windows fogging over with basil leaves.", "images": []},
+              {"picture": "A third moment that is over the limit of two.", "images": []}]
+    dry = sleep_once(m, cfg, llm=dreamer(scenes, seen), steps=["dream"], rng=random.Random(1), now=now, dry_run=True, paint=paint)
+    assert [p["scene"] for p in dry["dreams"][0]["pictures"]] == [s["picture"] for s in scenes[:2]] and painted == []
+    assert "IMAGES:" not in seen["scenes"][0] and "Choose 2 moments" in seen["scenes"][0] and "DREAM:\nI am in a greenhouse" in seen["scenes"][0]
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    d = report["dreams"][0]
+    assert [p[0] for p in painted] == [scenes[0]["picture"] + ", soft light", scenes[1]["picture"] + ", soft light"]
+    assert all(start is None for _, start in painted)                                # from words alone, even if she named an image
+    assert [p["from"] for p in d["pictures"]] == [[], []] and all(open(p["file"], "rb").read() for p in d["pictures"])
+    # dream pictures live in the dream realm: not among images she was shown, not waiting to be described
+    assert images.count_images(m) == 3 and images.count_images(m, "dream") == 2 and len(images.list_images(m)) == 3
+    assert images.pending(m)["images"] == 0 and images.process(m, cfg, see=eyes())["described"] == []
+    assert [p["scene"] for p in dreams(m, 1)[0]["pictures"]] == [s["picture"] for s in scenes[:2]]
+    assert len(latest_dream(m, cfg, now)["pictures"]) == 2 and images.dream_pictures(m, 999) == []
+
+    def broken(prompt, start):
+        raise RuntimeError("Could not reach the image server")
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(2), now=now + 9, paint=broken)
+    assert report["dreams"][0]["id"] and report["dreams"][0]["pictures"] == []       # the dream is kept without pictures
+    assert report["errors"] == ["dream pictures: Could not reach the image server"]
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(3), now=now + 20)       # no generator set
+    assert report["dreams"][0]["id"] and "No image generator is set" in report["errors"][0]
+
+
+def test_dream_pictures_drawn_from_images_she_has_seen(tmp_path):
+    import random
+    from holonomic import images
+    from holonomic.sleep import sleep_once
+    m, ids, now = dream_store(tmp_path, people=True)
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=2, dream_image_style="")
+    painted, seen = [], {}
+
+    def paint(prompt, start):
+        painted.append((prompt, start))
+        return picture(768, 512, colour=(len(painted) * 40, 200, 10))
+    scenes = [{"picture": "A black cat asleep on a couch that is also a sofa, in two kinds of light.", "images": [ids["cat"], ids["old"], ids["me"]]},
+              {"picture": "A woman with glasses in a parked car full of tomato plants.", "images": [ids["me"], 4242]}]
+    report = sleep_once(m, cfg, llm=dreamer(scenes, seen), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    offered = seen["scenes"][0].split("IMAGES:")[1]
+    assert f"[{ids['cat']}] A photo of a black cat asleep on a green couch" in offered and f"[{ids['old']}]" in offered
+    assert f"[{ids['me']}]" not in offered                                           # an image with a real person in it is not offered
+    first, second = report["dreams"][0]["pictures"]
+    assert first["from"] == [ids["cat"], ids["old"]] and second["from"] == []        # at most two, and only ones that were offered
+    assert size_of(painted[0][1]) == (768, 512) and painted[1][1] is None            # the first starts from the two laid over each other
+    assert images.dream_pictures(m, report["dreams"][0]["id"])[0]["from"] == [ids["cat"], ids["old"]]
+    before = open(images.get_image(m, ids["cat"])["original"], "rb").read()
+    assert before == picture(colour=(2, 2, 2))                                       # the stored image is only read
+    seen.clear(); painted.clear()
+    sleep_once(m, dict(cfg, dream_image_use_people=True), llm=dreamer(scenes, seen), steps=["dream"], rng=random.Random(1), now=now + 9, paint=paint)
+    assert f"[{ids['me']}]" in seen["scenes"][0].split("IMAGES:")[1] and painted[1][1] is not None     # allowed when the user says so
+    # an image described before the model was asked about people: judged by what was noticed in it
+    m._db.execute("UPDATE images SET meta = '{}' WHERE id = ?", (ids["me"],))
+    assert images.has_people(m, ids["me"]) and not images.has_people(m, ids["cat"]) and not images.has_people(m, 999)
+    assert images.blend(m, [999], (64, 64)) is None
+
+
+def test_painters_speak_to_an_image_server(tmp_path):
+    import http.server, threading
+    from holonomic import paint
+    got = []
+    png = picture(64, 64)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            got.append((self.path, self.headers["Content-Type"], raw))
+            if self.path.startswith("/sdapi"):
+                reply = {"images": [base64.b64encode(png).decode()]}
+            elif self.path == "/v1/images/edits":
+                reply = {"data": [{"url": f"http://127.0.0.1:{self.server.server_port}/made.png"}]}
+            else:
+                reply = {"data": [{"b64_json": base64.b64encode(png).decode()}]}
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(json.dumps(reply).encode())
+
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(png)
+
+        def log_message(self, *a):
+            pass
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        a = paint.make_painter({"dream_image_api": "a1111", "dream_image_host": host, "dream_image_model": "dreamshaper", "dream_image_steps": 20,
+                                "dream_image_width": 640, "dream_image_height": 384, "dream_image_strength": 0.5, "dream_image_negative": "text"})
+        assert a("a cat", None) == png and a("a cat", b"START") == png
+        path, _, raw = got[0]; body = json.loads(raw)
+        assert path == "/sdapi/v1/txt2img" and body["prompt"] == "a cat" and (body["width"], body["height"], body["steps"]) == (640, 384, 20)
+        assert body["override_settings"] == {"sd_model_checkpoint": "dreamshaper"} and body["negative_prompt"] == "text" and "init_images" not in body
+        path, _, raw = got[1]; body = json.loads(raw)
+        assert path == "/sdapi/v1/img2img" and base64.b64decode(body["init_images"][0]) == b"START" and body["denoising_strength"] == 0.5
+        o = paint.make_painter({"dream_image_api": "openai", "dream_image_host": host, "dream_image_model": "z-image"})
+        assert o("a cat", None) == png and o("a cat", b"START") == png              # the second comes back as a link, which is fetched
+        path, _, raw = got[2]; body = json.loads(raw)
+        assert path == "/v1/images/generations" and body == {"prompt": "a cat", "size": "768x512", "n": 1, "response_format": "b64_json", "model": "z-image"}
+        path, ctype, raw = got[3]
+        assert path == "/v1/images/edits" and ctype.startswith("multipart/form-data; boundary=") and b"START" in raw and b'name="prompt"' in raw
+    finally:
+        server.shutdown()
+    for bad in ({}, {"dream_image_api": "a1111"}, {"dream_image_api": "midjourney", "dream_image_host": host}):
+        with pytest.raises(paint.PaintError):
+            paint.make_painter(bad)
+    with pytest.raises(paint.PaintError):
+        paint.make_painter({"dream_image_api": "a1111", "dream_image_host": "http://127.0.0.1:9", "dream_image_timeout": 2})("a cat", None)
+
+
+def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, random
+    from holonomic import images
+    from holonomic.sleep import sleep_once
+    p = make(tmp_path)
+    p._cfg.update(CFG, dream_images="pictures", dream_image_count=1)
+    e = p._engine
+    for text in ["The tomato plants in the garden finally have fruit this week", "I also planted herbs beside the tomato plants",
+                 "Tomorrow I will water the garden early before work"]:
+        e.remember(text, kind="said_user", session="s0")
+    sleep_once(e, p._cfg, llm=dreamer(), steps=["dream"], rng=random.Random(1), paint=lambda prompt, start: picture(768, 512))
+    file = images.dream_pictures(e, e.recent(1, realm="dream", kind="dream")[0]["id"])[0]["file"]
+    block = p.system_prompt_block()
+    assert "Pictures of moments in this dream (made from the dream; not photographs of anything real)" in block and f"(file: {file})" in block
+    assert f"(file: {file})" in p.prefetch("Tell me about the dream you had about the greenhouse", session_id="s9")
+    told = tool(p, action="dreams")["dreams"][0]
+    assert told["pictures_of_it"][0]["file"] == file and "MEDIA:" in told["to_show_a_picture"]
+    shown = tmp_path / "pasted.png"
+    shown.write_bytes(open(file, "rb").read() if file.endswith(".png") else picture(768, 512))
+    if file.endswith(".png"):
+        assert "a picture from one of your own dreams" in p.prefetch(f"What is this picture? @image:{shown}", session_id="s9")
+    assert "Images you are shown are kept (0 so far)" in block                    # a dream picture is not an image she was shown
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        assert f"Picture: A black cat asleep on a green couch" in run("dreams") and file in run("dreams")
+        out = run("dreams", "images")
+        assert "Images in dreams: words" in out and "Image memory is off" in out and "Restart Hermes" not in out
+        out = run("dreams", "images", "pictures")
+        assert "Images in dreams: pictures" in out and "image generator: NOT SET" in out
+        out = run("dreams", "images", "from_images", "--api", "a1111", "--host", "http://10.0.0.21:7860/", "--size", "640x384", "--count", "2", "--people", "yes")
+        assert "image generator: a1111 at http://10.0.0.21:7860" in out and "2 picture(s) per dream, 640x384" in out and "may be drawn from" in out
+        saved = json.loads((home / "holonomic.json").read_text())
+        assert saved["dream_images"] == "from_images" and saved["dream_image_use_people"] is True and saved["dream_image_width"] == 640
+        assert "are not drawn from" in run("dreams", "images", "--people", "no")
+        assert "Choose one of" in run("dreams", "images", "sometimes") and "WIDTHxHEIGHT" in run("dreams", "images", "--size", "big")
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)

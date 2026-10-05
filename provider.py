@@ -474,7 +474,17 @@ class HolonomicMemoryProvider(MemoryProvider):
         thoughts = (d.get("meta") or {}).get("thoughts", "")
         return (f"\n\n## Your most recent dream ({when}; a dream, not something that happened)\n{d['text']}"
                 + (f"\nWhat you made of it on waking: {thoughts}" if thoughts else "")
+                + self._dream_pictures_text(d.get("pictures"), "\n")
                 + "\nYou can mention or discuss it if it comes up or seems worth sharing. Do not treat it as fact.")
+
+    @staticmethod
+    def _dream_pictures_text(pictures: Optional[list], lead: str) -> str:
+        """Pictures of a dream, with their files so she can show them.  They are pictures of a dream, not of anything real."""
+        if not pictures:
+            return ""
+        return (f"{lead}Pictures of moments in this dream (made from the dream; not photographs of anything real). To show one, "
+                "write MEDIA: followed by its file path on a line of its own:"
+                + "".join(f"{lead}  - {p['scene']} (file: {p['file']})" for p in pictures))
 
     def _touch(self) -> None:
         reflector = reflector_for(self._engine) if self._engine is not None else None
@@ -563,7 +573,9 @@ class HolonomicMemoryProvider(MemoryProvider):
         try:
             for data, _ in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:4]:
                 img = _images.known(engine, data)
-                if img:
+                if img and img["realm"] == "dream":
+                    out.append(f"- this is a picture from one of your own dreams (not a photograph of anything real): {img['caption']}")
+                elif img:
                     when = time.strftime("%Y-%m-%d", time.localtime(img["created_at"]))
                     out.append(f"- image #{img['id']}, first shown {when}, seen {img['seen']} time(s) before now"
                                + (f": {' '.join(img['description'].split())}" if img["description"] else ""))
@@ -586,6 +598,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
             out.append(f"- ({when}) {' '.join(d['text'].split())}"
                        + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") else "")
+                       + self._dream_pictures_text(d.get("pictures"), "\n  ")
                        + "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", [])))
         return "\n".join(out)
 
@@ -859,7 +872,10 @@ class HolonomicMemoryProvider(MemoryProvider):
                 return json.dumps({"note": "These are dreams, not things that happened.", "count": len(found), "dreams": [
                     {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
                      "dream": d["text"], "what_you_made_of_it": d.get("thoughts", ""),
-                     "connections_noticed": d.get("connections", [])} for d in found]})
+                     "connections_noticed": d.get("connections", []),
+                     **({"pictures_of_it": [{"scene": p["scene"], "file": p["file"]} for p in d["pictures"]],
+                         "to_show_a_picture": "write MEDIA: followed by its file path on a line of its own"}
+                        if d.get("pictures") else {})} for d in found]})
             if action == "images":
                 return self._images_action(engine, args, limit)
             if action == "look":

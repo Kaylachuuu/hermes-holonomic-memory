@@ -27,8 +27,8 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from . import reflect as _reflect
-from .reflect import (DERIVED_KINDS, DREAM_TALK_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker, is_complete,
-                      trim_to_sentence)
+from .reflect import (DERIVED_KINDS, DREAM_TALK_KINDS, IMAGE, IMAGE_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker,
+                      is_complete, trim_to_sentence)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,27 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_reinforce": False,
     # Conversation that resembles a stored dream this closely is treated as talk about that dream.
     "dream_talk_similarity": 0.55,
+    # What images do in dreams (needs image memory to have something to work with):
+    #   off          nothing
+    #   words        what she saw in recent images, and in older images they resemble, joins the fragments a dream is made from
+    #   pictures     also: scenes from the dream are drawn by an image generator, from her description of them
+    #   from_images  also: a scene that resembles images she has seen is drawn starting from those images
+    "dream_images": "words",
+    "dream_image_seeds": 2,           # recent images a dream draws on
+    "dream_image_use_people": False,  # from_images: may an image with real people in it be drawn from?
+    "dream_image_api": "",            # 'a1111' or 'openai' (see paint.py)
+    "dream_image_host": "",
+    "dream_image_model": "",
+    "dream_image_count": 3,           # pictures per dream
+    "dream_image_width": 768,
+    "dream_image_height": 512,
+    "dream_image_steps": 0,           # 0 = the server's own default
+    "dream_image_strength": 0.6,      # from_images: how far the result may move from the images it starts from (0-1)
+    "dream_image_style": "dreamlike, soft light, slightly out of focus",
+    "dream_image_negative": "",
+    "dream_image_timeout": 600,
 }
+DREAM_IMAGE_MODES = ("off", "words", "pictures", "from_images")
 
 _ITEMS = {"type": "array", "items": {"type": "object", "properties": {
     "text": {"type": "string"}, "sources": {"type": "array", "items": {"type": "integer"}}},
@@ -122,7 +142,7 @@ together by accident, so this list is usually empty or has one item. Do not inve
 # twenty years ago" as its own history, and wakes up talking about "my technical work".
 _VOICE = {"said_user": "said to me", "asked_user": "asked of me", "said_assistant": "I said", "fact": "I know this about her or him",
           EPISODE: "I remember", "self_note": "about myself", "bond_note": "about the two of us", "insight": "I noticed",
-          "note": "I noted", "core": "I noted"}
+          "note": "I noted", "core": "I noted", IMAGE: "I saw this in an image I was shown"}
 
 
 def _voice(kind: str) -> str:
@@ -148,6 +168,8 @@ _OPENINGS = (
 def sleep_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(SLEEP_DEFAULTS)
     out.update({k: cfg[k] for k in SLEEP_DEFAULTS if k in cfg})
+    if out["dream_images"] not in DREAM_IMAGE_MODES:
+        out["dream_images"] = "words"
     return out
 
 
@@ -281,7 +303,8 @@ def dreams_tonight(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> 
     """How many dreams this sleep gets: one, plus one for each stretch of new memories, up to the maximum."""
     sc = sleep_config(cfg)
     last = float(engine.kv_get("sleep:last_run", "0") or 0)
-    new = len(engine.recent(500, since=last)) if last else len(engine.recent(500))
+    # One image is some twenty memories (itself and its parts); it counts once.
+    new = sum(1 for m in (engine.recent(500, since=last) if last else engine.recent(500)) if m["kind"] != "image_part")
     return max(1, min(int(sc["dream_max_per_sleep"]), 1 + new // max(int(sc["dream_memories_per_extra"]), 1)))
 
 
@@ -294,10 +317,13 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
     since = now - float(sc["dream_days"]) * 86400
     exclude = exclude or set()
     # Talk about a dream is not dreamt about again, or dreams would feed on dreams.
-    skip = (DREAM, DREAM_INSIGHT, "asked_user") + DREAM_TALK_KINDS
-    recent = [m for m in engine.recent(300, since=since) if m["kind"] not in skip
-              and len(m["text"]) >= 25 and m["id"] not in exclude]
-    if len(recent) < 2:
+    # Images are drawn on separately below, a few at a time, so twenty descriptions of one photo cannot crowd out a day's talk.
+    skip = (DREAM, DREAM_INSIGHT, "asked_user") + DREAM_TALK_KINDS + IMAGE_KINDS
+    everything = engine.recent(400, since=since)
+    recent = [m for m in everything if m["kind"] not in skip and len(m["text"]) >= 25 and m["id"] not in exclude]
+    pictures = ([m for m in everything if m["kind"] == IMAGE and m["id"] not in exclude]
+                if sc["dream_images"] in DREAM_IMAGE_MODES[1:] else [])
+    if len(recent) + len(pictures) < 2:
         return []
     # Favour what was strongly written and what the agent or the user actually stated.
     weights = [m["strength"] * (1.5 if m["kind"] in ("said_user", "fact", EPISODE) else 1.0) for m in recent]
@@ -322,11 +348,26 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
                 seen.add(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
                                   "kind": echo["kind"], "echo_of": seed["id"]})
+    # What she saw lately, and older images it resembles.
+    for seed in rng.sample(pictures, min(len(pictures), max(0, int(sc["dream_image_seeds"])))):
+        seen.add(seed["id"])
+        fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"], "kind": IMAGE,
+                          "image_id": _image_of(engine, seed["id"])})
+        for echo in engine.echoes(seed["id"], older_than=since, k=1, kinds=(IMAGE,)):
+            if echo["id"] not in seen:
+                seen.add(echo["id"])
+                fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
+                                  "kind": IMAGE, "echo_of": seed["id"], "image_id": _image_of(engine, echo["id"])})
     return fragments
 
 
+def _image_of(engine, memory_id: int) -> Optional[int]:
+    return ((engine.get(memory_id) or {}).get("meta") or {}).get("image_id")
+
+
 def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
-          rng: Optional[random.Random] = None, now: Optional[float] = None, user_profile: str = "") -> None:
+          rng: Optional[random.Random] = None, now: Optional[float] = None, user_profile: str = "",
+          paint: Optional[Callable[..., bytes]] = None) -> None:
     """The night's dreams.  report["dreams"] lists them; report["dream"] is the first."""
     rng = rng or random.Random()
     now = time.time() if now is None else now
@@ -335,6 +376,9 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
     for n in range(dreams_tonight(engine, cfg, now)):
         one = _one_dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now + n, user_profile=user_profile,
                          exclude=used, label="" if n == 0 else f" {n + 1}")
+        if one is not None:
+            one["pictures"] = _dream_pictures(engine, cfg, call, report, one, dry_run=dry_run, paint=paint,
+                                              label="" if n == 0 else f" {n + 1}")
         if one is None:
             break
         report["dreams"].append(one)
@@ -386,8 +430,8 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     connections = [c for c in _reflect._clean_items(woke.get("connections"), recent_ids | older_ids, 2)
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
     result = {"text": text[:limit], "thoughts": thoughts, "connections": connections, "opens": opens,
-              "fragments": [{"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])}
-                            for f in fragments]}
+              "fragments": [dict({"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])},
+                                 **({"image_id": f["image_id"]} if f.get("image_id") else {})) for f in fragments]}
     if dry_run:
         return result
     # Everything a dream produces is stored in the dream realm.  Its links to waking memories are
@@ -407,6 +451,80 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     return result
 
 
+_SCENES = """\
+You are an AI assistant, awake, with a dream you just had still vivid. Choose {n} moments from it that you saw most \
+clearly, and describe each as a picture for an artist to paint.
+
+Each "picture" is one or two sentences of what is seen: the subject, the place, the light and the colours. Describe \
+only what would be visible, and keep the strangeness of the dream. Do not use anyone's name; say what they look like \
+instead.{refs}"""
+
+_SCENE_REFS = """
+
+Below the dream are IMAGES you have really been shown, which the dream drew on. If a moment looks like one or two of \
+them, put their numbers in "images" for that moment so the artist can work from them. Otherwise leave "images" empty."""
+
+_SCENES_SCHEMA = {"type": "object", "properties": {"scenes": {"type": "array", "items": {"type": "object", "properties": {
+    "picture": {"type": "string"}, "images": {"type": "array", "items": {"type": "integer"}}}, "required": ["picture", "images"]}}},
+    "required": ["scenes"]}
+
+
+def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], one: dict, *, dry_run: bool,
+                    paint: Optional[Callable[..., bytes]], label: str) -> List[dict]:
+    """Pictures of a dream.  The dream's author says which moments and what they look like; an image generator
+    draws them.  In 'from_images' mode a moment that resembles images she has seen is drawn starting from those.
+    A failure here never loses the dream: it is reported and the dream stands without pictures."""
+    from . import images as _images
+    from . import paint as _paint
+    sc = sleep_config(cfg)
+    mode = sc["dream_images"]
+    if mode not in ("pictures", "from_images") or int(sc["dream_image_count"]) < 1:
+        return []
+    try:
+        painter = paint or _paint.make_painter(sc)
+    except _paint.PaintError as exc:
+        report["errors"].append(f"dream pictures: {exc}")
+        return []
+    usable: Dict[int, str] = {}
+    if mode == "from_images":
+        for f in one["fragments"]:
+            image_id = f.get("image_id")
+            if image_id and (sc["dream_image_use_people"] or not _images.has_people(engine, image_id)):
+                img = _images.get_image(engine, image_id)
+                if img and img["description"]:
+                    usable[int(image_id)] = img["description"]
+    n = int(sc["dream_image_count"])
+    prompt = (_SCENES.format(n=n, refs=_SCENE_REFS if usable else "") + f"\n\nDREAM:\n{one['text']}"
+              + ("\n\nIMAGES:\n" + "\n".join(f"[{i}] {' '.join(d.split())[:300]}" for i, d in usable.items()) if usable else ""))
+    try:
+        data = _parse(call("scenes" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt,
+                           _SCENES_SCHEMA, 700, 0.6))
+    except ReflectionError as exc:
+        report["errors"].append(f"dream pictures{label}: {exc}")
+        return []
+    scenes = []
+    for item in (data.get("scenes") if isinstance(data.get("scenes"), list) else [])[:n]:
+        picture = " ".join(str((item or {}).get("picture") or "").split())[:500] if isinstance(item, dict) else ""
+        if len(picture) >= 15:
+            refs = [int(i) for i in (item.get("images") or []) if isinstance(i, int) and i in usable][:2]
+            scenes.append({"scene": picture, "from": list(dict.fromkeys(refs))})
+    if dry_run or not one.get("id"):
+        return scenes
+    size = (int(sc["dream_image_width"]), int(sc["dream_image_height"]))
+    style = str(sc["dream_image_style"] or "").strip()
+    made = []
+    for s in scenes:
+        try:
+            start = _images.blend(engine, s["from"], size) if s["from"] else None
+            picture = painter(s["scene"] + (", " + style if style else ""), start)
+            img = _images.add_dream_image(engine, picture, cfg, dream_id=one["id"], scene=s["scene"], sources=s["from"] if start else [])
+        except Exception as exc:                 # the server is off, or sent back something that is not a picture
+            report["errors"].append(f"dream pictures{label}: {exc}")
+            break
+        made.append(dict(s, id=img["id"], file=img["file"], **({} if start else {"from": []})))
+    return made
+
+
 def latest_dream(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> Optional[dict]:
     """The most recent dream, if it is recent enough to still be on the agent's mind."""
     try:
@@ -418,7 +536,15 @@ def latest_dream(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> Op
     if not mid or now - at > float(sleep_config(cfg)["dream_in_prompt_days"]) * 86400:
         return None
     found = engine.get(mid)
-    return dict(found, at=at) if found else None
+    return dict(found, at=at, pictures=_pictures_of(engine, mid)) if found else None
+
+
+def _pictures_of(engine, dream_id: int) -> List[dict]:
+    try:
+        from . import images as _images
+        return _images.dream_pictures(engine, dream_id)
+    except Exception:
+        return []
 
 
 def dreams(engine, n: int = 5) -> List[dict]:
@@ -426,7 +552,8 @@ def dreams(engine, n: int = 5) -> List[dict]:
     for d in engine.recent(n, realm=DREAM_REALM, kind=DREAM):
         full = engine.get(d["id"]) or {}
         insights = [h.text for h in engine.associates(d["id"], k=4, realms=(DREAM_REALM,), min_score=0.2) if h.kind == DREAM_INSIGHT]
-        out.append(dict(d, thoughts=(full.get("meta") or {}).get("thoughts", ""), connections=insights))
+        out.append(dict(d, thoughts=(full.get("meta") or {}).get("thoughts", ""), connections=insights,
+                        pictures=_pictures_of(engine, d["id"])))
     return out
 
 
@@ -435,7 +562,7 @@ def dreams(engine, n: int = 5) -> List[dict]:
 def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None, dry_run: bool = False,
                key_fn: Optional[Callable[[str], List[str]]] = None, foundation: str = "",
                steps: Optional[List[str]] = None, rng: Optional[random.Random] = None,
-               now: Optional[float] = None) -> Dict[str, Any]:
+               now: Optional[float] = None, paint: Optional[Callable[..., bytes]] = None) -> Dict[str, Any]:
     """One sleep cycle.  `steps` limits it to some of: reflect, consolidate, fade, dream."""
     sc = sleep_config(cfg)
     wanted = set(steps or ["reflect", "consolidate", "fade", "dream"])
@@ -462,7 +589,7 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
     if "dream" in wanted and sc["dream_enabled"]:
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True)
         fresh = next((r["profiles"]["user"] for r in reversed(report["reflections"]) if (r.get("profiles") or {}).get("user")), "")
-        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh)
+        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh, paint=paint)
     if not dry_run:
         engine.kv_set("sleep:last_run", str(time.time() if now is None else now))
     return report

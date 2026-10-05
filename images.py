@@ -116,7 +116,8 @@ Look at this image.{note}
 Write:
 - description: three to six sentences saying what the image shows: what kind of image it is (photo, screenshot, drawing, diagram, document), its main subject, the setting, and notable details such as colours, positions, expressions and anything unusual.
 - labels: up to {n} short lowercase names for the distinct things visible, each a singular noun or short noun phrase (for example: cat, sofa, window, laptop, mountain). Use an adjective only when it is needed to tell two things apart.
-- text: any writing visible in the image, copied exactly, or an empty string if there is none."""
+- text: any writing visible in the image, copied exactly, or an empty string if there is none.
+- people: true if one or more real people can be seen in the image, otherwise false."""
 
 _NOTE = ("\nThe person who showed it said: {caption}\nIf those words name someone or something that is visible, use that name. "
          "Take nothing else from them.")
@@ -139,8 +140,12 @@ Look at this image and answer the question from what is visible. If the image do
 Question: {question}"""
 
 _LABELS = {"type": "array", "items": {"type": "string"}}
-_WHOLE_SCHEMA = {"type": "object", "properties": {"description": {"type": "string"}, "labels": _LABELS, "text": {"type": "string"}},
-                 "required": ["description", "labels", "text"]}
+_WHOLE_SCHEMA = {"type": "object", "properties": {"description": {"type": "string"}, "labels": _LABELS, "text": {"type": "string"},
+                                                  "people": {"type": "boolean"}},
+                 "required": ["description", "labels", "text", "people"]}
+# For images described before the model was asked whether people are visible.
+_PEOPLE_WORDS = frozenset("person people woman women man men girl boy child children baby kid kids face selfie portrait daughter son "
+                          "mother father family crowd hand hands arm".split())
 _PART_SCHEMA = {"type": "object", "properties": {"notable": {"type": "boolean"}, "description": {"type": "string"}, "labels": _LABELS},
                 "required": ["notable", "description", "labels"]}
 _LOOK_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
@@ -457,8 +462,11 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
                               meta={"image_id": int(image_id)})
         with engine._lock:
             db = _db(engine)
-            db.execute("UPDATE images SET memory_id = ?, described_at = ?, claimed_at = NULL WHERE id = ?",
-                       (ids[0], time.time(), int(image_id)))
+            meta = json.loads(row["meta"] or "{}")
+            if isinstance(data.get("people"), bool):
+                meta["people"] = data["people"]
+            db.execute("UPDATE images SET memory_id = ?, described_at = ?, claimed_at = NULL, meta = ? WHERE id = ?",
+                       (ids[0], time.time(), json.dumps(meta), int(image_id)))
             db.executemany("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)",
                            [(int(image_id), label) for label in labels])
     except BaseException:
@@ -559,7 +567,7 @@ def redescribe(engine, cfg: Dict[str, Any], image_id: int, *, correction: str = 
 def pending(engine) -> Dict[str, int]:
     with engine._lock:
         db = _db(engine)
-        return {"images": db.execute("SELECT COUNT(*) FROM images WHERE forgotten = 0 AND memory_id IS NULL").fetchone()[0],
+        return {"images": db.execute("SELECT COUNT(*) FROM images WHERE forgotten = 0 AND memory_id IS NULL AND source != 'dream'").fetchone()[0],
                 "sections": db.execute("SELECT COUNT(*) FROM image_sections s JOIN images i ON i.id = s.image_id "
                                        "WHERE i.forgotten = 0 AND s.notable IS NULL").fetchone()[0]}
 
@@ -571,7 +579,7 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
     report: Dict[str, Any] = {"described": [], "sections": 0, "errors": [], "calls": []}
     with engine._lock:
         db = _db(engine)
-        whole = [r["id"] for r in db.execute("SELECT id FROM images WHERE forgotten = 0 AND memory_id IS NULL ORDER BY id")]
+        whole = [r["id"] for r in db.execute("SELECT id FROM images WHERE forgotten = 0 AND memory_id IS NULL AND source != 'dream' ORDER BY id")]
         parts = [r["id"] for r in db.execute(
             "SELECT DISTINCT i.id FROM images i JOIN image_sections s ON s.image_id = i.id "
             "WHERE i.forgotten = 0 AND s.notable IS NULL ORDER BY i.id")]
@@ -648,9 +656,65 @@ def list_images(engine, n: int = 20, *, realm: Optional[str] = "waking") -> List
     return [img for img in (get_image(engine, i) for i in ids) if img]
 
 
-def count_images(engine) -> int:
+def count_images(engine, realm: str = "waking") -> int:
     with engine._lock:
-        return _db(engine).execute("SELECT COUNT(*) FROM images WHERE forgotten = 0").fetchone()[0]
+        return _db(engine).execute("SELECT COUNT(*) FROM images WHERE forgotten = 0 AND realm = ?", (realm,)).fetchone()[0]
+
+
+# ------------------------------------------------------------ dream pictures
+
+def has_people(engine, image_id: int) -> bool:
+    """Whether real people are visible in an image, as the vision model judged when it described it."""
+    row = _row(engine, image_id)
+    if row is None:
+        return False
+    people = json.loads(row["meta"] or "{}").get("people")
+    if isinstance(people, bool):
+        return people
+    with engine._lock:
+        labels = [r["label"] for r in _db(engine).execute("SELECT DISTINCT label FROM image_labels WHERE image_id = ?", (int(image_id),))]
+    return any(_PEOPLE_WORDS & set(label.split()) for label in labels)
+
+
+def blend(engine, image_ids: List[int], size: Tuple[int, int]) -> Optional[bytes]:
+    """One picture made of up to two stored images laid over each other, the size a dream picture will be.
+    This is what an image generator is given to rework, so a dream can carry the shapes and colours of things
+    she has really seen.  The stored images themselves are only read."""
+    Image, ImageOps = _pil()
+    layers = []
+    for image_id in image_ids[:2]:
+        row = _row(engine, image_id)
+        if row is None or row["forgotten"]:
+            continue
+        try:
+            img, _ = open_image((engine.path / (row["view"] or row["file"])).read_bytes())
+        except (OSError, ImageError):
+            continue
+        layers.append(ImageOps.fit(img, size, Image.LANCZOS))
+    if not layers:
+        return None
+    out = io.BytesIO()
+    (layers[0] if len(layers) == 1 else Image.blend(layers[0], layers[1], 0.5)).save(out, "PNG")
+    return out.getvalue()
+
+
+def add_dream_image(engine, data: bytes, cfg: Dict[str, Any], *, dream_id: int, scene: str, sources: List[int]) -> dict:
+    """Keep a picture from a dream.  It lives in the dream realm: it is never listed among images she was
+    shown, never described as one, and is found only through the dream it belongs to."""
+    img = add_image(engine, data, dict(cfg, image_sections=False), caption=scene, session=f"dream:{int(dream_id)}",
+                    source="dream", realm="dream")
+    with engine._lock:
+        _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?",
+                            (json.dumps({"dream_id": int(dream_id), "from": [int(i) for i in sources]}), img["id"]))
+    return img
+
+
+def dream_pictures(engine, dream_id: int) -> List[dict]:
+    with engine._lock:
+        rows = _db(engine).execute("SELECT id, view, caption, meta FROM images WHERE forgotten = 0 AND realm = 'dream' AND session = ? "
+                                   "ORDER BY id", (f"dream:{int(dream_id)}",)).fetchall()
+    return [{"id": int(r["id"]), "file": str(engine.path / r["view"]), "scene": r["caption"],
+             "from": json.loads(r["meta"] or "{}").get("from", [])} for r in rows]
 
 
 def label_forms(label: str) -> List[str]:

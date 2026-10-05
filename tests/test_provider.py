@@ -215,7 +215,7 @@ print("ok")
 
 def test_top_folder_only_holds_modules_that_are_safe_to_execute():
     """Hermes executes every top-level .py when it loads the plugin, before __init__.py."""
-    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "cli.py", "embed.py", "engine.py", "images.py", "provider.py", "reflect.py", "sleep.py", "vsa.py"]
+    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "cli.py", "embed.py", "engine.py", "images.py", "paint.py", "provider.py", "reflect.py", "sleep.py", "vsa.py"]
 
 
 def test_failed_first_open_releases_the_database_file(tmp_path):
