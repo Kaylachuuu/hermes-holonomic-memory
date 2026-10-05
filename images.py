@@ -590,7 +590,9 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
     # Writing quoted in the description of the whole is kept from the parts: each part must read a sign for
     # itself, so that two looks agreeing on what it says means something.
     whole = _without_writing((engine.get(int(row["memory_id"])) or {}).get("text") or "")
-    told = " ".join([row["caption"]] + [c for c in json.loads(row["meta"] or "{}").get("corrections", []) if c]).strip()
+    # Only what the user affirmed is passed on.  Telling a model that there is no Tiger Beer sign puts the word
+    # in front of it, and the next thing it reports seeing is a sign that says Tiger.
+    told = what_was_stated([row["caption"]] + json.loads(row["meta"] or "{}").get("corrections", []))[0]
     said = f"\nThe person who showed the image said this about it, which is true: {told[:600]}" if told else ""
     with engine._lock:
         todo = _db(engine).execute("SELECT * FROM image_sections WHERE image_id = ? AND notable IS NULL ORDER BY idx",
@@ -648,9 +650,28 @@ UNCLEAR = "[writing I could not read for certain]"
 _WRITTEN = " Writing in the image: "
 
 
+# Quoted writing, down to a single letter ('C'); an apostrophe inside a word (the cat's face) is not a quote.
+_WRITING_RE = re.compile(r"(?<!\w)'([^'\n]{1,60})'(?!\w)|\"([^\"\n]{1,80})\"|\u2018([^\u2019\n]{1,60})\u2019|\u201c([^\u201d\n]{1,80})\u201d")
+_DENIAL_WORD_RE = re.compile(r"\b(?:no|not|never|without|isn't|aren't|wasn't|doesn't|don't)\b", re.IGNORECASE)
+
+
 def _quotes(text: str) -> List[str]:
-    from .reflect import _QUOTED_RE
-    return [next(g for g in m.groups() if g) for m in _QUOTED_RE.finditer(text or "")]
+    return [next(g for g in m.groups() if g) for m in _WRITING_RE.finditer(text or "")]
+
+
+def what_was_stated(texts: List[str]) -> Tuple[str, set]:
+    """What the user affirmed about an image, and the words of what they denied.  In 'the sign says Bridgestone
+    Arena, not Country Music Square' the first name is affirmed and the second denied; in 'there is no Tiger
+    Beer sign' the whole of it is denied.  A denial must not be taken for a statement that the thing is there:
+    that kept an invented 'Tiger' sign in a description because the correction had said there was no such sign."""
+    affirmed: List[str] = []
+    denied: set = set()
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", " ".join(t for t in texts if t)):
+        m = _DENIAL_WORD_RE.search(sentence)
+        affirmed.append(sentence[:m.start()] if m else sentence)
+        if m:
+            denied |= {w for w in re.findall(r"[a-z0-9]+", sentence[m.end():].lower()) if len(w) >= 3}
+    return " ".join(a.strip() for a in affirmed if a.strip()), denied - {"sign", "signs", "the", "and", "any", "there", "that", "says"}
 
 
 def _letters(text: str) -> str:
@@ -659,8 +680,7 @@ def _letters(text: str) -> str:
 
 def _without_writing(text: str) -> str:
     """A description with the writing it quotes taken out."""
-    from .reflect import _QUOTED_RE
-    return _QUOTED_RE.sub("[writing]", (text or "").split(_WRITTEN.strip())[0]).strip()
+    return _WRITING_RE.sub("[writing]", (text or "").split(_WRITTEN.strip())[0]).strip()
 
 
 def settle_writing(engine, image_id: int) -> List[str]:
@@ -671,7 +691,6 @@ def settle_writing(engine, image_id: int) -> List[str]:
     'T.J. Maxx' that were not there, each reported by a single look.  The real signs were each read the same
     way by two overlapping parts.  So writing seen in only one look is replaced by a note that it could not be
     read for certain, and labels made from it are dropped.  Returns what was taken out."""
-    from .reflect import _QUOTED_RE
     row = _row(engine, image_id)
     if row is None or row["forgotten"] or not row["memory_id"]:
         return []
@@ -692,8 +711,18 @@ def settle_writing(engine, image_id: int) -> List[str]:
     for idx, text in texts.items():
         for q in _quotes(text):
             seen.setdefault(_letters(q), set()).add(idx)
-    stated = _letters(" ".join([row["caption"]] + meta.get("corrections", [])))
-    doubtful = {q for q, where in seen.items() if q and len(where) < 2 and q not in stated}
+    affirmed, denied = what_was_stated([row["caption"]] + meta.get("corrections", []))
+    said_words = set(re.findall(r"[a-z0-9]+", affirmed.lower()))
+
+    def stated_by_user(original: str) -> bool:           # every word of it is among the words the user affirmed
+        words = re.findall(r"[a-z0-9]+", original.lower())
+        return bool(words) and set(words) <= said_words
+    spelled: Dict[str, str] = {}
+    for q in _quotes(described) + items + [q for t in texts.values() for q in _quotes(t)]:
+        spelled.setdefault(_letters(q), q)
+    refused = {q for q, original in spelled.items() if denied & set(re.findall(r"[a-z0-9]+", original.lower()))}
+    # Doubtful: the user said it is not there, or only one look reported it and the user did not say it is.
+    doubtful = {q for q, where in seen.items() if q and (q in refused or (len(where) < 2 and not stated_by_user(spelled.get(q, ""))))}
     removed: List[str] = []
 
     def clean(text: str) -> str:
@@ -703,7 +732,7 @@ def settle_writing(engine, image_id: int) -> List[str]:
                 removed.append(quote)
                 return UNCLEAR
             return m.group(0)
-        return _QUOTED_RE.sub(swap, text)
+        return _WRITING_RE.sub(swap, text)
     new_described = clean(described)
     kept = [w for w in items if _letters(w) not in doubtful]
     removed += [w for w in items if _letters(w) in doubtful and w not in removed]

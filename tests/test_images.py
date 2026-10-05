@@ -1167,5 +1167,21 @@ def test_writing_is_kept_only_when_two_looks_agree(tmp_path):
     images.redescribe(m, CFG, img["id"], correction="The white SUV is marked POLICE. The big sign says Bridgestone Arena.", see=eyes(whole=whole))
     report = images.process(m, CFG, see=eyes(parts, seen=seen))
     assert "which is true: A street in Nashville at night. The white SUV is marked POLICE." in seen[0][1]
+    # a denial is not a statement that the thing is there, and is not repeated to the parts
+    assert images.what_was_stated(["The large sign says Bridgestone Arena, not Country Music Square. There is no Tiger Beer, Bud Light or Budweiser sign.",
+                                   "There is a police vehicle at the corner."]) == (
+        "The large sign says Bridgestone Arena, There is There is a police vehicle at the corner.",
+        {"country", "music", "square", "tiger", "beer", "bud", "light", "budweiser"})
+    tiger = dict(parts, centre={"description": "A brick building with neon signs, including one that says 'Tiger' and another with a 'C' logo.", "labels": ["tiger sign"]},
+                 **{"middle left": {"description": "A street with a neon 'Tiger' sign above a doorway.", "labels": ["doorway"]}})
+    seen.clear()
+    images.redescribe(m, CFG, img["id"], correction="There is no Tiger Beer sign.", see=eyes(whole=whole))
+    images.process(m, CFG, see=eyes(tiger, seen=seen))
+    assert "Tiger" not in seen[0][1] and "The big sign says Bridgestone Arena." in seen[0][1]
+    final = images.get_image(m, img["id"], sections=True)
+    centre = next(s["description"] for s in final["sections"] if s["place"] == "centre")
+    assert centre == f"A brick building with neon signs, including one that says {images.UNCLEAR} and another with a {images.UNCLEAR} logo."
+    assert images.UNCLEAR in next(s["description"] for s in final["sections"] if s["place"] == "middle left")       # two looks agreed, but the user said no
+    assert "tiger sign" not in final["labels"] and "doorway" in final["labels"]
     again = {s["place"]: s["description"] for s in images.get_image(m, img["id"], sections=True)["sections"] if s["description"]}
     assert "marked 'POLICE'" in again["bottom centre"] and images.UNCLEAR in again["centre"] and report["unclear"] == 3
