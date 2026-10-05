@@ -339,7 +339,9 @@ step ends. A message sent while pictures are being drawn makes Ollama load the m
 the drawing may then fail for lack of memory, and the dream is kept without those pictures.
 
 In `from_images` mode, images in which the vision model saw real people are not drawn from unless
-`dream_image_use_people` is set; a scene with a person in it is then drawn from words alone. Stored
+`dream_image_use_people` is set; a scene with a person in it is then drawn from words alone.
+`hermes holonomic images dream ID yes|no|default` decides it for one image, whatever the general rule:
+`no` keeps a particular photo out of dream pictures, `yes` allows one when people are otherwise excluded. Stored
 images are only read. If the image generator cannot be reached the dream is kept without pictures.
 
 | Key | Default | Meaning |

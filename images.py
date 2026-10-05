@@ -703,7 +703,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "realm": row["realm"], "source": row["source"], "session": row["session"], "origin": row["origin"],
            "caption": row["caption"], "created_at": row["created_at"], "seen": row["seen"], "last_seen": row["last_seen"],
            "memory_id": row["memory_id"], "description": (memory or {}).get("text", ""), "labels": labels,
-           "people": has_people(engine, row["id"]),
+           "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -738,6 +738,33 @@ def set_people(engine, image_id: int, people: bool) -> bool:
     with engine._lock:
         _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps(meta), row["id"]))
     return True
+
+
+def set_dream_use(engine, image_id: int, allowed: Optional[bool]) -> bool:
+    """Say whether dream pictures may be drawn from this image: True, False, or None to go back to the general rule."""
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return False
+    meta = json.loads(row["meta"] or "{}")
+    meta.pop("dream_from", None)
+    if allowed is not None:
+        meta["dream_from"] = bool(allowed)
+    with engine._lock:
+        _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps(meta), row["id"]))
+    return True
+
+
+def dream_use(engine, image_id: int) -> Optional[bool]:
+    row = _row(engine, image_id)
+    value = json.loads(row["meta"] or "{}").get("dream_from") if row is not None else None
+    return value if isinstance(value, bool) else None
+
+
+def may_dream_from(engine, image_id: int, people_allowed: bool) -> bool:
+    """Whether a dream picture may start from this image.  What was said about this image decides; otherwise an
+    image with real people in it is used only if images of people are allowed in general."""
+    said = dream_use(engine, image_id)
+    return said if said is not None else (people_allowed or not has_people(engine, image_id))
 
 
 def has_people(engine, image_id: int) -> bool:

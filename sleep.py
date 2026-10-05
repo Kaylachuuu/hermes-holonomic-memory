@@ -506,7 +506,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
     if mode == "from_images":
         for f in one["fragments"]:
             image_id = f.get("image_id")
-            if image_id and (sc["dream_image_use_people"] or not _images.has_people(engine, image_id)):
+            if image_id and _images.may_dream_from(engine, image_id, bool(sc["dream_image_use_people"])):
                 img = _images.get_image(engine, image_id)
                 if img and img["description"]:
                     usable[int(image_id)] = img["description"]

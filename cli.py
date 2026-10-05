@@ -18,6 +18,7 @@
     hermes holonomic images add photo.jpg [--say "This is my cat"]     keep an image and describe it now
     hermes holonomic images process               describe everything that is waiting
     hermes holonomic images people ID yes|no      say whether an image has real people in it (dreams draw from those only if allowed)
+    hermes holonomic images dream ID... yes|no|default     allow or forbid dream pictures drawn from particular images
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
     hermes holonomic images forget ID [--yes] [--keep-files]
@@ -364,6 +365,9 @@ def _print_image(img, width: int = 110, full: bool = False) -> None:
         print(f"    things in it: {', '.join(img['labels'])}")
     if full:
         print(f"    real people in it: {'yes' if img.get('people') else 'no'}   (wrong? hermes holonomic images people {img['id']} yes|no)")
+        said = img.get("dream_from")
+        print(f"    dream pictures drawn from it: {'always allowed' if said else 'never' if said is False else 'by the general rule'}"
+              f"   (hermes holonomic images dream {img['id']} yes|no|default)")
     if img["sections_waiting"]:
         print(f"    {img['sections_waiting']} of {img['sections_total']} parts not looked at yet")
     for s in img.get("sections", []):
@@ -455,6 +459,17 @@ def _images_cmd(engine, cfg, args) -> None:
         left = _img.pending(engine)
         if left["images"] or left["sections"]:
             print(f"  still waiting: {left['images']} image(s), {left['sections']} part(s)")
+    elif what == "dream":
+        if len(items) < 2 or items[-1] not in ("yes", "no", "default") or not all(raw.isdigit() for raw in items[:-1]):
+            print("Usage: hermes holonomic images dream ID... yes|no|default      (may dream pictures be drawn from these images?)")
+            return
+        for raw in items[:-1]:
+            if not _img.set_dream_use(engine, int(raw), {"yes": True, "no": False, "default": None}[items[-1]]):
+                print(f"image #{raw}: no such image")
+                continue
+            print(f"image #{raw}: " + {"yes": "dream pictures may be drawn from it, whatever the general rule about people.",
+                                       "no": "dream pictures are never drawn from it. What she saw in it can still appear in a dream's words.",
+                                       "default": "back to the general rule (an image with people in it is used only if those are allowed)."}[items[-1]])
     elif what == "people":
         if len(items) != 2 or not items[0].isdigit() or items[1] not in ("yes", "no"):
             print("Usage: hermes holonomic images people ID yes|no      (does the image have real people in it?)")
@@ -714,7 +729,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "dream"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")

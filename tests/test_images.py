@@ -376,6 +376,11 @@ def test_cli_images(tmp_path):
         assert "images: 1" in run("stats")
         assert "real people in it: no" in run("images", "show", "1") and "Dreams will not draw from it" in run("images", "people", "1", "yes")
         assert "real people in it: yes" in run("images", "show", "1") and "Usage:" in run("images", "people", "1", "maybe")
+        assert "never drawn from it" in run("images", "dream", "1", "no") and "dream pictures drawn from it: never" in run("images", "show", "1")
+        out = run("images", "dream", "1", "9", "yes")
+        assert "image #1: dream pictures may be drawn from it" in out and "image #9: no such image" in out
+        assert "dream pictures drawn from it: always allowed" in run("images", "show", "1")
+        assert "back to the general rule" in run("images", "dream", "1", "default") and "Usage:" in run("images", "dream", "1", "perhaps")
         assert "Nothing removed." in run("images", "forget", "1") and "images kept: 1" in run("images")
         assert "Forgot image #1 and deleted the files" in run("images", "forget", "1", "--yes")
         assert "images kept: 0" in run("images") and not list((home / "holonomic" / "images").glob("*"))
@@ -993,3 +998,23 @@ def test_she_can_reason_before_choosing(tmp_path):
         assert images.pick_best(dict(cfg, dream_image_choose_think=False), "A cat.", three) == (0, "The first.") and [g["think"] for g in got] == [False]
     finally:
         server.shutdown()
+
+
+def test_dreaming_from_an_image_can_be_decided_image_by_image(tmp_path):
+    import random
+    from holonomic import images
+    from holonomic.sleep import sleep_once
+    m, ids, now = dream_store(tmp_path, people=True)
+    assert images.may_dream_from(m, ids["cat"], False) and not images.may_dream_from(m, ids["me"], False) and images.may_dream_from(m, ids["me"], True)
+    assert images.set_dream_use(m, ids["me"], True) and images.set_dream_use(m, ids["cat"], False) and not images.set_dream_use(m, 999, True)
+    assert images.may_dream_from(m, ids["me"], False) and not images.may_dream_from(m, ids["cat"], True)       # what was said about the image decides
+    assert images.get_image(m, ids["me"])["dream_from"] is True and images.get_image(m, ids["old"])["dream_from"] is None
+    seen = {}
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=1, dream_image_seeds=9)
+    sleep_once(m, cfg, llm=dreamer(seen=seen), steps=["dream"], rng=random.Random(1), now=now, paint=lambda p, s: picture(768, 512))
+    offered = seen["scenes"][0].split("IMAGES:")[1]
+    assert f"[{ids['me']}]" in offered and f"[{ids['cat']}]" not in offered and f"[{ids['old']}]" in offered
+    assert "A photo of a black cat asleep on a green couch" in seen["dream"][0]        # still part of what the dream is made from
+    images.set_dream_use(m, ids["me"], None)
+    assert not images.may_dream_from(m, ids["me"], False)                             # back to the general rule
+    assert images.has_people(m, ids["me"])                                            # saying it may be dreamt from does not change what is in it
