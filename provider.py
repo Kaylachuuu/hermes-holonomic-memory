@@ -164,9 +164,20 @@ def is_question(text: str) -> bool:
     return text.rstrip().endswith("?")
 
 
+# Words that mark a sentence as being about how the memory system works, as opposed to using it.
+# "I can't reach faded memories without deep recall" is a true statement about the design and worth
+# keeping; "I don't have a memory of our past conversations" is the denial the filter exists for.
+_MECHANICS_RE = re.compile(
+    r"\b(?:plugin|feature|settings?|config\w*|prompt|realms?|plates?|database|memory (?:system|provider|plugin|store|engine)|"
+    r"sleep cycle|command|version|implement\w*|algorithm|embeddings?|threshold|parameter|label(?:s|led|ed|ling)?|detector|"
+    r"storage|fad(?:e|es|ed|ing)|reflection (?:step|pass|process)|consolidat\w*|deep recall|holonomic|holograph\w*)\b",
+    re.IGNORECASE)
+
+
 def strip_memory_denials(text: str) -> str:
     from .engine import split_sentences
-    return " ".join(s for s in split_sentences(text, max_chars=2000) if not _DENIAL_RE.search(s))
+    return " ".join(s for s in split_sentences(text, max_chars=2000)
+                    if not _DENIAL_RE.search(s) or _MECHANICS_RE.search(s))
 
 
 def select_for_injection(hits: list, cfg: Dict[str, Any]) -> list:
@@ -191,6 +202,15 @@ def recall_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # The user referring to a dream of the agent's ("your dream", "did you dream"), as opposed to "my dream job".
 _HER_DREAM_RE = re.compile(r"\b(?:your|that|this|the|last night'?s?)\s+(?:\w+\s+){0,2}dreams?\b|\bdid you dream|"
                            r"\byou (?:dreamt|dreamed|were dreaming)\b|\bany dreams\b|\bin (?:your|the|that) dream\b", re.IGNORECASE)
+# The user asking what was dreamed.  Only this makes the whole reply dream talk; a passing mention
+# ("your dreams sound like ours") labels that sentence and lets the reply be judged on its own.
+_ASKS_DREAM_RE = re.compile(
+    r"\bdid you (?:have )?(?:any |a )?dream|\bhave you (?:had )?(?:any |a )?dream|\bwhat (?:did|do) you dream|\bany dreams\b|"
+    r"\bwhat (?:was|were|happened in) (?:your|the|that|last night'?s?) dreams?\b|"
+    r"\b(?:tell me|talk to me|more) (?:more )?about (?:your|the|that|those|last night'?s?) (?:\w+ ){0,2}dreams?\b|"
+    r"\b(?:describe|share|recount|remember) (?:your|the|that|those|last night'?s?) (?:\w+ ){0,2}dreams?\b|"
+    r"\bwhat (?:do|did) you (?:make|think) of (?:your|the|that|those) dreams?\b|\bdream(?:t|ed)? (?:of|about) (?:anything|something)\b",
+    re.IGNORECASE)
 # The agent recounting one.
 _MY_DREAM_RE = re.compile(r"\b(?:my|the|that|this|a|last night'?s?)\s+(?:\w+\s+){0,2}dreams?\b|\bI (?:dreamt|dreamed|was dreaming)\b|"
                           r"\bin (?:my|the|that) dream\b", re.IGNORECASE)
@@ -202,7 +222,9 @@ def is_dream_talk(engine, memory_id: int, text: str, speaker: str, cfg: Dict[str
     try:
         if not engine.recent(1, realm=DREAM_REALM, kind=DREAM):
             return False                                    # no dreams yet: "dream" can only be meant in the everyday sense
-        if (_HER_DREAM_RE if speaker == "user" else _MY_DREAM_RE).search(text):
+        # Mentioning a dream is enough, unless the sentence is about how dreaming works ("your dreams are
+        # kept in a separate realm").  Then, as for anything that does not mention one, it has to resemble a dream.
+        if (_HER_DREAM_RE if speaker == "user" else _MY_DREAM_RE).search(text) and not _MECHANICS_RE.search(text):
             return True
         return engine.similarity_to_realm(memory_id, DREAM_REALM, kinds=(DREAM,)) >= float(cfg.get("dream_talk_similarity", 0.55))
     except Exception:
@@ -214,7 +236,8 @@ def asks_about_dreams(engine, text: str) -> bool:
     never uses the word: a real reply began "I did, actually. They were quite vivid" and went on to
     describe a hall with a glass floor."""
     try:
-        return bool(_HER_DREAM_RE.search(text or "")) and bool(engine.recent(1, realm=DREAM_REALM, kind=DREAM))
+        return (bool(_ASKS_DREAM_RE.search(text or "")) and not _MECHANICS_RE.search(text or "")
+                and bool(engine.recent(1, realm=DREAM_REALM, kind=DREAM)))
     except Exception:
         return False
 

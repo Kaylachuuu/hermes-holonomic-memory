@@ -200,7 +200,10 @@ conversation, but what was said in it describes a dream. Such pieces are labelle
 they say so ("in my dream", "did you dream") or they closely resemble a stored dream. Dream talk is
 labelled wherever it is recalled, no fact about the user may rest on it, the account of that conversation
 is told to report it as talk about a dream, and dreams are never seeded from it.
-`hermes holonomic dreamtalk` finds and labels such conversation stored by an earlier version.
+A sentence about how dreaming works ("your dreams are kept in a separate realm") is not dream talk
+unless it also resembles a dream, and only a question about what was dreamed makes the whole reply
+dream talk. `hermes holonomic dreamtalk` finds and labels such conversation stored by an earlier
+version, and `hermes holonomic relabel ID --as said|dream` corrects a label by hand.
 
 **Deep recall.** Everyday recall skips faded memories. The agent's memory tool takes `deep: true`, which
 searches them too and follows links two steps out. A faded memory recovered that way is strengthened

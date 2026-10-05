@@ -9,6 +9,7 @@
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
+    hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
 
@@ -52,7 +53,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | profile [--history]')
         return
@@ -75,6 +76,19 @@ def holonomic_command(args) -> None:
     try:
         if action == "sleep":
             _sleep(engine, cfg, args)
+        elif action == "relabel":
+            to_dream = {"said_user": "dreamtalk_user", "said_assistant": "dreamtalk_assistant"}
+            to_said = {v: k for k, v in to_dream.items()}
+            table = to_dream if args.to == "dream" else to_said
+            for mid in args.ids:
+                mem = engine.get(mid)
+                if mem is None:
+                    print(f"[#{mid}] no such memory")
+                elif mem["kind"] not in table:
+                    print(f"[#{mid}] is '{mem['kind']}'; nothing to change")
+                else:
+                    engine.set_kind(mid, table[mem["kind"]])
+                    print(f"[#{mid}] {mem['kind']} -> {table[mem['kind']]}   {_clip(mem['text'], 80)}")
         elif action == "dreamtalk":
             from .provider import asks_about_dreams, is_dream_talk, mark_dream_talk
             from .sleep import RAW_KINDS
@@ -348,6 +362,10 @@ def register_cli(subparser) -> None:
     slp.add_argument("sleep_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
     slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
+    rl = subs.add_parser("relabel", help="Correct whether pieces of conversation are labelled as dream talk")
+    rl.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
+    rl.add_argument("--as", dest="to", choices=["said", "dream"], required=True,
+                    help="'said' = ordinary conversation, 'dream' = talk about a dream")
     dt = subs.add_parser("dreamtalk", help="Find stored conversation that is talk about a dream, and label it")
     dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
     dt.add_argument("--width", type=int, default=110, help="Characters of text to show")

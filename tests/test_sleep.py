@@ -393,3 +393,66 @@ def test_cli_dreamtalk_labels_what_is_already_stored(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+def test_talking_about_how_dreaming_works_is_not_dream_talk(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.provider import strip_memory_denials, asks_about_dreams
+    from holonomic.sleep import sleep_once
+    from holonomic.reflect import DREAM_TALK_USER, DREAM_TALK_ASSISTANT
+    p = make(tmp_path)
+    e = p._engine
+    talk(e, "s-new", time.time() - 3600, GARDEN)
+    llm = fake({"dream": json.dumps({"dream": "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code that boots slowly."}),
+                "wake": json.dumps({"thoughts": "Odd.", "connections": []})})
+    sleep_once(e, p._cfg, llm=llm, steps=["dream"], rng=random.Random(2))
+    assert asks_about_dreams(e, "Did you have any dreams last night?") and asks_about_dreams(e, "Tell me about your dream.")
+    assert not asks_about_dreams(e, "Your dreams sound a lot like ours do.")                 # a remark, not a request
+    assert not asks_about_dreams(e, "Tell me about your dream realm and how the plugin stores it.")
+    p.sync_turn("Your dreams are kept in a separate realm by the memory plugin, so they never reach factual recall.",
+                "That makes sense as a design.\n\nThe dream realm keeps my dreams apart from what happened, and the plugin labels any talk about them.",
+                session_id="s1")
+    p.sync_turn("Your dreams sound a lot like ours do.",
+                "It is fascinating how recent conversations and older ones end up side by side.\n\nIn my dream the herbs were growing in rows of assembly, each leaf a line of code.",
+                session_id="s1")
+    kinds = {r["text"][:36]: r["kind"] for r in e.recent(30)}
+    assert kinds["Your dreams are kept in a separate re"[:36]] == "said_user"                   # about the design
+    assert kinds["That makes sense as a design."] == "said_assistant"
+    assert kinds["The dream realm keeps my dreams apart"[:36]] == "said_assistant"
+    assert kinds["Your dreams sound a lot like ours do."[:36]] == DREAM_TALK_USER              # about her dreams
+    assert kinds["It is fascinating how recent convers"[:36]] == "said_assistant"              # her musing: judged on its own
+    assert kinds["In my dream the herbs were growing i"[:36]] == DREAM_TALK_ASSISTANT          # recounting, though it says "code"
+    # statements about how memory works survive the filter that removes denials of having a memory
+    kept = strip_memory_denials("I can't reach faded memories without deep recall. I don't know your name. "
+                                "I don't have a persistent memory of our past conversations. The plugin does not store my questions for recall.")
+    assert kept == "I can't reach faded memories without deep recall. The plugin does not store my questions for recall."
+    p.shutdown()
+
+
+def test_cli_relabel(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io
+    p = make(tmp_path)
+    a = p._engine.remember("It is fascinating how the two end up side by side.", kind="dreamtalk_assistant", session="s1")[0]
+    b = p._engine.remember("The tomato plants need water early tomorrow.", kind="said_user", session="s1")[0]
+    f = p._engine.remember("Kayla grows tomato plants.", kind="fact", session="reflection", chain=False)[0]
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        out = run("relabel", str(a), str(f), "999", "--as", "said")
+        assert "dreamtalk_assistant -> said_assistant" in out and "is 'fact'; nothing to change" in out and "[#999] no such memory" in out
+        assert "said_user -> dreamtalk_user" in run("relabel", str(b), "--as", "dream")
+        assert "said_assistant" in run("show", str(a)) and "dreamtalk_user" in run("show", str(b))
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)
