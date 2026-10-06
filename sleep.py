@@ -75,6 +75,9 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_seeds": 2,           # recent images a dream draws on
     "dream_image_use_people": False,  # from_images: may an image with real people in it be drawn from?
     "dream_image_describe_source": True,   # from_images: also tell the generator what she remembers the image showing
+    # A signature or watermark on an image is not carried into pictures drawn from it: its corner is smoothed over
+    # before the image generator is given the image, and it is left out of what she is told she remembers.
+    "dream_image_keep_signature": False,
     "dream_image_api": "",            # 'comfyui', 'a1111' or 'openai' (see paint.py)
     "dream_image_host": "",
     "dream_image_model": "",
@@ -513,7 +516,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             if image_id and _images.may_dream_from(engine, image_id, bool(sc["dream_image_use_people"])):
                 img = _images.get_image(engine, image_id)
                 if img and img["description"]:
-                    usable[int(image_id)] = img["description"]
+                    usable[int(image_id)] = img["description"] if sc["dream_image_keep_signature"] else _images.without_signature(img["description"])
     n = int(sc["dream_image_count"])
     prompt = (_SCENES.format(n=n, refs=_SCENE_REFS if usable else "") + f"\n\nDREAM:\n{one['text']}"
               + ("\n\nIMAGES:\n" + "\n".join(f"[{i}] {' '.join(d.split())[:300]}" for i, d in usable.items()) if usable else ""))
@@ -565,7 +568,10 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             # frame took the top off the head of the first person drawn this way.
             turned = bool(s["from"]) and sized and _images.is_portrait(engine, s["from"][0]) != (size[1] > size[0])
             shape = (size[1], size[0]) if turned else size
-            start = _images.blend(engine, s["from"], shape) if s["from"] else None
+            hide = {}
+            if s["from"] and not sc["dream_image_keep_signature"]:
+                hide = {i: _images.signature_place(engine, cfg, i, report=report) for i in s["from"]}
+            start = _images.blend(engine, s["from"], shape, hide) if s["from"] else None
         except Exception as exc:
             report["errors"].append(f"dream pictures{label}: {exc}")
             continue

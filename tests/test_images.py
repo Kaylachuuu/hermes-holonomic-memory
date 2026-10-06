@@ -1039,6 +1039,54 @@ def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path
     assert len(run([1, 1, 1, 1], painter=lambda prompt, start, size=None: plain.append(1) or picture(768, 512))[2]) == 4 and len(plain) == 4
 
 
+def test_a_signature_is_kept_out_of_dream_pictures(tmp_path):
+    """A signed photo: the vision model is asked once which corner, that corner is smoothed over in what the
+    image generator is given, and sentences about the signature are left out of what she is told she remembers."""
+    import io, random
+    from PIL import Image, ImageDraw
+    from holonomic import images
+    from holonomic.sleep import sleep_once, sleep_config
+    assert sleep_config({})["dream_image_keep_signature"] is False
+    assert images.without_signature("A lake at dusk. A signature is in the corner. Pines line the bank.") == "A lake at dusk. Pines line the bank."
+    m, ids, now = dream_store(tmp_path)
+    photo = Image.new("RGB", (1024, 768), (90, 110, 150))
+    ImageDraw.Draw(photo).line([(940, 740), (1000, 748), (950, 752), (1005, 738)], fill=(10, 10, 10), width=3)      # a scrawl, bottom right
+    row = images._row(m, ids["cat"])
+    for rel in {row["file"], row["view"]}:
+        photo.save(m.path / rel, "PNG")
+    asked = []
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        asked.append(step)
+        return json.dumps({"where": "bottom right"})
+    assert images.signature_known(m, ids["cat"]) == ""
+    assert images.signature_place(m, CFG, ids["cat"], see=see) == "bottom right" and images.signature_place(m, CFG, ids["cat"], see=see) == "bottom right"
+    assert asked == ["signature"] and images.get_image(m, ids["cat"])["signature"] == "bottom right"      # asked once, then on record
+    darkest = lambda data, box: min(Image.open(io.BytesIO(data)).convert("L").crop(box).getdata())
+    corner, elsewhere = (900, 700, 1024, 768), (0, 0, 600, 600)
+    plain, hidden = images.blend(m, [ids["cat"]], (1024, 768)), images.blend(m, [ids["cat"]], (1024, 768), {ids["cat"]: "bottom right"})
+    assert darkest(plain, corner) < 40 and darkest(hidden, corner) > 90                              # the strokes are gone
+    assert Image.open(io.BytesIO(hidden)).crop(elsewhere).tobytes() == Image.open(io.BytesIO(plain)).crop(elsewhere).tobytes()
+    # in a dream: the painter is given the smoothed image, and no word of a signature
+    given = []
+
+    def paint(prompt, start, size=None):
+        given.append((prompt, start))
+        return picture(768, 512)
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=1, dream_image_candidates=1, dream_image_style="",
+               dream_image_width=1024, dream_image_height=768, dream_image_redraw_below=0)
+    scenes = [{"picture": "A black cat asleep on a couch in a greenhouse.", "images": [ids["cat"]]}]
+    sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    assert darkest(given[0][1], corner) > 90 and "ignature" not in given[0][0]
+    # the user says it is not signed, or wants signatures kept: the image is given as it is
+    assert images.set_signature(m, ids["cat"], "none") and not images.set_signature(m, ids["cat"], "middle")
+    sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(2), now=now + 90000, paint=paint)
+    assert darkest(given[-1][1], corner) < 40
+    assert images.set_signature(m, ids["cat"], "bottom-right")
+    sleep_once(m, dict(cfg, dream_image_keep_signature=True), llm=dreamer(scenes), steps=["dream"], rng=random.Random(3), now=now + 180000, paint=paint)
+    assert darkest(given[-1][1], corner) < 40 and len(given) == 3
+
+
 def test_she_can_reason_before_choosing(tmp_path):
     """Against a stand-in for Ollama: reasoning is asked for with its own allowance; if it runs away she is asked
     again without it; if that fails too the first attempt is kept."""

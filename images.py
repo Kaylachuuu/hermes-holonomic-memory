@@ -938,7 +938,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "realm": row["realm"], "source": row["source"], "session": row["session"], "origin": row["origin"],
            "caption": row["caption"], "created_at": row["created_at"], "seen": row["seen"], "last_seen": row["last_seen"],
            "memory_id": row["memory_id"], "description": (memory or {}).get("text", ""), "labels": labels,
-           "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]),
+           "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]), "signature": signature_known(engine, row["id"]),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -1017,15 +1017,104 @@ def has_people(engine, image_id: int) -> bool:
     return any(_PEOPLE_WORDS & set(label.split()) for label in labels)
 
 
+SIGNATURE_PLACES = ("none", "top left", "top right", "bottom left", "bottom right")
+
+_SIGNED = """\
+Look at the four corners of this image. Has something been added on top of the picture there: a signature, a \
+watermark, a photographer's name or logo, or a date stamp? Writing that is part of the scene itself (a sign, a label, \
+a screen) does not count.
+
+Write:
+- where: the corner it is in, or none if there is nothing of the kind."""
+
+_SIGNED_SCHEMA = {"type": "object", "properties": {"where": {"type": "string", "enum": list(SIGNATURE_PLACES)}}, "required": ["where"]}
+
+
+def signature_place(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callable[..., str]] = None,
+                    report: Optional[Dict[str, Any]] = None) -> str:
+    """The corner of an image that carries a signature or watermark, 'none', or '' if it could not be found out.
+    What the user said wins.  Otherwise the vision model is asked once and its answer is kept with the image."""
+    from .reflect import _parse
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return ""
+    meta = json.loads(row["meta"] or "{}")
+    known = meta.get("signature_said", meta.get("signature"))
+    if known in SIGNATURE_PLACES:
+        return known
+    try:
+        see = see or _seer(image_config(cfg), report if report is not None else {})
+        img, _ = open_image((engine.path / (row["view"] or row["file"])).read_bytes())
+        where = str(_parse(see("signature", _SYSTEM, _SIGNED, _jpeg(img, (1024, 1024)), _SIGNED_SCHEMA, 60)).get("where") or "").lower()
+    except Exception as exc:
+        logger.debug("holonomic: could not check image %s for a signature: %s", image_id, exc)
+        return ""
+    if where not in SIGNATURE_PLACES:
+        return ""
+    with engine._lock:
+        row = _row(engine, image_id)
+        _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?",
+                            (json.dumps(dict(json.loads(row["meta"] or "{}"), signature=where)), int(image_id)))
+    return where
+
+
+def set_signature(engine, image_id: int, place: str) -> bool:
+    """Say where an image is signed or watermarked ('none' if it is not), overriding what the vision model judged."""
+    row = _row(engine, image_id)
+    place = " ".join(str(place or "").lower().replace("-", " ").split())
+    if row is None or row["forgotten"] or place not in SIGNATURE_PLACES:
+        return False
+    with engine._lock:
+        _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?",
+                            (json.dumps(dict(json.loads(row["meta"] or "{}"), signature_said=place)), int(image_id)))
+    return True
+
+
+def signature_known(engine, image_id: int) -> str:
+    """What is on record about an image's signature, without asking anyone: a corner, 'none', or ''."""
+    row = _row(engine, image_id)
+    meta = json.loads(row["meta"] or "{}") if row else {}
+    known = meta.get("signature_said", meta.get("signature"))
+    return known if known in SIGNATURE_PLACES else ""
+
+
+_SIGNED_RE = re.compile(r"\b(signature|signed|watermark\w*|autograph\w*|date stamp)\b", re.I)
+
+
+def without_signature(text: str) -> str:
+    """A description with the sentences about a signature or watermark taken out."""
+    return " ".join(x for x in re.split(r"(?<=[.!?])\s+", " ".join((text or "").split())) if x and not _SIGNED_RE.search(x))
+
+
+def _smooth_corner(img, place: str):
+    """Blur one corner of a picture until thin strokes in it are gone, fading into the rest.  The colours stay,
+    so an image generator reworking the picture fills the corner with more of what surrounds it."""
+    from PIL import Image, ImageDraw, ImageFilter
+    w, h = img.size
+    pw, ph = int(w * 0.30), int(h * 0.16)
+    x0 = 0 if "left" in place else w - pw
+    y0 = 0 if "top" in place else h - ph
+    feather = max(4, ph // 5)
+    mask = Image.new("L", (w, h), 0)
+    # the patch runs off the edges of the picture so that the fade is only on its inner sides
+    ImageDraw.Draw(mask).rectangle([x0 - (feather * 3 if x0 == 0 else 0), y0 - (feather * 3 if y0 == 0 else 0),
+                                    x0 + pw + (feather * 3 if x0 else 0), y0 + ph + (feather * 3 if y0 else 0)], fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(feather))
+    return Image.composite(img.filter(ImageFilter.GaussianBlur(max(8, ph // 3))), img, mask)
+
+
 def is_portrait(engine, image_id: int) -> bool:
     row = _row(engine, image_id)
     return bool(row) and row["height"] > row["width"]
 
 
-def blend(engine, image_ids: List[int], size: Tuple[int, int]) -> Optional[bytes]:
+def blend(engine, image_ids: List[int], size: Tuple[int, int], hide: Optional[Dict[int, str]] = None) -> Optional[bytes]:
     """One picture made of up to two stored images laid over each other, the size a dream picture will be.
     This is what an image generator is given to rework, so a dream can carry the shapes and colours of things
-    she has really seen.  The stored images themselves are only read."""
+    she has really seen.  The stored images themselves are only read.
+
+    `hide` names, per image, a corner to smooth over first: where it is signed or watermarked.  A photographer's
+    signature was otherwise redrawn as a scrawl in the same corner of every dream picture made from the photo."""
     Image, ImageOps = _pil()
     layers = []
     for image_id in image_ids[:2]:
@@ -1036,7 +1125,9 @@ def blend(engine, image_ids: List[int], size: Tuple[int, int]) -> Optional[bytes
             img, _ = open_image((engine.path / (row["view"] or row["file"])).read_bytes())
         except (OSError, ImageError):
             continue
-        layers.append(ImageOps.fit(img, size, Image.LANCZOS))
+        layer = ImageOps.fit(img.convert("RGB"), size, Image.LANCZOS)
+        place = (hide or {}).get(int(image_id), "")
+        layers.append(_smooth_corner(layer, place) if place in SIGNATURE_PLACES[1:] else layer)
     if not layers:
         return None
     out = io.BytesIO()

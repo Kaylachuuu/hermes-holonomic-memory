@@ -348,6 +348,13 @@ picture scores below `dream_image_redraw_below`, it is drawn again holding less 
 (`dream_image_redraw_strength`). She then compares the new attempts with the one she had chosen, from
 her notes on all of them, and keeps whichever she prefers.
 
+**Signatures and watermarks.** A signature on a photo is not carried into pictures drawn from it. The
+first time a dream draws from an image, the vision model is asked which corner, if any, is signed or
+watermarked; that corner is smoothed over in the copy given to the image generator (the stored image
+is never changed), and sentences about the signature are left out of what the painter is told.
+`hermes holonomic images signature ID none|bottom-right|...` corrects the answer for one image, and
+`hermes holonomic dreams images --signature keep` turns this off.
+
 **Picture size and the graphics card.** Past a certain size a picture no longer fits on the card
 beside the drawing model, and drawing becomes several times slower with no error and nothing in the
 image server's log but the step time. With Z-Image-Turbo on a 16 GB card, 1024x768 drew at about 2
@@ -372,6 +379,7 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
+| `dream_image_keep_signature` | `false` | Carry a signature or watermark on an image into pictures drawn from it |
 | `dream_image_redraw_below` | `9` | A picture drawn from an image is drawn again when her best attempt scores below this out of 10; `0` = never |
 | `dream_image_redraw_strength` | `0.85` | How freely the second drawing departs from the image |
 | `dream_image_choose_think` | `false` | Let her reason before comparing her notes on the attempts; if the reasoning runs away she is asked again without it |

@@ -18,6 +18,7 @@
     hermes holonomic images add photo.jpg [--say "This is my cat"]     keep an image and describe it now
     hermes holonomic images process               describe everything that is waiting
     hermes holonomic images people ID yes|no      say whether an image has real people in it (dreams draw from those only if allowed)
+    hermes holonomic images signature ID none|bottom-right|...   say where an image is signed or watermarked (kept out of dream pictures)
     hermes holonomic images dream ID... yes|no|default     allow or forbid dream pictures drawn from particular images
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
@@ -287,6 +288,8 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_candidates"] = max(1, min(args.attempts, 8))
     if args.swap:
         values["dream_image_swap"] = args.swap == "on"
+    if args.signature:
+        values["dream_image_keep_signature"] = args.signature == "keep"
     if args.redraw_below is not None:
         values["dream_image_redraw_below"] = max(0, min(args.redraw_below, 11))
     if args.think:
@@ -340,6 +343,9 @@ def _dream_images(cfg, args) -> None:
         if mode == "from_images" and int(sc["dream_image_redraw_below"] or 0) > 0 and int(sc["dream_image_candidates"]) >= 1:
             print(f"  a picture drawn from an image is drawn again, holding less to it, if her best attempt scores below "
                   f"{sc['dream_image_redraw_below']} of 10 (--redraw-below 0 to stop)")
+        if mode == "from_images":
+            print("  a signature or watermark on an image is " + ("carried into pictures drawn from it (--signature remove to stop)"
+                  if sc["dream_image_keep_signature"] else "kept out of pictures drawn from it"))
         if sc["dream_image_swap"]:
             print("  one graphics card: the language models are unloaded while pictures are drawn and reloaded afterwards")
     if mode == "from_images":
@@ -393,6 +399,9 @@ def _print_image(img, width: int = 110, full: bool = False) -> None:
         print(f"    things in it: {', '.join(img['labels'])}")
     if full:
         print(f"    real people in it: {'yes' if img.get('people') else 'no'}   (wrong? hermes holonomic images people {img['id']} yes|no)")
+        signed = img.get("signature")
+        print(f"    signature or watermark: {'not checked yet (checked the first time a dream draws from it)' if not signed else signed}"
+              f"   (wrong? hermes holonomic images signature {img['id']} none|bottom-right|...)")
         said = img.get("dream_from")
         print(f"    dream pictures drawn from it: {'always allowed' if said else 'never' if said is False else 'by the general rule'}"
               f"   (hermes holonomic images dream {img['id']} yes|no|default)")
@@ -502,6 +511,17 @@ def _images_cmd(engine, cfg, args) -> None:
             print(f"image #{raw}: " + {"yes": "dream pictures may be drawn from it, whatever the general rule about people.",
                                        "no": "dream pictures are never drawn from it. What she saw in it can still appear in a dream's words.",
                                        "default": "back to the general rule (an image with people in it is used only if those are allowed)."}[items[-1]])
+    elif what == "signature":
+        place = " ".join(items[1:]).lower().replace("-", " ") if len(items) > 1 else ""
+        if not items or not items[0].isdigit() or place not in _img.SIGNATURE_PLACES:
+            print("Usage: hermes holonomic images signature ID none|top-left|top-right|bottom-left|bottom-right"
+                  "      (where the image is signed or watermarked)")
+            return
+        if not _img.set_signature(engine, int(items[0]), place):
+            print(f"image #{items[0]}: no such image")
+            return
+        print(f"image #{items[0]}: " + ("no signature or watermark." if place == "none" else
+                                        f"signed or watermarked at the {place}. That corner is smoothed over before dream pictures are drawn from it."))
     elif what == "people":
         if len(items) != 2 or not items[0].isdigit() or items[1] not in ("yes", "no"):
             print("Usage: hermes holonomic images people ID yes|no      (does the image have real people in it?)")
@@ -754,6 +774,8 @@ def register_cli(subparser) -> None:
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
+    drm.add_argument("--signature", choices=["remove", "keep"], help="With 'images': whether a signature or watermark on an image is "
+                     "carried into dream pictures drawn from it (default: remove)")
     drm.add_argument("--redraw-below", type=int, metavar="SCORE", help="With 'images': a picture drawn from an image is drawn again, holding "
                      "less to the image, when her best attempt scores below this out of 10 (0 = never)")
     drm.add_argument("--think", choices=["on", "off"], help="With 'images': let her reason before choosing between attempts")
@@ -780,7 +802,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "dream"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")
