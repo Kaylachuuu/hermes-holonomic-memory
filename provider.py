@@ -557,13 +557,26 @@ class HolonomicMemoryProvider(MemoryProvider):
             used += len(line) + 1
         extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
         if not lines:
-            return "\n\n".join(extra)
+            return self._keep_context(engine, query, "\n\n".join(extra))
         try:                                             # what gets used stays strong; what is never recalled fades
             engine.reinforce(shown, 0.03)
         except Exception:
             pass
         self._last_count = len(lines)
-        return "\n\n".join(["## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)] + extra)
+        return self._keep_context(engine, query, "\n\n".join(
+            ["## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)] + extra))
+
+    @staticmethod
+    def _keep_context(engine, query: str, text: str) -> str:
+        """Leave what she was just given where it can be read (`hermes holonomic context`).  When she does not
+        act on something, the first question is whether she was told it, and guessing at that wasted three rounds."""
+        try:
+            (engine.path / "last_context.txt").write_text(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')}\nMESSAGE: {' '.join(query.split())[:400]}\n\n"
+                + (text or "(nothing was given to her for this message)") + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        return text
 
     def _image_line(self, engine, hit, image_id: int, parts: list, max_chars: int) -> str:
         """One entry for an image: where its file is, what it shows, and which parts of it matched."""
@@ -621,20 +634,35 @@ class HolonomicMemoryProvider(MemoryProvider):
             every = {k["name"].lower(): k for k in _fp.names(engine)}
         except Exception:
             return ""
-        lines = []
+        sure, likely = [], []
         for key, n in self._turn_names.items():
             k = every.get(key)
             if not k:
                 continue
             n["what"] = k["what"]
             seen = len(k["examples"]) + len(k["recognised"])
-            lines.append(f"- {k['name']}" + (f", {k['what']}" if k["what"] else "") + f". You have been shown {k['name']} in {seen} image(s) before"
-                         + ("." if n["sure"] else "; here it is only a likeness, so check it against what you see."))
-        if not lines:
+            (sure if n["sure"] else likely).append(
+                f"{k['name']}" + (f", {k['what']}" if k["what"] else "") + f" (you have been shown {k['name']} in {seen} image(s) before)")
+        if not sure and not likely:
             return ""
-        return ("## You recognise what is in the attached image\n"
-                "You know this by name; it is not new to you. Speak of it by its name, as someone you know, and do not ask "
-                "what or whose it is. What you remember about it is among your recalled memories.\n" + "\n".join(lines))
+        # The name leads, as a plain statement.  Given a description of the thing with its name in brackets and
+        # leave to use it, she used the description ("this tuxedo cat") and left the name out.
+        out = []
+        if sure:
+            names = " and ".join(x.split(",")[0].split(" (")[0] for x in sure)
+            out.append(f"## The attached image shows {names}\n"
+                       f"This is {names}: you recognise {'it' if len(sure) == 1 else 'them'} by sight. " + " ".join(f"{x}." for x in sure) + "\n"
+                       f"Say the name when you answer, the way you would on seeing someone you know (\"That is {sure[0].split(',')[0].split(' (')[0]}!\"). "
+                       "Do not call it 'a cat' or 'this cat' or by a description, and do not ask what or whose it is. "
+                       "What you remember about it is among your recalled memories.")
+        if likely:
+            names = " and ".join(x.split(",")[0].split(" (")[0] for x in likely)
+            out.append(f"## The attached image looks like {names}\n"
+                       f"Part of it looks like {names}: " + " ".join(f"{x}." for x in likely) + "\n"
+                       "Look at the image. If that is what you see, it is the one you know: say the name when you answer, and do not call "
+                       "it by a description or ask whose it is. If what you see does not fit, do not use the name. Do not take a name "
+                       "from earlier in the conversation in its place.")
+        return "\n\n".join(out)
 
     def _may_show_block(self, engine, query: str) -> str:
         """A new image has arrived.  If part of it looks like something she knows by name, tell her before she
@@ -644,7 +672,6 @@ class HolonomicMemoryProvider(MemoryProvider):
         from . import fingerprints as _fp
         if not _fp.names_on(self._cfg):
             return ""
-        out = []
         try:
             as_files = set(_images.attached_as_files(query)) if self._writes_enabled else set()
             for data, where in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
@@ -652,15 +679,9 @@ class HolonomicMemoryProvider(MemoryProvider):
                     continue
                 for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
                     self._note_names([{"name": m["shown"]}], sure=False)
-                    line = f"- {m['shown']}" + (f" ({m['what']})" if m["what"] else "")
-                    if line not in out:
-                        out.append(line)
         except Exception as exc:
             logger.debug("holonomic: checking an arriving image for named things failed: %s", exc)
-        return ("## What the attached image may show (going by its look alone)\n"
-                "Part of it looks like something you have been shown before and know by name. Check this against what you "
-                "see: if it fits, you recognise it and can say so; if it does not fit, say nothing of it. Do not take a name "
-                "from earlier in the conversation in its place.\n" + "\n".join(out)) if out else ""
+        return ""                                    # what was found is said in one place: _known_block
 
     def _unseen_block(self, engine, query: str, sid: str) -> str:
         """A picture attached as a plain file (the desktop app does this with a phone's HEIC photos) is never

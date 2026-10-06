@@ -1782,21 +1782,21 @@ def test_she_is_told_what_an_arriving_image_may_show_before_she_answers(tmp_path
         shot, other, same = tmp_path / "new.png", tmp_path / "other.png", tmp_path / "same.png"
         shot.write_bytes(two_tone((30, 40, 220), (215, 35, 30))); other.write_bytes(flat((30, 200, 40))); same.write_bytes(flat((220, 30, 30)))
         said = p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
-        assert "## What the attached image may show (going by its look alone)" in said and "- Sushi (a red cat)" in said
-        assert "Do not take a name from earlier in the conversation in its place." in said
-        assert "## You recognise what is in the attached image" in said and "do not ask what or whose it is" in said
-        assert "- Sushi, a red cat. You have been shown Sushi in 1 image(s) before; here it is only a likeness" in said
+        assert "## The attached image looks like Sushi" in said and "Sushi, a red cat (you have been shown Sushi in 1 image(s) before)." in said
+        assert "Do not take a name from earlier in the conversation in its place." in said and "say the name when you answer" in said
+        assert "If what you see does not fit, do not use the name." in said and "## The attached image shows" not in said
+        assert (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8").count("## The attached image looks like Sushi") == 1
         # recognising him brings back what she knows about him, though the words were only "look at this"
         e.remember("Sushi is Kayla's cat and sleeps on the pine-green couch.", kind="said_user", session="s0")
         said = p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {shot}]", session_id="s1")
-        assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in said and "## You recognise what is in the attached image" in said
+        assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in said and "## The attached image looks like Sushi" in said
         assert "Sushi is Kayla's cat" not in p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {other}]", session_id="s1")
-        assert "may show" not in p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")      # nothing like it
+        assert "looks like" not in p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")    # nothing like it
         again = p.prefetch(f"[1 image] this one again\n\n[Image attached at: {same}]", session_id="s1")                # the very image she has
-        assert "An image you have seen before" in again and "may show" not in again
-        assert "- Sushi, a red cat. You have been shown Sushi in 1 image(s) before." in again and "Sushi is Kayla's cat" in again
+        assert "An image you have seen before" in again and "looks like" not in again
+        assert "## The attached image shows Sushi" in again and "This is Sushi: you recognise it by sight." in again and "Sushi is Kayla's cat" in again
         p._cfg["image_names"] = False
-        assert "may show" not in p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
+        assert "looks like" not in p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
     finally:
         p.shutdown(); server.shutdown()
 
@@ -1834,10 +1834,11 @@ def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
         calls.clear()
         block = p.prefetch(file_message(photo, "Look at this!"), session_id="s1")
         assert "## The picture attached to this message (you were not shown it directly" in block and "a red cat, Sushi, sitting in a paper bag" in block
-        assert "## You recognise what is in the attached image" in block and "do not ask what or whose it is" in block
-        assert "- Sushi, a red cat. You have been shown Sushi in 2 image(s) before." in block and "only a likeness" not in block
+        assert "## The attached image shows Sushi" in block and "do not ask what or whose it is" in block and "That is Sushi!" in block
+        assert "Sushi, a red cat (you have been shown Sushi in 2 image(s) before)." in block and "looks like Sushi" not in block
+        assert "Do not call it 'a cat' or 'this cat' or by a description" in block
         assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in block             # what she knows about him came back
-        assert "may show" not in block and calls == [10]                                    # looked at once, not twice
+        assert calls == [10]                                    # looked at once, not twice
         new = images.list_images(e)[0]
         assert new["named"] == [{"name": "Sushi", "said": False, "alike": new["named"][0]["alike"]}] and new["named"][0]["alike"] > 0.9
     finally:

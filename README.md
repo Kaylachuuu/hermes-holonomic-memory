@@ -496,6 +496,10 @@ hermes holonomic forget 52 --yes
 
 `recall` prints every candidate with its scores and whether it would have been injected.
 
+`hermes holonomic context` prints exactly what memory gave the agent for the most recent message:
+recalled memories, what was seen in an attached image, what was recognised. When she does not act on
+something, look there first to see whether she was told it.
+
 ## Testing
 
 ```
