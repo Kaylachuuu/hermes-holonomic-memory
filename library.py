@@ -43,7 +43,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 
 # Read as plain text.  Anything else is tried as text and left out if it turns out not to be.
 _SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv", ".idea", ".vscode"}
-_BINARY = {".exe", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj", ".lib", ".a", ".class", ".jar", ".pyc",
+_BINARY = {".exe", ".com", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj", ".lib", ".a", ".class", ".jar", ".pyc",
            ".zip", ".7z", ".rar", ".gz", ".tar", ".xz", ".bz2", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic",
            ".ico", ".tif", ".tiff", ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".avi", ".mov", ".ttf", ".otf",
            ".woff", ".woff2", ".db", ".sqlite", ".npy", ".npz", ".pth", ".safetensors", ".onnx", ".doc", ".xls", ".ppt",
@@ -202,24 +202,39 @@ def _docx_text(path: Path) -> str:
 def looks_binary(raw: bytes) -> bool:
     """Whether a file's bytes are a program or data and not something written to be read.
 
-    A small DOS .COM program can have no zero byte in it at all, so that test alone let a folder's old
-    executables in as pieces of nonsense.  Text is nearly all printable characters and has lines; machine code
-    is scattered across every byte value."""
+    Two mistakes to avoid, both made here before.  A small DOS .COM program can have no zero byte in it, so that
+    test alone lets programs in.  And old DOS text is full of bytes above 127 (box-drawing lines, block shading,
+    accented letters in the code page of the day) with the odd control code used as a symbol, so counting those
+    against a file throws out a project's own notes and source.  What tells them apart is that text has lines,
+    and few control codes among its characters."""
     sample = raw[:16000]
     if not sample:
         return False
     if b"\x00" in sample or sample[:2] in (b"MZ", b"ZM") or sample[:4] == b"\x7fELF":
         return True
     control = sum(1 for c in sample if c < 32 and c not in (9, 10, 13, 12, 26, 27))     # 26: the old DOS end-of-file mark
-    high = sum(1 for c in sample if c >= 127)
-    if control > max(2, len(sample) // 100):                 # more than 1 in 100 are control codes
+    if control > max(8, len(sample) // 20):                  # more than 1 in 20 are control codes
         return True
+    lines = sample.count(b"\n") + sample.count(b"\r")
+    high = sum(1 for c in sample if c >= 127)
+    if len(sample) >= 200 and lines * 400 < len(sample) and (control + high) * 10 > len(sample):
+        return True                                          # hardly a line break in it, and much that is not plain characters
+    return False
+
+
+def decode(raw: bytes) -> str:
+    """Bytes to text.  UTF-8 if it is; otherwise the old DOS code page when the file draws boxes with it, and the
+    Windows one when it does not."""
     try:
-        sample.decode("utf-8")
-        return False                                         # valid UTF-8 with few control codes: text in any language
+        return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         pass
-    return high > len(sample) * 0.15                         # an old code page has some accents and box lines, not this many
+    high = [c for c in raw[:16000] if c >= 128]
+    boxes = sum(1 for c in high if 0xB0 <= c <= 0xDF)        # shading, lines and corners in code page 437
+    try:
+        return raw.decode("cp437" if high and boxes * 2 >= len(high) else "cp1252")
+    except UnicodeDecodeError:
+        return raw.decode("cp437")
 
 
 def read_file(path: Path, max_bytes: int) -> str:
@@ -240,16 +255,14 @@ def read_file(path: Path, max_bytes: int) -> str:
     if ext == ".docx":
         return _docx_text(path)
     raw = path.read_bytes()
+    # DOS marked the end of a text file with one byte, and editors left whatever was in memory after it.
+    body = raw.split(b"\x1a", 1)[0]
+    if len(raw) > 200 and len(body) < len(raw) // 10:
+        raise LibraryError("not a text file")
+    raw = body
     if looks_binary(raw):
         raise LibraryError("not a text file")
-    for encoding in ("utf-8-sig", "cp1252"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        text = raw.decode("latin-1")
+    text = decode(raw).replace("\x1a", "")                    # without the old end-of-file mark
     return _html_text(text) if ext in _MARKUP else text
 
 
@@ -532,6 +545,7 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
         _save_info(root, name, data)                  # after each file, so a stopped build loses nothing
         if progress:
             progress(report)
+    data["left_out"] = report["skipped"][:2000]       # kept, so that it can be looked at after the build has scrolled away
     if not report["stopped"]:
         data["built"] = time.time()
     _save_info(root, name, data)

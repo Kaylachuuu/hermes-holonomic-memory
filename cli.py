@@ -141,8 +141,16 @@ def _library_cmd(engine, cfg, args) -> None:
             s = lib.summary(root, name)
             print(f"{name}: {s['pieces']} pieces from {s['files']} files, built {s['built']}\n  from {s['folder']}"
                   + (f"\n  {s['about']}" if s["about"] else ""))
+            if args.left_out:
+                gone = data.get("left_out") or []
+                print(f"  {len(gone)} file(s) left out:" if gone else "  No file was left out.")
+                for g in gone:
+                    print(f"    {g['file']}  ({g['why']})")
+                return
             for rel, f in sorted((data.get("files") or {}).items()):
                 print(f"  {len(f.get('ids') or []):5d}  {rel}")
+            if data.get("left_out"):
+                print(f"  {len(data['left_out'])} file(s) were left out: hermes holonomic library show {name} --left-out")
         elif what == "search":
             if len(items) < 2:
                 print('Usage: hermes holonomic library search NAME "what to look up"')
@@ -1361,6 +1369,7 @@ def register_cli(subparser) -> None:
     lb.add_argument("items", nargs="*", help="A library name; for 'create' the folder too; for 'search' the words")
     lb.add_argument("--about", help="With 'create': one line saying what the library is for")
     lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")
+    lb.add_argument("--left-out", action="store_true", help="With 'show': the files that were left out, and why")
     lb.add_argument("-n", type=int, default=6, help="With 'search': how many results")
     lb.add_argument("--width", type=int, default=300, help="Characters of text to show")
     bkp = subs.add_parser("backup", help="Write the whole store (memories, images, libraries, settings) to one zip file")

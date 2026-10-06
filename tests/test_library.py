@@ -374,7 +374,20 @@ def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
     assert not lib.looks_binary("Größe: 512 Bytes, naïve café".encode("utf-8")) and not lib.looks_binary("日本語のメモ".encode("utf-8"))
     assert not lib.looks_binary("Gr\xf6\xdfe: 512 Bytes \xc9\xcd\xcd\xbb box".encode("latin-1") + b" plain words follow here" * 4)
     assert not lib.looks_binary(b"")
+    # Old DOS text is not a program: a boxed notice, a BASIC program that draws with the box characters, a short
+    # file with a symbol or two in it.  A stricter check threw 39 of a project's own files out.
+    box = ("\u2554" + "\u2550" * 40 + "\u2557\r\n\u2551  VERSA  Copyright (C) Kayla             \u2551\r\n\u255a" + "\u2550" * 40 + "\u255d\r\n").encode("cp437")
+    assert not lib.looks_binary(box) and "\u2554\u2550\u2550" in lib.decode(box) and "Copyright" in lib.decode(box)
+    bas = ("\r\n".join(f'{i * 10} PRINT "' + "\u2588\u2592\u2591\u2500\u2502" * 6 + '"' for i in range(40))).encode("cp437")
+    assert not lib.looks_binary(bas)
+    assert not lib.looks_binary(b"Press \x10 to go on, \x03 to stop.\r\nThat is all.\r\n\x1a")
+    assert lib.decode("na\xefve caf\xe9".encode("latin-1")) == "na\u00efve caf\u00e9" and lib.decode("\u65e5\u672c".encode("utf-8")) == "\u65e5\u672c"
+    assert lib.looks_binary(bytes(rnd.randrange(1, 256) for _ in range(3000)))                # no zero byte, and no sense in it either
+    assert lib.looks_binary(bytes(rnd.choice(range(128, 256)) for _ in range(900)))           # one long run of bytes with no lines
     src = tmp_path / "os"; src.mkdir()
+    (src / "COPYRIGH.T").write_bytes(box)
+    (src / "PADDED.TXT").write_bytes(b"Notes on the loader.\r\nIt reads the kernel from the disk.\r\n\x1a" + bytes(90) + b"\xff\x00junk")
+    (src / "BLOB.DAT").write_bytes(b"\x1a" + bytes(range(1, 255)) * 3)
     (src / "boot.asm").write_text("; boot sector\nstart:\n    mov si, msg\n    call print\n    jmp $\n")
     (src / "CHOICE.COM").write_bytes(com)
     (src / "SHELL.EXE").write_bytes(b"MZ" + bytes(200))
@@ -383,8 +396,11 @@ def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
     lib.create(root, "my-os", str(src))
     try:
         report = lib.build(root, "my-os", HashEmbedder(), CFG)
-        assert report["added"] == 2 and {s["file"]: s["why"] for s in report["skipped"]} == {"CHOICE.COM": "not a text file", "SHELL.EXE": "not a text file"}
-        assert sorted(lib.info(root, "my-os")["files"]) == ["CONFIG.SYS", "boot.asm"]
+        assert report["added"] == 4 and {s["file"]: s["why"] for s in report["skipped"]} == {"BLOB.DAT": "not a text file", "CHOICE.COM": "not a text file", "SHELL.EXE": "not a text file"}
+        assert sorted(lib.info(root, "my-os")["files"]) == ["CONFIG.SYS", "COPYRIGH.T", "PADDED.TXT", "boot.asm"]
+        assert "junk" not in lib.read_file(src / "PADDED.TXT", 10**7) and lib.read_file(src / "PADDED.TXT", 10**7).endswith("disk.\r\n")
+        assert [g["file"] for g in lib.info(root, "my-os")["left_out"]] == ["BLOB.DAT", "CHOICE.COM", "SHELL.EXE"]       # kept for looking at later
+        assert "\u2551  VERSA  Copyright" in lib.search(root, ["my-os"], "VERSA copyright Kayla", HashEmbedder(), CFG, floor=0.05)[0]["text"]
     finally:
         lib.close_all(root)
 
