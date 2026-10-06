@@ -187,6 +187,20 @@ the person.
     hermes holonomic reflect sort --apply      do it
     hermes holonomic relabel ID --as project   put one fact right (or --as personal)
 
+**The same thing said twice.** Going over old ground, or simply being told something again, can leave a fact
+in memory two or three times. `reflect merge` finds statements that say the same thing and keeps one of each,
+the one that says more. Where the words settle it (the same words, or one statement going on where the other
+stops) no model is asked; statements close in meaning but worded differently are put to the reflection model.
+"Kayla has a cat named Sushi" and "Kayla has a cat named Theo" are as alike as two sentences get and are two
+facts: a pair that differs in one place, or in its numbers, is never merged. The statement not kept is
+retired, not destroyed: it leaves recall, stays on record, and can be brought back. Unattended sleep does the
+part that needs no model on its own (`merge_in_sleep`).
+
+    hermes holonomic reflect merge             show what would be retired
+    hermes holonomic reflect merge --apply     do it
+    hermes holonomic reflect merge --quick     only what the words settle; the model is not asked
+    hermes holonomic reflect merge --restore ID    bring a retired statement back
+
 Guards that run on every reflection. A name one letter off from one that is well established (it wrote
 "Kaylar" for "Kayla" through a whole run once) is put right before the fact is stored, and the report says so;
 an ordinary word is never touched, and neither is any word you have written yourself, so two real names a

@@ -780,6 +780,12 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
             report["calls"] += r.get("calls", [])
             if dry_run:                                  # a dry run does not advance, so one batch is all it can show
                 break
+    if "reflect" in wanted and _reflect.reflect_config(cfg).get("merge_in_sleep"):
+        try:                                             # the same thing learned twice is kept once; the words decide, no model
+            merged = _reflect.merge_facts(engine, cfg, apply=not dry_run, ask=False)
+            report["merged"] = [{"keep": m["keep"], "drop": m["drop"]} for m in merged["merged"]]
+        except Exception as exc:
+            report["errors"].append(f"merge: {exc}")
     if "consolidate" in wanted and sc["consolidate_enabled"]:
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report)
         consolidate(engine, cfg, call, report, dry_run=dry_run, key_fn=key_fn, now=now)

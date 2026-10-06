@@ -646,3 +646,45 @@ def test_facts_already_held_are_sorted_once(tmp_path):
     assert m.get(old)["kind"] == PROJECT_FACT
     # recall can be kept to one kind
     assert {h.id for h in m.recall("Kayla", k=10, min_score=0.0, only_kinds=(PROJECT_FACT,))} == {held["waves"], held["asm"], old}
+
+
+def test_statements_that_say_the_same_thing_twice_are_kept_once(tmp_path):
+    """Going over old ground several times left the same fact three times over."""
+    from holonomic.reflect import merge_facts, same_statement, FACT, PROJECT_FACT
+    assert same_statement("Kayla took a photo of a sunset at her former apartment.", "Kayla took a photo of a sunset at her former apartment.") == 1
+    assert same_statement("Kayla has a cat named Sushi.", "Kayla has a cat named Sushi who is described as a snuggly boy.") == 2
+    assert same_statement("Kayla believes that nature's beauty is unsurpassed by human-made things.", "Kayla believes that nature's beauty is unsurpassed.") == 1
+    assert same_statement("Kayla has a cat named Sushi.", "Kayla has a cat named Theo.") == 0             # one word apart, two facts
+    assert same_statement("Kayla's first GPU had 8gb of memory.", "Kayla's first GPU had 16gb of memory.") == 0
+    assert same_statement("Kayla has a cat.", "Kayla's friend Joe has a cat.") is None                     # not to be settled by words
+    assert same_statement("Kayla's vision was a meta-platform that could be skinned.", "Kayla wanted a skinnable platform that emulates others.") is None
+    m, ids = seeded(tmp_path)
+
+    def fact(text, kind=FACT):
+        return m.remember(text, kind=kind, session="reflection", chain=False)[0]
+    sushi, theo = fact("Kayla has a cat named Sushi."), fact("Kayla has a cat named Theo.")
+    snug = fact("Kayla has a cat named Sushi who is described as a snuggly boy.")
+    s1, s2, s3 = (fact("Kayla took a photo of a sunset at her former apartment.") for _ in range(3))
+    v1 = fact("Kayla's operating system was to be a meta-platform that could be skinned and emulate other operating systems.", PROJECT_FACT)
+    v2 = fact("Kayla's operating system was to be a meta-platform that could emulate other operating systems and have a skinnable GUI.")
+    note = m.remember("I like a tidy answer.", kind="self_note", session="reflection", chain=False)[0]
+    m.reinforce([s2], 0.5)
+    asked = {}
+
+    def llm(system, user, step):
+        asked[step] = user
+        n = next(i for i, block in enumerate(user.split("PAIR ")[1:], 1) if "meta-platform" in block)
+        return json.dumps({"verdicts": [{"pair": n, "same": True, "keep": 2}, {"pair": 99, "same": True, "keep": 1}]})
+    quick = merge_facts(m, {}, ask=False)
+    pairs = {(x["keep"], x["drop"]) for x in quick["merged"]}
+    assert (snug, sushi) in pairs and {x["drop"] for x in quick["merged"]} == {sushi, s1, s3}      # the stronger of three alike is kept
+    assert all(x["keep"] == s2 for x in quick["merged"] if x["drop"] in (s1, s3)) and quick["kept_apart"] >= 1 and quick["asked"] == 0
+    assert m.get(sushi)["trust"] > 0                                                                # nothing changed yet
+    report = merge_facts(m, {}, llm=llm, apply=True)
+    assert "Sushi" not in asked["same"] or "Theo" not in asked["same"].split("Sushi")[0][-200:]     # the two cats were never put to the model as one
+    assert {x["drop"] for x in report["merged"]} == {sushi, s1, s3, v1} and report["asked"] >= 1
+    assert m.get(v1)["trust"] == 0 and m.get(v1)["meta"]["superseded_by"] == v2 and m.get(theo)["trust"] > 0 and m.get(note)["trust"] > 0
+    found = {h.id for h in m.recall("Kayla has a cat named Sushi", k=10, min_score=0.0, min_trust=0.15)}
+    assert snug in found and theo in found and sushi not in found
+    assert merge_facts(m, {}, ask=False)["merged"] == []                                            # the retired are not found again
+    assert m.unsupersede(sushi) and m.get(sushi)["trust"] > 0 and "superseded_by" not in m.get(sushi)["meta"] and not m.unsupersede(theo)

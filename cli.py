@@ -1140,6 +1140,28 @@ def _reflect(engine, cfg, args) -> None:
     from .provider import extract_keys
     from .reflect import ReflectionError, pending, reflect_config, reflect_once
     rc = reflect_config(cfg)
+    if args.reflect_action == "merge":
+        from .reflect import merge_facts
+        if args.restore:
+            for mid in args.restore:
+                print(f"[#{mid}] " + ("brought back" if engine.unsupersede(mid) else "is not a retired statement"))
+            return
+        try:
+            report = merge_facts(engine, cfg, apply=bool(args.apply), ask=not args.quick)
+        except ReflectionError as exc:
+            print(f"Merging failed: {exc}")
+            return
+        if not report["merged"]:
+            print("Nothing says the same thing twice.")
+        for m in report["merged"]:
+            print(f"  keep   [#{m['keep']}] {_clip(m['kept'], 150)}\n  {'retired' if args.apply else 'retire '} [#{m['drop']}] {_clip(m['dropped'], 150)}   ({m['how']})")
+        print(f"{len(report['merged'])} statement(s) {'retired' if args.apply else 'would be retired'}; {report['kept_apart']} close pair(s) "
+              f"are different facts and were left alone" + (f"; the model was asked about {report['asked']} pair(s)." if report["asked"] else "."))
+        if report["merged"] and not args.apply:
+            print("Nothing was changed. If this looks right, run it again with --apply.")
+        elif report["merged"]:
+            print("A retired statement leaves recall but stays on record. To bring one back: hermes holonomic reflect merge --restore ID")
+        return
     if args.reflect_action == "sort":
         from .reflect import sort_facts
         try:
@@ -1337,8 +1359,10 @@ def register_cli(subparser) -> None:
     fg.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     fg.add_argument("--yes", action="store_true", help="Actually remove them (without this, they are only shown)")
     ref = subs.add_parser("reflect", help="Reflection: turn on or off, check, or run once now")
-    ref.add_argument("reflect_action", choices=["status", "on", "off", "now", "sort"], nargs="?", default="status")
-    ref.add_argument("--apply", action="store_true", help="With 'sort': make the changes (without this, they are only shown)")
+    ref.add_argument("reflect_action", choices=["status", "on", "off", "now", "sort", "merge"], nargs="?", default="status")
+    ref.add_argument("--apply", action="store_true", help="With 'sort' and 'merge': make the changes (without this, they are only shown)")
+    ref.add_argument("--quick", action="store_true", help="With 'merge': only what the words settle; do not ask the model about rewordings")
+    ref.add_argument("--restore", type=int, nargs="+", metavar="ID", help="With 'merge': bring back statements that were retired")
     ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")
     ref.add_argument("--host", help="Ollama server for that model, if different from the embedding server (with 'on')")
     ref.add_argument("--depth", type=int, choices=[1, 2, 3],

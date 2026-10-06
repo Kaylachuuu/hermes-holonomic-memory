@@ -34,7 +34,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,8 @@ REFLECT_DEFAULTS: Dict[str, Any] = {
     "reflect_idle_seconds": 300,      # and the conversation has been quiet this long
     "reflect_batch": 60,              # memories read per pass
     "reflect_timeout": 600.0,
+    "merge_min_similarity": 0.8,      # statements closer than this are looked at as possibly saying the same thing
+    "merge_in_sleep": True,           # unattended sleep retires a statement that repeats another word for word (no model asked)
     "reflect_max_tokens": 2000,       # cap on each reply; without one a model can generate until its context is full
     # Let a reasoning model think first.  Off by default: on the model this was developed against,
     # thinking ran through its whole token budget without answering in three runs out of four (about
@@ -335,8 +337,8 @@ leave that out now. Otherwise keep what is already in it unless a new statement 
 person, not the conversation, and never call them "a user". Plain prose, at most 150 words; anything past that is \
 cut off and lost.
 - projects_profile: what the user is working on, from the statements marked "fact about a project of the user's" \
-and the current one. One or two sentences for each project: what it is, what it is for, where it stands. Not how \
-it works inside. Plain prose, at most 100 words. If there is nothing to say, return an empty string.
+and the current one. One or two sentences for each project: what it is, what it is for, where it stands. Mention every project. Not how \
+it works inside: no mechanisms, no names of tools or parts. Plain prose, at most 100 words. If there is nothing to say, return an empty string.
 - self_profile: who the assistant has become beyond the FOUNDATION, first person: its own opinions, tastes, \
 interests, humour and habits, as they actually showed up. Leave out its name, its role and anything else the \
 FOUNDATION already says. Do not describe the assistant by what it understands about the user or how it supports \
@@ -860,7 +862,7 @@ needs in order to talk with them and relate to them well: who they are, the peop
 name, their age and birthday if known, where they live, what they do for a living, their likes and dislikes, \
 beliefs and preferences. Their projects do not belong in it. Never call them "a user". Plain prose, at most 150 words.
 - projects_profile: what the user is working on, from the PROJECT statements only. One or two sentences for each \
-project: what it is, what it is for, where it stands. Not how it works inside. Plain prose, at most 100 words. An \
+project: what it is, what it is for, where it stands. Mention every project. Not how it works inside: no mechanisms, no names of tools or parts. Plain prose, at most 100 words. An \
 empty string if there are no PROJECT statements.
 
 PERSONAL:
@@ -886,8 +888,8 @@ def sort_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
     else:
         call = _wrap_test_llm(llm)
     budget = int(rc["reflect_max_tokens"])
-    facts = sorted(engine.recent(100000, kind=FACT), key=lambda m: m["id"])
-    already = sorted(engine.recent(100000, kind=PROJECT_FACT), key=lambda m: m["id"])
+    facts = sorted((m for m in engine.recent(100000, kind=FACT) if m["trust"] > 0), key=lambda m: m["id"])      # not the retired
+    already = sorted((m for m in engine.recent(100000, kind=PROJECT_FACT) if m["trust"] > 0), key=lambda m: m["id"])
     moving: List[dict] = []
     for start in range(0, len(facts), batch):
         group = facts[start:start + batch]
@@ -927,6 +929,133 @@ def sort_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
         for who, text in report["profiles"].items():
             if text != engine.profile(who):
                 engine.set_profile(who, text)
+    return report
+
+
+_SAME = """\
+Below are pairs of statements from an assistant's memory. For each pair, decide whether the two say the same \
+thing, so that keeping both adds nothing.
+
+They are the SAME only if they are about the same person or thing and state the same fact, one perhaps in other \
+words or with more detail. They are DIFFERENT if they name different people, animals, places, dates or amounts, if \
+they are about different occasions, or if each says something the other does not.
+
+For each pair give "pair" (its number), "same" (true or false) and "keep": 1 or 2, the statement that says more \
+(1 if they say the same amount).
+
+{pairs}"""
+_SAME_SCHEMA = {"type": "object", "properties": {"verdicts": {"type": "array", "items": {"type": "object", "properties": {
+    "pair": {"type": "integer"}, "same": {"type": "boolean"}, "keep": {"type": "integer"}}, "required": ["pair", "same", "keep"]}}},
+    "required": ["verdicts"]}
+MERGE_KINDS = ((FACT, PROJECT_FACT), (SELF_NOTE,), (BOND_NOTE,), (INSIGHT,))
+
+
+def _words(text: str) -> List[str]:
+    """The words that carry a statement, in order: no little words, plurals and possessives levelled."""
+    from .engine import _STOPWORDS
+    out = []
+    for tok in re.findall(r"[a-z0-9]+", text.lower().replace("\u2019", "'").replace("'s ", " ").replace("'", "")):
+        if tok in _STOPWORDS or (len(tok) < 2 and not tok.isdigit()):
+            continue
+        out.append(tok[:-1] if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss") else tok)
+    return out
+
+
+def same_statement(a: str, b: str) -> Optional[int]:
+    """Whether two statements can be told to be the same without asking anyone: 1 or 2 for the one to keep (the
+    one that says more), 0 if they are certainly different facts, None if it cannot be told from the words.
+
+    'Kayla has a cat named Sushi' and 'Kayla has a cat named Theo' are as alike as two sentences get and are two
+    facts: where the words differ in one place and nowhere else, or the numbers differ, they are different."""
+    wa, wb = _words(a), _words(b)
+    if not wa or not wb:
+        return None
+    na, nb = {w for w in wa if any(c.isdigit() for c in w)}, {w for w in wb if any(c.isdigit() for c in w)}
+    if na and nb and na != nb:
+        return 0                                    # different numbers: different facts
+    if set(wa) == set(wb):
+        return 1
+    if len(wa) == len(wb) and 0 < sum(x != y for x, y in zip(wa, wb)) <= 2:
+        return 0                                    # the same sentence with something else in one slot
+    # One goes on where the other stops: the same statement with more said at the end.  (Merely containing the
+    # other's words is not enough: "Kayla has a cat" is not "Kayla's friend Joe has a cat".)
+    if len(wa) < len(wb) and wb[:len(wa)] == wa:
+        return 2
+    if len(wb) < len(wa) and wa[:len(wb)] == wb:
+        return 1
+    return None
+
+
+def merge_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None, apply: bool = False,
+                ask: bool = True) -> Dict[str, Any]:
+    """Find statements that say the same thing twice and keep one of each: the one that says more.  The other is
+    retired, not destroyed: it leaves recall and stays on record, and can be brought back.
+
+    Pairs that the words settle are settled without a model.  With `ask`, pairs that are close in meaning but
+    worded differently are put to the reflection model.  Nothing is changed unless `apply` is set."""
+    rc = reflect_config(cfg)
+    floor = float(rc.get("merge_min_similarity", 0.8))
+    report: Dict[str, Any] = {"calls": [], "merged": [], "kept_apart": 0, "asked": 0, "applied": apply}
+    pairs: List[Tuple[int, int, float]] = []
+    for kinds in MERGE_KINDS:
+        pairs += engine.near_pairs(kinds, min_similarity=min(floor, 0.6))      # the words can settle a pair further apart than a model is asked about
+    pairs.sort(key=lambda t: -t[2])
+    texts: Dict[int, dict] = {}
+    for a, b, _ in pairs:
+        for mid in (a, b):
+            if mid not in texts:
+                texts[mid] = engine.get(mid) or {}
+    decided: List[Tuple[int, int, str]] = []       # (keep, drop, how)
+    unsure: List[Tuple[int, int]] = []
+    for a, b, sim in pairs:
+        ta, tb = texts[a].get("text", ""), texts[b].get("text", "")
+        if not ta or not tb:
+            continue
+        verdict = same_statement(ta, tb)
+        if verdict == 0:
+            report["kept_apart"] += 1
+        elif verdict in (1, 2):
+            decided.append((a, b, "the same words") if verdict == 1 else (b, a, "says more"))
+        elif sim >= floor:
+            unsure.append((a, b))
+    if ask and unsure:
+        if llm is None:
+            if not rc["reflect_model"]:
+                raise ReflectionError("No reflection model is set. Run: hermes holonomic reflect on --model NAME")
+            call = _make_llm(rc, report)
+        else:
+            call = _wrap_test_llm(llm)
+        for start in range(0, len(unsure), 12):
+            group = unsure[start:start + 12]
+            shown = "\n\n".join(f"PAIR {n}\n  1: {' '.join(texts[a]['text'].split())}\n  2: {' '.join(texts[b]['text'].split())}"
+                                 for n, (a, b) in enumerate(group, 1))
+            verdicts = _parse(call("same", _SYSTEM, _SAME.format(pairs=shown), _SAME_SCHEMA, int(rc["reflect_max_tokens"]))).get("verdicts")
+            report["asked"] += len(group)
+            for v in verdicts if isinstance(verdicts, list) else []:
+                if isinstance(v, dict) and isinstance(v.get("pair"), (int, float)) and 1 <= int(v["pair"]) <= len(group) and v.get("same") is True:
+                    a, b = group[int(v["pair"]) - 1]
+                    decided.append((b, a, "the model: same, in other words") if v.get("keep") == 2 else (a, b, "the model: same, in other words"))
+    gone: Dict[int, int] = {}                      # retired -> what it was merged into
+
+    def standing(mid: int) -> int:
+        while mid in gone:
+            mid = gone[mid]
+        return mid
+    for keep, drop, how in decided:
+        keep, drop = standing(keep), standing(drop)
+        if keep == drop:
+            continue
+        if how == "the same words" and float(texts[drop].get("strength", 0)) > float(texts[keep].get("strength", 0)):
+            keep, drop = drop, keep                # nothing to choose between them: keep the stronger
+        gone[drop] = keep
+        report["merged"].append({"keep": keep, "drop": drop, "how": how, "kept": texts[keep]["text"], "dropped": texts[drop]["text"]})
+    for m in report["merged"]:                     # a keeper that was itself merged later: say where it ended up
+        m["keep"] = standing(m["keep"])
+        m["kept"] = texts[m["keep"]]["text"]
+    if apply:
+        for m in report["merged"]:
+            engine.supersede(m["drop"], m["keep"], reason=f"said the same as #{m['keep']}")
+            engine.reinforce([m["keep"]], 0.1)
     return report
 
 

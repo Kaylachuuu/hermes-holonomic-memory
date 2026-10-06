@@ -877,6 +877,46 @@ class HolonomicMemory:
                 f"SELECT id, text, kind FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
             return [found[i] for i in ids if i in found]
 
+    def near_pairs(self, kinds: tuple[str, ...] | list[str], *, min_similarity: float = 0.8, min_trust: float = 0.15,
+                   limit: int = 2000) -> list[tuple[int, int, float]]:
+        """Pairs of memories of these kinds that are close to one another, closest first, from the vectors already
+        stored.  (older id, newer id, similarity).  Retired memories are left out."""
+        with self._lock, _single_threaded():
+            self._sync()
+            codes = [self._kind_codes[k] for k in kinds if k in self._kind_codes]
+            if not codes:
+                return []
+            pool = np.nonzero(np.isin(self._kind.v, codes) & (self._trust.v >= min_trust))[0]
+            if pool.size < 2:
+                return []
+            X = self._X.a[pool]
+            out: list[tuple[int, int, float]] = []
+            for start in range(0, pool.size, 512):                     # in blocks: a large store stays within memory
+                sims = X[start:start + 512] @ X.T
+                for i, j in zip(*np.nonzero(sims >= min_similarity)):
+                    a, b = start + int(i), int(j)
+                    if a < b:
+                        ia, ib = int(self._ids.a[pool[a]]), int(self._ids.a[pool[b]])
+                        out.append((min(ia, ib), max(ia, ib), float(sims[i, j])))
+            out.sort(key=lambda t: -t[2])
+            return out[:limit]
+
+    def unsupersede(self, memory_id: int, trust: float = 0.6) -> bool:
+        """Bring a retired memory back into recall."""
+        with self._lock:
+            row = self._row.get(memory_id)
+            current = self._db.execute("SELECT meta FROM memories WHERE id = ? AND forgotten = 0", (memory_id,)).fetchone()
+            if row is None or current is None:
+                return False
+            meta = json.loads(current["meta"] or "{}")
+            if "superseded_at" not in meta:
+                return False
+            for key in ("superseded_by", "superseded_at", "superseded_reason"):
+                meta.pop(key, None)
+            self._trust.a[row] = trust
+            self._db.execute("UPDATE memories SET trust = ?, meta = ? WHERE id = ?", (trust, json.dumps(meta), memory_id))
+            return True
+
     def supersede(self, old_id: int, new_id: int | None = None, reason: str = "") -> bool:
         """Retire a memory without deleting it: it leaves recall but stays on record,
         so the agent can still know that something used to be true."""
