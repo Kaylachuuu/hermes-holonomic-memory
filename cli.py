@@ -1049,13 +1049,16 @@ def _reflect(engine, cfg, args) -> None:
             cfg = dict(cfg, reflect_think=bool(args.think))
         if args.depth:
             cfg = dict(cfg, reflect_depth=args.depth)
+        accepted: list = []                          # what earlier passes of this run took in, for the profiles
+
         def one(start_after=None):
             try:
                 t0 = time.perf_counter()
                 from hermes_constants import get_hermes_home
                 from .reflect import read_foundation
                 report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
-                                      foundation=read_foundation(get_hermes_home()), start_after=start_after)
+                                      foundation=read_foundation(get_hermes_home()), start_after=start_after, earlier=accepted)
+                accepted.extend(report.get("accepted") or [])
             except ReflectionError as exc:
                 from .reflect import LAST_CALL
                 print(f"Reflection failed: {exc}")
@@ -1074,6 +1077,8 @@ def _reflect(engine, cfg, args) -> None:
                     print(f"  CHECK dropped ({c['kind']}): {c['was']}")
                 elif c["verdict"] == "unquote":
                     print(f"  UNQUOTED ({c['kind']}), not the user's own words: {c['was']}\n             ->  {c['now']}")
+                elif c["verdict"] == "respell":
+                    print(f"  NAME put right ({c['kind']}): {c['was']}\n             ->  {c['now']}")
                 else:
                     print(f"  CHECK rewrote ({c['kind']}): {c['was']}\n             ->  {c['now']}")
             for kind, items in (report.get("proposed") or {}).items():
@@ -1088,6 +1093,9 @@ def _reflect(engine, cfg, args) -> None:
                       f"{', '.join('#' + str(s) for s in item['sources'])}")
             for who, text in (report.get("profiles") or {}).items():
                 print(f"  profile ({who}): {text or '(empty)'}")
+            for who, lost in (report.get("profile_cut") or {}).items():
+                print(f"  NOTE: the profile ({who}) came back too long and its last {lost} characters were cut. "
+                      f"Raise profile_max_chars if what was cut matters.")
             if not args.dry_run:
                 print(f"Stored {len(report['stored'])} new, reinforced {len(report['reinforced'])} existing, "
                       f"profiles updated: {', '.join(report['profiles_updated']) or 'none'}")

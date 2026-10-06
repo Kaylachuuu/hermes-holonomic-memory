@@ -174,6 +174,13 @@ cats). `hermes holonomic reflect now --again 3` goes over the last three days of
 Facts she already has are reinforced, not stored twice, and the mark for what is new does not move
 back. `--dry-run` shows what it would add.
 
+Two guards run on every reflection. A name one letter off from one that is well established (it wrote
+"Kaylar" for "Kayla" through a whole run once) is put right before the fact is stored, and the report says so;
+a word you wrote yourself is never touched. And the profiles are written from everything a run took in, not
+only its last pass. A profile is told to begin with the person's life (people and animals by name) and to
+shorten project detail to make room; if one still comes back longer than `profile_max_chars` (1200), the report
+says how much was cut.
+
 ## Short-term and long-term memory, and sleep
 
 Conversation as it happened is short-term memory. Facts, notes, profiles and accounts of past

@@ -118,6 +118,47 @@ def is_complete(text: str) -> bool:
     return bool(_ENDS_RE.search(text.strip()))
 
 
+def _edits(a: str, b: str) -> int:
+    """How many single-letter changes turn one word into another (insert, delete or replace)."""
+    if abs(len(a) - len(b)) > 2:
+        return 3
+    row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        last, row[0] = row[0], i
+        for j, cb in enumerate(b, 1):
+            last, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, last + (ca != cb))
+    return row[-1]
+
+
+def respell_names(text: str, known: str, own: str = "") -> str:
+    """Put right a name that is one letter off from one that is well established.  A reflection wrote 'Kaylar'
+    for 'Kayla' and repeated it through seven facts; the checker, shown the same misspelling in every statement,
+    let it stand.
+
+    Only a capitalised word of four letters or more is touched, and only towards a word that occurs in `known`
+    (the user's lines, their profile, facts already held) at least three times, always with its capital.  A word
+    the user wrote themselves (`own`) is never touched, and neither is one that is itself common in `known`:
+    two names a letter apart can both be real."""
+    counts: Dict[str, int] = {}
+    for w in re.findall(r"\b[A-Z][a-z]{3,}\b", known or ""):
+        counts[w] = counts.get(w, 0) + 1
+    lower = set(re.findall(r"\b[a-z]+\b", known or ""))
+    # A name keeps its capital in the middle of a sentence; 'There' and 'These' have theirs only at the start.
+    inside = set(re.findall(r"(?<=[a-z,;:] )[A-Z][a-z]{3,}\b", known or ""))
+    names = [w for w, n in counts.items() if n >= 3 and w in inside and w.lower() not in lower]
+    if not names:
+        return text
+    mine = {w.lower() for w in re.findall(r"[A-Za-z]+", own or "")}
+
+    def fix(m):
+        word = m.group(0)
+        if word.lower() in mine or word.lower() in lower:
+            return word
+        near = [n for n in names if n != word and _edits(word, n) == 1 and counts[n] >= 4 * counts.get(word, 0)]
+        return near[0] if len(near) == 1 else word
+    return re.sub(r"\b[A-Z][a-z]{3,}\b", fix, text)
+
+
 def trim_to_sentence(text: str) -> str:
     """Drop a trailing fragment, keeping whole sentences.  Empty if there is no whole sentence."""
     text = text.strip()
@@ -216,8 +257,11 @@ assistant that contradicts it.
 
 Write:
 - user_profile: a portrait of the user as a person, including what is new. Describe the person, not the \
-conversation, and never call them "a user". Keep everything already in it unless a new statement contradicts it. \
-Plain prose, at most 150 words.
+conversation, and never call them "a user". Plain prose, at most 150 words; anything past that is cut off and lost. \
+Begin with their life: who they are, the people and animals in it by name, where they live, what they do. Their \
+projects and interests come after that. Keep everything already in it unless a new statement contradicts it, but when \
+it would run past 150 words, make room by saying the technical detail of a project more briefly. Never leave out a \
+person or an animal that has a name to keep a technical detail.
 - self_profile: who the assistant has become beyond the FOUNDATION, first person: its own opinions, tastes, \
 interests, humour and habits, as they actually showed up. Leave out its name, its role and anything else the \
 FOUNDATION already says. Do not describe the assistant by what it understands about the user or how it supports \
@@ -488,12 +532,16 @@ def _wrap_test_llm(llm: Callable[..., str]) -> Callable[[str, str, str, dict, in
 
 def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None,
                  dry_run: bool = False, key_fn: Optional[Callable[[str], List[str]]] = None,
-                 foundation: str = "", start_after: Optional[int] = None) -> Dict[str, Any]:
+                 foundation: str = "", start_after: Optional[int] = None,
+                 earlier: Optional[List[dict]] = None) -> Dict[str, Any]:
     """One reflection pass.  Returns a report; stores nothing when dry_run is set.
 
     Normally it reads what is new since the last pass.  `start_after` makes it read from just after that memory
     instead, to go over conversation it has read before: a pass can miss something (it wrote down one of two
-    cats).  Going over old ground never moves the mark for what is new backwards."""
+    cats).  Going over old ground never moves the mark for what is new backwards.
+
+    `earlier` is what earlier passes of the same run accepted (a report's "accepted").  The profiles are written
+    from those as well, so that what one pass learned is not left out by the next."""
     rc = reflect_config(cfg)
     depth = rc["reflect_depth"]
     report: Dict[str, Any] = {"read": 0, "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run,
@@ -551,11 +599,14 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                    (INSIGHT, _clean_items(data.get("insights"), valid, 3, report["cut_off"]))]
     items = [dict(item, kind=kind) for kind, group in groups for item in group]
 
+    # Names already established about the user (their own name above all).
+    known = " ".join([current["user"]] + [f["text"] for f in existing]
+                     + [m["text"] for m in batch if m["kind"] != "said_assistant"])
+    own = " ".join(m["text"] for m in batch if m["kind"] != "said_assistant")
+    for item in superseded:
+        item["replacement"] = respell_names(item["replacement"], known, own)
     # ---- step 2: check each item against only the lines it cites
     if depth >= 3 and items:
-        # Names already established about the user (their own name above all) are not news to the checker.
-        known = " ".join([current["user"]] + [f["text"] for f in existing]
-                         + [m["text"] for m in batch if m["kind"] != "said_assistant"])
         verdicts = _parse(call("check", _SYSTEM, build_check_prompt(items, by_id, known), _CHECK_SCHEMA, budget)).get("verdicts")
         decided: Dict[int, dict] = {}
         for v in verdicts if isinstance(verdicts, list) else []:
@@ -583,8 +634,13 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
             if fixed != item["text"]:
                 report["checked"].append({"verdict": "unquote", "kind": item["kind"], "was": item["text"], "now": fixed})
                 item = dict(item, text=fixed)
+        respelt = respell_names(item["text"], known, own)
+        if respelt != item["text"]:
+            report["checked"].append({"verdict": "respell", "kind": item["kind"], "was": item["text"], "now": respelt})
+            item = dict(item, text=respelt)
         unquoted.append(item)
     items = unquoted
+    report["accepted"] = [{"kind": i["kind"], "text": i["text"]} for i in items]
     report["proposed"] = {kind: [{"text": i["text"], "sources": i["sources"]} for i in items if i["kind"] == kind]
                           for kind in (FACT, SELF_NOTE, BOND_NOTE, INSIGHT)}
 
@@ -592,12 +648,16 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     limit = int(rc["profile_max_chars"])
     new_profiles = dict(current)
     if items or superseded:
-        pdata = _parse(call("profiles", _SYSTEM, build_profile_prompt(items, superseded, current, foundation, depth),
+        told = [e for e in (earlier or []) if e.get("text") and e["text"] not in {i["text"] for i in items}] + items
+        pdata = _parse(call("profiles", _SYSTEM, build_profile_prompt(told, superseded, current, foundation, depth),
                             _PROFILE_SCHEMA, budget))
         wanted = {"user": "user_profile"} if depth <= 1 else {"user": "user_profile", "self": "self_profile",
                                                               "us": "relationship_profile"}
         for who, key in wanted.items():
-            text = trim_to_sentence(" ".join(str(pdata.get(key) or "").split())[:limit])
+            whole = respell_names(" ".join(str(pdata.get(key) or "").split()), known, own)
+            text = trim_to_sentence(whole[:limit])
+            if len(whole) > limit:                   # said out loud: what was cut is not in the profile
+                report.setdefault("profile_cut", {})[who] = len(whole) - len(text)
             if len(text) >= 20:
                 new_profiles[who] = text
     report["profiles"] = new_profiles

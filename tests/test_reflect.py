@@ -446,3 +446,51 @@ def test_reflection_can_go_over_old_ground_without_losing_its_place(tmp_path):
     reflect_once(m, {}, llm=llm, start_after=min(ids.values()), dry_run=True)
     assert pending(m) == 1
     assert m.first_id_since(0) == min(r["id"] for r in m.recent(50)) and m.first_id_since(time.time() + 60) is None
+
+
+def test_a_name_one_letter_off_is_put_right(tmp_path):
+    """A reflection wrote 'Kaylar' through a whole run and the checker let it stand."""
+    from holonomic.reflect import reflect_once, respell_names
+    known = "My name is Kayla. Kayla works in IT. Kayla has a cat. Theo is there, and Thea too. Thea is a friend. Thea sings."
+    assert respell_names("Kaylar's cat is called Theo.", known) == "Kayla's cat is called Theo."
+    assert respell_names("Kayl works in IT.", known) == "Kayla works in IT."
+    assert respell_names("Kayla has a cat.", known) == "Kayla has a cat."
+    assert respell_names("Theo sleeps on the bed.", known) == "Theo sleeps on the bed."        # in what is known: a name of its own
+    assert respell_names("Thep sleeps on the bed.", known, own="my friend Thep") == "Thep sleeps on the bed."   # her own word
+    assert respell_names("Kaylee came to visit.", known) == "Kaylee came to visit."            # two letters off: someone else
+    assert respell_names("Where does Kayla work?", "There it is. There you go. There now. Kayla") == "Where does Kayla work?"
+    # a misspelling already among the facts does not protect itself, while the right name is far more common
+    assert respell_names("Kaylar likes tea.", known + " Kayla" * 6 + " Kaylar") == "Kayla likes tea."
+    m, ids = seeded(tmp_path)
+    m.remember("Kayla here again. Kayla is my name, and I have a cat called Theo.", kind="said_user", session="s1")
+    last = m.recent(1)[0]["id"]
+    seen = {}
+
+    def llm(system, user, step):
+        seen[step] = user
+        return answer(ids, user_facts=[{"text": "Kaylar has a cat called Theo.", "sources": [last]}], self_notes=[],
+                      user_profile="Kaylar works in IT and has a cat called Theo.")
+    report = reflect_once(m, {}, llm=llm)
+    assert [c for c in report["checked"] if c["verdict"] == "respell"][0]["now"] == "Kayla has a cat called Theo."
+    assert "Kayla has a cat called Theo." in {r["text"] for r in m.recent(10)}
+    assert "(fact about the user) Kayla has a cat called Theo." in seen["profiles"]
+    assert m.profile("user") == "Kayla works in IT and has a cat called Theo."
+
+
+def test_the_profile_is_written_from_everything_a_run_took_in(tmp_path):
+    """Going over old ground reads in passes.  The profile used to be written from the last pass alone, and one cut
+    for length said nothing about it."""
+    from holonomic.reflect import reflect_once, _PROFILES
+    m, ids = seeded(tmp_path)
+    seen = {}
+
+    def llm(system, user, step):
+        seen[step] = user
+        return answer(ids, user_profile="Kayla works in IT. " + "She likes long walks by the lake very much. " * 40)
+    earlier = [{"kind": "fact", "text": "Kayla has a cat named Theo."}, {"kind": "fact", "text": "Kayla works in IT."}]
+    report = reflect_once(m, {}, llm=llm, earlier=earlier)
+    assert "(fact about the user) Kayla has a cat named Theo." in seen["profiles"]
+    assert seen["profiles"].count("Kayla works in IT.") == 1 or seen["profiles"].count("(fact about the user) Kayla works in IT.") == 1
+    assert {"kind": "fact", "text": "Kayla works in IT."} in report["accepted"]
+    assert report["profile_cut"]["user"] > 0 and len(m.profile("user")) <= 1200 and m.profile("user").endswith(".")
+    assert "Never leave out a person or an animal that has a name" in _PROFILES and "cut off and lost" in _PROFILES
