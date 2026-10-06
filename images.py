@@ -423,67 +423,107 @@ def _seer(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
     return see
 
 
-_CHOOSE = """\
-Here are {n} pictures, numbered in the order given. Each is an attempt to show this moment from a dream you had:
+_ATTEMPT = """\
+This picture is one attempt to show this moment from a dream you had:
 {scene}{remembered}
 
-Choose the one that shows the moment best. What the moment describes should be there, things should look right (no \
-malformed faces, hands or animals), and it should feel like the dream.
+Look at it closely and write:
+- shows: one or two sentences on what is in the picture, and anything the moment describes that is missing from it.
+- faults: anything that looks wrong: malformed faces, hands, animals or objects, garbled writing, a signature or watermark, parts that \
+do not belong. An empty string if nothing looks wrong.
+- score: from 1 to 10, how well it shows the moment. Keep 9 and 10 for a picture with everything in it and nothing wrong."""
+
+_ATTEMPT_SCHEMA = {"type": "object", "properties": {"shows": {"type": "string"}, "faults": {"type": "string"}, "score": {"type": "integer"}},
+                   "required": ["shows", "faults", "score"]}
+
+_CHOOSE = """\
+{n} pictures were drawn of this moment from a dream you had:
+{scene}{remembered}
+
+You looked at each one in turn. These are your notes:
+{notes}
+
+Choose the one to keep: what the moment describes should be there, things should look right, and it should feel like the dream.
 
 Write:
-- best: the number of the picture you choose, from 1 to {n}.
-- why: one sentence on why that one."""
+- best: the number of the attempt you choose, from 1 to {n}.
+- why: one sentence on why that one and not the others."""
 
 _CHOOSE_SCHEMA = {"type": "object", "properties": {"best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best", "why"]}
 
 
 def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
+    """Ask the vision model about dream pictures: with one picture to look at it, with none to compare her notes."""
     from . import reflect as _reflect
     if not ic["image_model"]:
         raise ImageError("No vision model is set.")
 
-    def look_at(prompt: str, jpegs: List[bytes], schema: dict, max_tokens: int, think: bool = False) -> str:
+    def look_at(step: str, prompt: str, jpegs: List[bytes], schema: dict, max_tokens: int, think: bool = False) -> str:
+        _reflect.LAST_CALL.clear()
         try:
             out = _reflect.ollama_chat(ic["image_host"], ic["image_model"], "You are choosing between pictures of your own dream. "
                                        "Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt, timeout=float(ic["image_timeout"]) * (3 if think else 1),
                                        temperature=0.2, max_tokens=max_tokens, think=think, schema=schema,
-                                       images=[base64.b64encode(j).decode() for j in jpegs])
+                                       images=[base64.b64encode(j).decode() for j in jpegs] or None)
         except Exception as exc:
-            report.setdefault("calls", []).append({"step": "choose", "think": think, "failed": str(exc)[:120]})
+            report.setdefault("calls", []).append(dict(_reflect.LAST_CALL, step=step, think=think, failed=str(exc)[:120]))
             raise
-        report.setdefault("calls", []).append(dict(_reflect.LAST_CALL, step="choose"))
+        report.setdefault("calls", []).append(dict(_reflect.LAST_CALL, step=step))
         return out
     return look_at
 
 
 def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
               report: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
-    """Which of several attempts at a dream picture she keeps: (index, her reason).  She looks at them all and
-    chooses.  If she cannot look (no vision model, the server is off, a reply that makes no sense) it is the first.
+    """Which of several attempts at a dream picture she keeps: (index, her reason).
 
-    With `dream_image_choose_think` she reasons before answering.  Reasoning ran away when it was tried for
-    reflection, so it has a fixed allowance here, and if she uses it up she is asked once more without it."""
+    She looks at each attempt on its own and notes what it shows, what is wrong with it and a score; then she
+    reads her notes side by side and chooses.  Shown all the attempts in one message, the model this was tuned
+    with reported seeing one picture, or two that were the same, and kept the first.  One picture per look is
+    what every vision model can do.
+
+    If the comparison fails the best-scored attempt is kept; if she cannot look at all (no vision model, the
+    server is off) it is the first.  With `dream_image_choose_think` she reasons before the comparison; that
+    has a fixed allowance, and if she uses it up she is asked once more without it."""
     from .reflect import _parse
     if len(pictures) < 2:
         return 0, ""
     try:
         look_at = _chooser(image_config(cfg), report if report is not None else {})
-        small = [_jpeg(open_image(p)[0], (768, 768)) for p in pictures]
         note = f"\nIt draws on something you remember: {remembered}" if remembered else ""
-        prompt = _CHOOSE.format(n=len(pictures), scene=scene, remembered=note)
     except Exception as exc:
         logger.debug("holonomic: choosing between dream pictures failed: %s", exc)
         return 0, ""
+    notes: Dict[int, Dict[str, Any]] = {}
+    for i, p in enumerate(pictures):
+        try:
+            data = _parse(look_at(f"look at attempt {i + 1}", _ATTEMPT.format(scene=scene, remembered=note),
+                                  [_jpeg(open_image(p)[0], (1024, 1024))], _ATTEMPT_SCHEMA, 300))
+            notes[i] = {"shows": _sentence(data.get("shows"))[:400], "faults": _sentence(data.get("faults"))[:300],
+                        "score": max(1, min(10, int(data.get("score") or 1)))}
+            if report is not None and report.get("calls"):       # shown with the timings, so her choice can be followed
+                report["calls"][-1]["noted"] = f"{notes[i]['score']} of 10. {notes[i]['shows']} Faults: {notes[i]['faults'] or 'none seen.'}"
+        except Exception as exc:
+            logger.debug("holonomic: looking at dream picture %d failed: %s", i + 1, exc)
+    if not notes:
+        return 0, ""
+    top = max(notes, key=lambda i: (notes[i]["score"], -i))          # the best score, the earlier attempt on a tie
+    fallback = (top, f"It scored highest of the attempts she could look at ({notes[top]['score']} of 10).")
+    if len(notes) < 2:
+        return fallback
+    written = "\n".join(f"Attempt {i + 1} (score {n['score']} of 10): {n['shows']} Faults: {n['faults'] or 'none seen.'}"
+                        for i, n in sorted(notes.items()))
+    prompt = _CHOOSE.format(n=len(pictures), scene=scene, remembered=note, notes=written)
     for think in ([True, False] if cfg.get("dream_image_choose_think") else [False]):
         try:
-            data = _parse(look_at(prompt, small, _CHOOSE_SCHEMA, int(cfg.get("dream_image_choose_think_tokens") or 3000), think=True)
-                          if think else look_at(prompt, small, _CHOOSE_SCHEMA, 200))
+            data = _parse(look_at("choose", prompt, [], _CHOOSE_SCHEMA, int(cfg.get("dream_image_choose_think_tokens") or 3000), think=True)
+                          if think else look_at("choose", prompt, [], _CHOOSE_SCHEMA, 200))
             best = int(data.get("best") or 0)
-            if 1 <= best <= len(pictures):
+            if best - 1 in notes:
                 return best - 1, _sentence(data.get("why"))[:300]
         except Exception as exc:
             logger.debug("holonomic: choosing between dream pictures failed (thinking %s): %s", think, exc)
-    return 0, ""
+    return fallback
 
 
 _BRIEFLY = ("\n\nYour last answer ran too long and was cut off. Be brief this time: at most four sentences of description, and for "
@@ -593,7 +633,9 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
     # Only what the user affirmed is passed on.  Telling a model that there is no Tiger Beer sign puts the word
     # in front of it, and the next thing it reports seeing is a sign that says Tiger.
     told = what_was_stated([row["caption"]] + json.loads(row["meta"] or "{}").get("corrections", []))[0]
-    said = f"\nThe person who showed the image said this about it, which is true: {told[:600]}" if told else ""
+    said = (f"\nThe person who showed the image said this about the whole image, which is true: {told[:600]}\n"
+            "It is about the whole image. Most of it will not be in this part: use it to name what you can see here, and do not mention "
+            "anything from it that this part does not show.") if told else ""
     with engine._lock:
         todo = _db(engine).execute("SELECT * FROM image_sections WHERE image_id = ? AND notable IS NULL ORDER BY idx",
                                    (int(image_id),)).fetchall()

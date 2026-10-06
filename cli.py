@@ -553,8 +553,13 @@ def _images_cmd(engine, cfg, args) -> None:
 
 def _print_calls(report) -> None:
     for c in report["calls"]:
+        if c.get("drawing"):
+            print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s")
+            continue
         print(f"  step {c['step']}{' (thinking)' if c.get('think') else ''}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
               f"reply {c.get('reply_tokens')} tokens, finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+        if c.get("noted"):
+            print(f"      {c['noted']}")
         if c.get("step") == "choose" and c.get("thinking"):          # what she reasoned before choosing, to judge whether it helps
             print(f"      her reasoning: {c['thinking'][:1200]}{'...' if len(c['thinking']) > 1200 else ''}")
 

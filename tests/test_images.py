@@ -867,9 +867,13 @@ def test_each_picture_is_drawn_several_times_and_she_keeps_one(tmp_path):
     keep = images._chooser
 
     def chooser(ic, report):
-        def look_at(prompt, jpegs, schema, max_tokens):
-            asked.append((prompt, [size_of(j) for j in jpegs]))
-            return json.dumps({"best": 2 if len(asked) == 1 else 7, "why": "The couch is green and the cat is long-haired"})
+        def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+            asked.append((step, prompt, [size_of(j) for j in jpegs]))
+            if step != "choose":                                                # one attempt at a time, each with its own notes
+                n = int(step.split()[-1])
+                report.setdefault("calls", []).append({"step": step})
+                return json.dumps({"shows": f"A cat on couch number {n}.", "faults": "The cat has five legs." if n == 1 else "", "score": 4 + n})
+            return json.dumps({"best": 2 if len([a for a in asked if a[0] == "choose"]) == 1 else 7, "why": "The couch is green and the cat is long-haired"})
         return look_at
     images._chooser = chooser
     scenes = [{"picture": "A black cat asleep on a couch in a greenhouse.", "images": [ids["cat"]]},
@@ -880,12 +884,19 @@ def test_each_picture_is_drawn_several_times_and_she_keeps_one(tmp_path):
         images._chooser = keep
     first, second = report["dreams"][0]["pictures"]
     assert len(drawn) == 6 and drawn[0] == drawn[1] == drawn[2] and drawn[3] == drawn[5]      # all drawn before any is chosen
-    assert "Here are 3 pictures" in asked[0][0] and "A black cat asleep on a couch in a greenhouse." in asked[0][0]
-    assert "It draws on something you remember: A photo of a black cat asleep on a green couch" in asked[0][0] and asked[0][1] == [(768, 512)] * 3
-    assert "It draws on something you remember" not in asked[1][0]
+    looks, chose = [a for a in asked if a[0] != "choose"], [a for a in asked if a[0] == "choose"]
+    assert [a[0] for a in asked[:4]] == ["look at attempt 1", "look at attempt 2", "look at attempt 3", "choose"]
+    assert all(len(a[2]) == 1 for a in looks) and looks[0][2] == [(768, 512)] and all(a[2] == [] for a in chose)    # never several pictures at once
+    assert "A black cat asleep on a couch in a greenhouse." in looks[0][1] and "A black cat asleep on a couch in a greenhouse." in chose[0][1]
+    assert "It draws on something you remember: A photo of a black cat asleep on a green couch" in looks[0][1]
+    assert "It draws on something you remember" not in looks[3][1] and "It draws on something you remember" not in chose[1][1]
+    assert "Attempt 1 (score 5 of 10): A cat on couch number 1. Faults: The cat has five legs." in chose[0][1]
+    assert "Attempt 3 (score 7 of 10): A cat on couch number 3. Faults: none seen." in chose[0][1]
+    assert [c["noted"] for c in report["calls"] if c.get("noted")][0] == "5 of 10. A cat on couch number 1. Faults: The cat has five legs."
+    assert [c["step"] for c in report["calls"] if c.get("drawing")] == ["draw 3 attempt(s)"] * 2
     assert (first["chosen"], first["of"], first["why"]) == (2, 3, "The couch is green and the cat is long-haired")
     assert open(first["file"], "rb").read() == picture(768, 512, colour=(40, 0, 0))            # the second attempt is the one kept
-    assert (second["chosen"], second["of"], second["why"]) == (1, 3, "")                       # an answer that makes no sense: the first
+    assert (second["chosen"], second["of"]) == (3, 3) and "scored highest" in second["why"]    # an answer that makes no sense: the best-scored
     assert images.count_images(m, "dream") == 2                                                # the others are not kept
     assert images.pick_best(cfg, "x", [picture()]) == (0, "") and images.pick_best({"image_enabled": True}, "x", [picture(), picture()]) == (0, "")
 
@@ -928,7 +939,9 @@ def test_one_graphics_card_is_shared_and_given_back(tmp_path):
     keep = images._chooser
 
     def chooser(ic, report):
-        def look_at(prompt, jpegs, schema, max_tokens):
+        def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+            if step != "choose":
+                return json.dumps({"shows": "A picture.", "faults": "", "score": 6})
             log.append("choose")
             return json.dumps({"best": 1, "why": "It is the clearer one."})
         return look_at
@@ -978,24 +991,34 @@ def test_she_can_reason_before_choosing(tmp_path):
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     answer = lambda n, why, **extra: {"message": dict({"content": json.dumps({"best": n, "why": why})}, **extra), "done_reason": "stop"}
-    ran_away = {"message": {"content": "", "thinking": "Looking at the first picture again and again"}, "done_reason": "length"}
+    note = lambda score, faults="": {"message": {"content": json.dumps({"shows": "A cat in a boat.", "faults": faults, "score": score})}, "done_reason": "stop"}
+    ran_away = {"message": {"content": "", "thinking": "Reading the first note again and again"}, "done_reason": "length", "eval_count": 3000}
     cfg = {"image_model": "gemma-eyes", "image_host": f"http://127.0.0.1:{server.server_port}", "dream_image_choose_think": True}
     three = [picture(colour=(i, 0, 0)) for i in range(3)]
+    looks = lambda: [note(5, "No lake."), note(8), note(6)]
     try:
-        plan[:] = [answer(3, "Only the third has the lake.", thinking="The first has no boat.  The second has no lake.")]
+        plan[:] = looks() + [answer(3, "Only the third has the lake.", thinking="The first has no boat.  The second has no lake.")]
         report = {}
         assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (2, "Only the third has the lake.")
-        assert got[0]["think"] is True and got[0]["options"]["num_predict"] == 3000 and len(got[0]["messages"][1]["images"]) == 3
-        assert report["calls"][0]["think"] is True and report["calls"][0]["thinking"] == "The first has no boat. The second has no lake."
-        got.clear(); plan[:] = [ran_away, answer(2, "The second is clearest.")]
+        assert [len(g["messages"][1].get("images", [])) for g in got] == [1, 1, 1, 0]             # one picture per look, none to compare
+        assert [g["think"] for g in got] == [False, False, False, True] and got[3]["options"]["num_predict"] == 3000
+        assert "Attempt 2 (score 8 of 10): A cat in a boat. Faults: none seen." in got[3]["messages"][1]["content"]
+        assert report["calls"][3]["think"] is True and report["calls"][3]["thinking"] == "The first has no boat. The second has no lake."
+        got.clear(); plan[:] = looks() + [ran_away, answer(1, "The first is clearest.")]
         report = {}
-        assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (1, "The second is clearest.")
-        assert [g["think"] for g in got] == [True, False] and got[1]["options"]["num_predict"] == 200
-        assert "hit the 3000-token reply limit" in report["calls"][0]["failed"] and report["calls"][1]["think"] is False
-        got.clear(); plan[:] = [ran_away, ran_away]
-        assert images.pick_best(cfg, "A cat in a boat on a lake.", three) == (0, "")
-        got.clear(); plan[:] = [answer(1, "The first.")]
-        assert images.pick_best(dict(cfg, dream_image_choose_think=False), "A cat.", three) == (0, "The first.") and [g["think"] for g in got] == [False]
+        assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (0, "The first is clearest.")
+        assert [g["think"] for g in got[3:]] == [True, False] and got[4]["options"]["num_predict"] == 200
+        failed = report["calls"][3]
+        assert "hit the 3000-token reply limit" in failed["failed"] and failed["reply_tokens"] == 3000 and "seconds" in failed
+        assert failed["thinking"].startswith("Reading the first note") and report["calls"][4]["think"] is False
+        got.clear(); plan[:] = looks() + [ran_away, ran_away]                                     # no comparison: the best-scored attempt
+        assert images.pick_best(cfg, "A cat in a boat on a lake.", three)[0] == 1
+        got.clear(); plan[:] = [note(7), note(7), note(7), answer(9, "Nonsense.")]                # a tie: the earlier one
+        assert images.pick_best(dict(cfg, dream_image_choose_think=False), "A cat.", three)[0] == 0 and [g["think"] for g in got] == [False] * 4
+        got.clear(); plan[:] = [ran_away, note(4), ran_away]                                      # only one could be looked at: that one
+        assert images.pick_best(cfg, "A cat.", three)[0] == 1 and len(got) == 3
+        got.clear(); plan[:] = [ran_away, ran_away, ran_away]
+        assert images.pick_best(cfg, "A cat.", three) == (0, "")
     finally:
         server.shutdown()
 
@@ -1149,7 +1172,7 @@ def test_writing_is_kept_only_when_two_looks_agree(tmp_path):
     report = images.process(m, CFG, see=eyes(parts, whole=whole, seen=seen))
     part_prompt = seen[1][1]
     assert "Country Music Square" not in part_prompt and "Hilton" not in part_prompt and "a busy street with a [writing] sign and a [writing] building." in part_prompt
-    assert "The person who showed the image said this about it, which is true: A street in Nashville at night." in part_prompt
+    assert "The person who showed the image said this about the whole image, which is true: A street in Nashville at night." in part_prompt
     assert report["unclear"] == 4                                   # Country Music Square, T.J. Maxx, TIGER BEER and POLICE: one look each
     got = images.get_image(m, img["id"], sections=True)
     by_place = {s["place"]: s["description"] for s in got["sections"] if s["description"]}

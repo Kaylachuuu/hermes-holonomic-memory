@@ -555,7 +555,9 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
                     words = s["scene"] + " As remembered: " + recalled.rstrip(". ") + (". " + style if style else "")
                 else:
                     words = s["scene"] + (", " + style if style else "")
+                began = time.time()
                 tries = [painter(words, start, size=shape) if sized else painter(words, start) for _ in range(attempts)]
+                report["calls"].append({"step": f"draw {attempts} attempt(s)", "seconds": time.time() - began, "drawing": True})
             except Exception as exc:             # the server is off, or sent back something that is not a picture
                 report["errors"].append(f"dream pictures{label}: {exc}")
                 break

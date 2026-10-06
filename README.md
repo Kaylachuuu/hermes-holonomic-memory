@@ -337,8 +337,11 @@ is; with none named, the first one the server lists. Z-Image-Turbo is chosen by 
 shown, are not described as one, and reach her only with the dream they belong to, labelled as
 pictures of a dream. She can show them the same way as any image.
 
-Each picture is drawn several times and the vision model, shown all the attempts with the scene they
-are meant to show, chooses which one is kept; the others are discarded. With one graphics card
+Each picture is drawn several times. The vision model looks at each attempt on its own and notes what
+it shows, what looks wrong and a score; then it reads its notes side by side and chooses which one is
+kept. The others are discarded. (Shown all the attempts in one message, the model this was tuned with
+reported seeing one picture, or two that were the same, and kept the first. One picture per look
+works with any vision model.) `sleep now` prints her notes on each attempt and how long the drawing took. With one graphics card
 shared between the language model and the image generator, `--swap on` unloads the language models
 (not the embedding model) while pictures are drawn, asks the image server to free the card when it
 is done, and loads them again exactly as they were, so the agent is ready to talk when the dream
@@ -358,7 +361,7 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
-| `dream_image_choose_think` | `false` | Let her reason before choosing; if the reasoning runs away she is asked again without it |
+| `dream_image_choose_think` | `false` | Let her reason before comparing her notes on the attempts; if the reasoning runs away she is asked again without it |
 | `dream_image_swap` | `false` | One graphics card: unload the language models while pictures are drawn, reload them after |
 | `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |
 | `dream_image_strength` | `0.75` | `from_images`: how far a picture may move from the images it starts from |
