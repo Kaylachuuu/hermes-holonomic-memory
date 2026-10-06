@@ -467,7 +467,15 @@ def test_a_name_one_letter_off_is_put_right(tmp_path):
     assert respell_names("Kaylar is here.", facts + " c:/users/kayla/documents") == "Kayla is here."      # a path does not unmake a name
     # a misspelling already among the facts does not protect itself, while the right name is far more common
     assert respell_names("Kaylar likes tea.", known + " Kayla" * 6 + " Kaylar") == "Kayla likes tea."
+    # a misspelling already among the facts is copied by the next reflection: being common there protects nothing,
+    # and what settles it is whether she ever wrote the word herself
+    stored = facts + " Kaylar's system fades. Kaylar's system reflects. Kaylar's system has a tool."
+    assert respell_names("Kaylar's system fades.", stored) == "Kaylar's system fades."
+    assert respell_names("Kaylar's system fades.", stored, wrote=lambda w: False) == "Kayla's system fades."
+    assert respell_names("Kaylar's system fades.", stored, wrote=lambda w: w == "Kaylar") == "Kaylar's system fades."
     m, ids = seeded(tmp_path)
+    assert m.user_wrote("Kayla") and m.user_wrote("kayla") and not m.user_wrote("Kaylar") and not m.user_wrote("Kay")
+    assert not m.user_wrote("pleasure")                    # the assistant said that
     m.remember("Kayla here again. Kayla is my name, and I have a cat called Theo.", kind="said_user", session="s1")
     last = m.recent(1)[0]["id"]
     seen = {}
@@ -503,7 +511,7 @@ def test_the_profile_is_written_from_everything_a_run_took_in(tmp_path):
 
     def long(system, user, step):
         if step == "shorten":
-            assert "it will be cut off after 171 words" in user and "walk number 59" in user
+            assert "It may have at most 160" in user and " words. It may" in user and "walk number 59" in user
             return json.dumps({"text": "Kayla works in IT and has two cats, Sushi and Theo."})
         return answer(ids, user_profile="Kayla works in IT. " + " ".join(f"She likes walk number {i} by the lake." for i in range(60)))
     report = reflect_once(m, {}, llm=long, start_after=0)
@@ -514,3 +522,19 @@ def test_the_profile_is_written_from_everything_a_run_took_in(tmp_path):
     report = reflect_once(m, {}, llm=stubborn, start_after=0)
     assert report["profile_cut"]["user"] > 0 and len(m.profile("user")) <= 1200 and m.profile("user").endswith(".")
     assert "Never leave out a person or an animal that has a name" in _PROFILES and "cut off and lost" in _PROFILES
+
+
+def test_a_profile_with_nothing_new_is_left_as_it_is(tmp_path):
+    """Every rewrite drifts a little: with no note about the two of them accepted, 'networking' in the profile of
+    the pair came back as 'inquiry'."""
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    m.set_profile("us", "We talk about her work in networking.")
+    m.set_profile("self", "I like a tidy answer.")
+    drift = dict(user_profile="Kayla works in IT and writes assembly.", self_profile="I like an untidy answer.",
+                 relationship_profile="We talk about her work in inquiry.")
+    report = reflect_once(m, {}, llm=lambda system, user, step: answer(ids, self_notes=[], **drift))
+    assert report["profiles_updated"] == ["user"]
+    assert m.profile("us") == "We talk about her work in networking." and m.profile("self") == "I like a tidy answer."
+    report = reflect_once(m, {}, llm=lambda system, user, step: answer(ids, **drift), start_after=0)      # a self note this time
+    assert m.profile("self") == "I like an untidy answer." and m.profile("us") == "We talk about her work in networking."

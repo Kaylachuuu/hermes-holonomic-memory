@@ -830,6 +830,17 @@ class HolonomicMemory:
                                  (realm, float(when))).fetchone()
         return int(r["m"]) if r and r["m"] is not None else None
 
+    def user_wrote(self, word: str) -> bool:
+        """Whether the user has ever written this word themselves (whatever its capitals)."""
+        word = str(word or "").strip()
+        if not word:
+            return False
+        pattern = re.compile(r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])", re.IGNORECASE)
+        with self._lock:
+            rows = self._db.execute("SELECT text FROM memories WHERE forgotten = 0 AND kind LIKE '%!_user' ESCAPE '!' "
+                                    "AND text LIKE ? LIMIT 200", (f"%{word}%",)).fetchall()
+        return any(pattern.search(r["text"] or "") for r in rows)
+
     def count_after(self, after_id: int, *, realm: str = "waking", exclude_kinds: tuple[str, ...] | list[str] = ()) -> int:
         sql = "SELECT COUNT(*) AS n FROM memories WHERE forgotten = 0 AND realm = ? AND id > ?"
         params: list = [realm, after_id]

@@ -144,7 +144,7 @@ will with within without would your yours yeah okay year years today tomorrow ye
 """.split())
 
 
-def respell_names(text: str, known: str, own: str = "", seen: str = "") -> str:
+def respell_names(text: str, known: str, own: str = "", seen: str = "", wrote=None) -> str:
     """Put right a name that is one letter off from one that is well established.  A reflection wrote 'Kaylar'
     for 'Kayla' and repeated it through seven facts; the checker, shown the same misspelling in every statement,
     let it stand.
@@ -152,8 +152,10 @@ def respell_names(text: str, known: str, own: str = "", seen: str = "") -> str:
     Only a capitalised word of four letters or more is touched, and only towards a capitalised word that occurs
     in `known` (the user's lines, their profile, facts already held) at least three times and is not an ordinary
     word.  A word the user wrote themselves (`own`) is never touched; neither is an ordinary word, one found
-    without its capital anywhere in what was read (`known`, `own`, `seen`), or one that is itself common in
-    `known`: two names a letter apart can both be real."""
+    without its capital anywhere in what was read (`known`, `own`, `seen`).  Two names a letter apart can both be
+    real: `wrote(word)` says whether the user has ever written the word, and one they have is left alone.  A
+    misspelling already among the stored facts is copied by the next reflection, so being common there protects
+    nothing; without `wrote`, a word is left alone only when it is common next to the name."""
     counts: Dict[str, int] = {}
     for w in re.findall(r"\b[A-Z][a-z]{3,}\b", known or ""):
         counts[w] = counts.get(w, 0) + 1
@@ -171,8 +173,12 @@ def respell_names(text: str, known: str, own: str = "", seen: str = "") -> str:
         word = m.group(0)
         if word.lower() in mine or word.lower() in lower or word.lower() in _ORDINARY:
             return word
-        near = [n for n in names if n != word and _edits(word, n) == 1 and counts[n] >= 4 * counts.get(word, 0)]
-        return near[0] if len(near) == 1 else word
+        near = [n for n in names if n != word and _edits(word, n) == 1 and counts[n] > counts.get(word, 0)]
+        if len(near) != 1:
+            return word
+        if wrote is not None:
+            return word if wrote(word) else near[0]
+        return near[0] if counts[near[0]] >= 4 * counts.get(word, 0) else word
     return re.sub(r"\b[A-Z][a-z]{3,}\b", fix, text)
 
 
@@ -189,9 +195,12 @@ def once_each(text: str) -> str:
 
 
 _SHORTEN = """\
-This profile of {who} is too long: it will be cut off after {words} words and the rest lost. Rewrite it in at most \
-{words} words, in the same grammatical person. Keep who the person is and every person and animal that has a name. \
-Make room by saying technical detail more briefly, and by saying once what is said twice. Add nothing.
+This profile of {who} has {has} words. It may have at most {words}: anything past that is cut off and lost. \
+Rewrite it in {words} words or fewer, in the same grammatical person.
+
+Keep, in this order: who the person is; every person and animal that has a name; what they do and care about. \
+Then say each project in one sentence, and leave out how a project works inside. Say once what is said twice. \
+Add nothing that is not in it.
 
 PROFILE:
 {text}
@@ -646,8 +655,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                      + [m["text"] for m in batch if m["kind"] != "said_assistant"])
     own = " ".join(m["text"] for m in batch if m["kind"] != "said_assistant")
     seen = " ".join([m["text"] for m in batch] + list(current.values()))      # for telling a word from a name
+    wrote = getattr(engine, "user_wrote", None)
     for item in superseded:
-        item["replacement"] = respell_names(item["replacement"], known, own, seen)
+        item["replacement"] = respell_names(item["replacement"], known, own, seen, wrote)
     # ---- step 2: check each item against only the lines it cites
     if depth >= 3 and items:
         verdicts = _parse(call("check", _SYSTEM, build_check_prompt(items, by_id, known), _CHECK_SCHEMA, budget)).get("verdicts")
@@ -677,7 +687,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
             if fixed != item["text"]:
                 report["checked"].append({"verdict": "unquote", "kind": item["kind"], "was": item["text"], "now": fixed})
                 item = dict(item, text=fixed)
-        respelt = respell_names(item["text"], known, own, seen)
+        respelt = respell_names(item["text"], known, own, seen, wrote)
         if respelt != item["text"]:
             report["checked"].append({"verdict": "respell", "kind": item["kind"], "was": item["text"], "now": respelt})
             item = dict(item, text=respelt)
@@ -696,16 +706,28 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                             _PROFILE_SCHEMA, budget))
         wanted = {"user": "user_profile"} if depth <= 1 else {"user": "user_profile", "self": "self_profile",
                                                               "us": "relationship_profile"}
+        # A profile is rewritten only when this pass learned something of its kind.  Every rewrite drifts a
+        # little ("networking" came back as "inquiry"), so one with nothing new to say is left as it is.
+        fed = {"user": {FACT}, "self": {SELF_NOTE, INSIGHT}, "us": {BOND_NOTE}}
+        kinds = {i["kind"] for i in items}
         for who, key in wanted.items():
-            whole = once_each(respell_names(" ".join(str(pdata.get(key) or "").split()), known, own, seen))
-            if len(whole) > limit:                   # asked to say it shorter, before anything is cut
-                words = max(40, limit // 7)
-                shorter = _parse(call("shorten", _SYSTEM, _SHORTEN.format(who=_WHO[who], words=words, text=whole),
+            if current.get(who) and not (kinds & fed[who]) and not (who == "user" and superseded):
+                continue
+            whole = once_each(respell_names(" ".join(str(pdata.get(key) or "").split()), known, own, seen, wrote))
+            was = len(whole)
+            for _ in range(2):                       # asked to say it shorter, twice at most, before anything is cut
+                if len(whole) <= limit:
+                    break
+                words = max(40, int(limit / 7.5))
+                shorter = _parse(call("shorten", _SYSTEM, _SHORTEN.format(who=_WHO[who], words=words, text=whole,
+                                                                         has=len(whole.split())),
                                       _SHORTEN_SCHEMA, budget)).get("text")
-                shorter = once_each(respell_names(" ".join(str(shorter or "").split()), known, own, seen))
-                if 20 <= len(shorter) < len(whole):
-                    report.setdefault("profile_shortened", {})[who] = len(whole) - len(shorter)
-                    whole = shorter
+                shorter = once_each(respell_names(" ".join(str(shorter or "").split()), known, own, seen, wrote))
+                if not 20 <= len(shorter) < len(whole):
+                    break
+                whole = shorter
+            if len(whole) < was:
+                report.setdefault("profile_shortened", {})[who] = was - len(whole)
             text = trim_to_sentence(whole[:limit])
             if len(whole) > limit:                   # said out loud: what was cut is not in the profile
                 report.setdefault("profile_cut", {})[who] = len(whole) - len(text)
