@@ -687,6 +687,14 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
             note += _fp.known_note(known)
         except Exception as exc:
             logger.debug("holonomic: recognising named things in image %s failed: %s", image_id, exc)
+        from . import faces as _faces
+        try:                                         # who is in it, by face, where the user has allowed that
+            if _faces.faces_on(cfg):
+                _faces.detect(engine, cfg, image_id)
+                if _faces.face_config(cfg)["face_name_unasked"]:
+                    note += _faces.people_note(_faces.people_in(engine, image_id))
+        except Exception as exc:
+            logger.debug("holonomic: looking for faces in image %s failed: %s", image_id, exc)
         prompt = _WHOLE.format(note=note, n=int(ic["image_max_labels"]))
         data = _parse(_look_once_more(see, "image", prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
                                       int(ic["image_max_tokens"])))
@@ -703,7 +711,7 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
                               meta={"image_id": int(image_id)})
         with engine._lock:
             db = _db(engine)
-            meta = json.loads(row["meta"] or "{}")
+            meta = json.loads(_row(engine, image_id)["meta"] or "{}")     # read afresh: looking for faces wrote to it meanwhile
             if isinstance(data.get("people"), bool):
                 meta["people"] = data["people"]
             db.execute("UPDATE images SET memory_id = ?, described_at = ?, claimed_at = NULL, meta = ? WHERE id = ?",
@@ -715,6 +723,8 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
             _fp.relabel(engine, image_id)
             if row["caption"] and _fp.names_on(cfg):
                 _fp.learn_from_caption(engine, cfg, image_id, see)
+            if row["caption"] and _faces.faces_on(cfg):
+                _faces.learn_from_caption(engine, cfg, image_id, see)
         except Exception as exc:
             logger.warning("holonomic: keeping names for image %s failed: %s", image_id, exc)
     except BaseException:
@@ -1002,6 +1012,9 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
     from . import fingerprints as _fp                    # needs no vision model: a failure here is its own matter
     if _fp.fingerprint_config(cfg)["image_fingerprints"] and not (should_stop and should_stop()):
         report["fingerprints"] = _fp.fingerprint(engine, cfg, should_stop=should_stop)
+    from . import faces as _faces
+    if _faces.faces_on(cfg) and not (should_stop and should_stop()):
+        report["faces"] = _faces.scan(engine, cfg, should_stop=should_stop)
     return report
 
 
@@ -1030,6 +1043,11 @@ def look(engine, cfg: Dict[str, Any], image_id: int, question: str, *, section: 
 
 # -------------------------------------------------------------------- reading
 
+def _people_in(engine, image_id: int) -> List[dict]:
+    from . import faces as _faces
+    return [{"name": p["name"], "is_user": p["is_user"], "where": p["where"], "said": p["said"]} for p in _faces.people_in(engine, image_id)]
+
+
 def _names_in(engine, image_id: int) -> List[dict]:
     from . import fingerprints as _fp
     return _fp.names_in(engine, image_id)
@@ -1053,6 +1071,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]), "signature": signature_known(engine, row["id"]),
            "fingerprint": row["vec"] is not None,
            "named": _names_in(engine, row["id"]),
+           "people_known": _people_in(engine, row["id"]),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -1424,7 +1443,9 @@ def delete_image(engine, image_id: int) -> bool:
         db.execute("UPDATE images SET forgotten = 2, memory_id = NULL, caption = '', origin = '', meta = '{}', vec = NULL, vec_model = NULL "
                    "WHERE id = ?", (row["id"],))
     from . import fingerprints as _fp
+    from . import faces as _faces
     _fp.unmark(engine, row["id"])
+    _faces.drop_image(engine, row["id"])
     for rel in {row["file"], row["view"]}:
         try:
             (engine.path / rel).unlink()

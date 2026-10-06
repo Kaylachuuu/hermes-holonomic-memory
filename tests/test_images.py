@@ -1566,7 +1566,7 @@ def test_the_fingerprint_helper_and_the_plugin_talk_to_each_other(tmp_path):
     host = f"http://127.0.0.1:{server.server_port}"
     cfg = dict(CFG, image_fingerprints=True, image_fingerprint_host=host + "/")
     try:
-        assert fp.health(cfg) == {"model": "colours-1", "dim": 3, "device": "cpu"}
+        assert fp.health(cfg) == {"model": "colours-1", "dim": 3, "device": "cpu", "faces": None}
         assert fp.make_embedder(cfg)([picture(colour=(250, 0, 0))])[0] == "colours-1"
         for bad in ({"images": []}, {"images": ["not a picture"]}, {}):
             try:
@@ -1878,3 +1878,360 @@ def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
     finally:
         images._seer = keep
         p.shutdown(); server.shutdown()
+
+
+# ---------------------------------------------------------------------------------------------------- faces
+
+GREY = (128, 128, 128)
+
+
+def face_finder(calls=None):
+    """A stand-in for the face model.  A picture's left and right halves each hold one 'face' unless that half is
+    grey; the face's fingerprint is the half's colour.  One colour all over is a single face in the middle."""
+    from PIL import Image
+
+    def find(pictures):
+        out = []
+        for data in pictures:
+            if calls is not None:
+                calls.append(1)
+            img = Image.open(io.BytesIO(data)).convert("RGB").resize((8, 8))
+            side = lambda xs: tuple(sum(img.getpixel((x, y))[i] for x in xs for y in range(8)) // (len(xs) * 8) for i in range(3))
+            left, right = side(range(0, 3)), side(range(5, 8))
+            near = lambda a, b: all(abs(a[i] - b[i]) < 25 for i in range(3))
+            vec = lambda c: [c[i] - 110.0 for i in range(3)]
+            faces = []
+            if near(left, right):
+                if not near(left, GREY):
+                    faces.append({"box": [0.4, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(left)})
+            else:
+                if not near(left, GREY):
+                    faces.append({"box": [0.1, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(left)})
+                if not near(right, GREY):
+                    faces.append({"box": [0.7, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(right)})
+            out.append(faces)
+        return "faces-1", out
+    return find
+
+
+def test_faces_are_learned_only_as_far_as_the_user_allows(tmp_path):
+    """none: nothing is looked for.  me: only the user's face is kept.  named: only people the user named.
+    often: every face, so that someone who keeps appearing is noticed.  Examples are only faces the user spoke for."""
+    from holonomic import images, faces as fc
+    kayla, emma, sam = (230, 60, 40), (40, 200, 60), (40, 60, 230)
+    find = face_finder()
+    assert fc.face_config({})["face_learn"] == "none" and fc.face_config({"face_learn": "everyone"})["face_learn"] == "none"
+    assert not fc.faces_on(CFG) and fc.dream_policy({}, False) == "none" and fc.dream_policy({}, True) == "anyone"
+
+    def setup(folder):
+        m = store(tmp_path / folder)
+        ids = {"me": images.add_image(m, flat(kayla), CFG, origin="me.png")["id"],
+               "both": images.add_image(m, two_tone((225, 65, 45), emma), CFG, origin="me-and-emma.png")["id"],
+               "emma": images.add_image(m, flat((45, 195, 65)), CFG, origin="emma.png")["id"],
+               "sam": images.add_image(m, flat(sam), CFG, origin="sam.png")["id"],
+               "sam2": images.add_image(m, two_tone(GREY, (45, 65, 225)), CFG, origin="sam-again.png")["id"],
+               "none": images.add_image(m, flat(GREY), CFG, origin="landscape.png")["id"]}
+        return m, ids
+    stored = lambda m: images._db(m).execute("SELECT COUNT(*) FROM image_faces").fetchone()[0]
+    # none: nothing is looked for or kept
+    m, ids = setup("none")
+    assert fc.scan(m, CFG, find=find) == {"done": [], "errors": []} and fc.detect(m, CFG, ids["me"], find=find) == []
+    try:
+        fc.name_person(m, CFG, ids["me"], "Kayla", me=True, find=find); assert False
+    except fc.FaceError as exc:
+        assert "off" in str(exc)
+    # me: only my face
+    cfg = dict(CFG, face_learn="me")
+    m, ids = setup("me")
+    assert len(fc.scan(m, cfg, find=find)["done"]) == 6 and stored(m) == 0 and fc.waiting(m) == 0      # nobody is known: nothing is kept
+    assert fc.face_count(m, ids["both"]) == 2 and fc.face_count(m, ids["none"]) == 0
+    try:
+        fc.name_person(m, cfg, ids["emma"], "Emma", find=find); assert False
+    except fc.FaceError as exc:
+        assert "Only your own face" in str(exc)
+    done = fc.name_person(m, cfg, ids["me"], "Kayla", me=True, find=find)
+    assert done["is_user"] and done["new"] and done["where"] == "the only face" and m.kv_get("faces:look_again") == "1"
+    fc.scan(m, cfg, find=find)                                             # everything is gone through again
+    assert m.kv_get("faces:look_again") == "0" and stored(m) == 2          # mine in two images; Emma's and Sam's are not kept
+    assert [(p["name"], p["is_user"], p["where"], p["said"]) for p in fc.people_in(m, ids["both"])] == [("Kayla", True, "the only face", False)]
+    assert fc.people(m) == [{"name": "Kayla", "is_user": True, "dream": None, "said": [ids["me"]], "seen": [ids["both"]]}]
+    # named: people I name
+    cfg = dict(CFG, face_learn="named")
+    m, ids = setup("named")
+    fc.scan(m, cfg, find=find)
+    try:
+        fc.name_person(m, cfg, ids["both"], "Emma", find=find); assert False
+    except fc.NeedsChoice as exc:
+        assert "has 2 faces: face 1 on the left; face 2 on the right. Say which one is Emma." in str(exc)
+    assert fc.name_person(m, cfg, ids["both"], "Emma", where="right", find=find)["face"] == 2
+    assert fc.name_person(m, cfg, ids["both"], "Kayla", face=1, me=True, find=find)["where"] == "on the left"
+    fc.scan(m, cfg, find=find)
+    assert [p["name"] for p in fc.people_in(m, ids["emma"])] == ["Emma"] and [p["name"] for p in fc.people_in(m, ids["me"])] == ["Kayla"]
+    assert fc.people_in(m, ids["sam"]) == [] and stored(m) == 4            # Sam is nobody I named: his face is not kept
+    shown = fc.look(m, cfg, ids["both"], find=find)
+    assert [(f["n"], f["where"], f["name"], f["said"]) for f in shown] == [(1, "on the left", "Kayla", True), (2, "on the right", "Emma", True)]
+    # a recognised face is never an example: only the two I spoke for
+    assert {k: len(v) for k, v in fc._examples(m, "faces-1").items()} == {"kayla": 1, "emma": 1}
+    # that is not Emma: never taken for her again, and the fingerprint is dropped
+    assert fc.not_person(m, cfg, ids["emma"], "Emma") == 1 and fc.not_person(m, cfg, ids["emma"], "Emma") == 0
+    fc.scan(m, cfg, find=find, again=True)
+    assert fc.people_in(m, ids["emma"]) == [] and images._db(m).execute("SELECT vec FROM image_faces WHERE state = 'not'").fetchone()["vec"] is None
+    assert fc.forget_person(m, "emma") and not fc.forget_person(m, "Emma") and [p["name"] for p in fc.people(m)] == ["Kayla"]
+    # often: every face, and someone who keeps appearing
+    cfg = dict(CFG, face_learn="often", face_often_images=2, face_ask_names=True)
+    m, ids = setup("often")
+    fc.scan(m, cfg, find=find)
+    assert stored(m) == 6
+    groups = fc.strangers(m, cfg)
+    assert sorted(tuple(g["images"]) for g in groups) == sorted([(ids["me"], ids["both"]), (ids["both"], ids["emma"]), (ids["sam"], ids["sam2"])])
+    assert fc.keeps_appearing(m, cfg, image_id=ids["sam"])["images"] == 2 and fc.keeps_appearing(m, cfg, image_id=ids["none"]) is None
+    assert fc.keeps_appearing(m, dict(cfg, face_ask_names=False), image_id=ids["sam"]) is None       # she may not ask
+    fc.asked(m, fc.keeps_appearing(m, cfg, image_id=ids["sam"])["faces"])
+    assert fc.keeps_appearing(m, cfg, image_id=ids["sam2"]) is None                                 # asked once, not again
+    unknown = []
+    assert fc.recognise_picture(m, cfg, flat((50, 190, 70)), find=find, unknown=unknown) == [] and len(unknown) == 1
+    assert fc.keeps_appearing(m, cfg, vectors=unknown)["images"] == 3                                # Emma, in a picture just arriving
+    fc.name_person(m, cfg, ids["sam"], "Sam", find=find)
+    fc.scan(m, cfg, find=find)
+    assert [p["name"] for p in fc.people_in(m, ids["sam2"])] == ["Sam"] and len(fc.strangers(m, cfg)) == 2
+    got = fc.recognise_picture(m, cfg, two_tone((42, 62, 228), GREY), find=find)
+    assert [(g["name"], g["is_user"], g["where"]) for g in got] == [("Sam", False, "the only face")] and got[0]["alike"] > 0.9
+    assert fc.recognise_picture(m, cfg, b"not a picture", find=find) == []
+    # the rule is tightened: what it no longer allows is dropped the next time images are gone through
+    fc.scan(m, dict(cfg, face_learn="named"), find=find, again=True)
+    assert stored(m) == 2 and fc.strangers(m, cfg) == []
+    # an image deleted for good takes its faces; everything can be dropped at once
+    images.forget_image(m, ids["sam2"]); images.delete_image(m, ids["sam2"])
+    assert stored(m) == 1 and fc.forget_all(m) == 1 and fc.people(m) == [] and fc.waiting(m) == 5
+    # asking who
+    assert fc.asks_who("Who is this?") and fc.asks_who("do you recognise her") and fc.asks_who("Do you know who that is")
+    assert not fc.asks_who("Look at this!") and not fc.asks_who("The whole garden is in bloom.")
+    assert fc.may_tell(dict(cfg, face_name_unasked=True), "Look at this!") and not fc.may_tell(cfg, "Look at this!") and fc.may_tell(cfg, "who's that?")
+    assert not fc.may_tell(CFG, "who's that?")                                                       # off is off
+
+
+def test_who_may_be_in_an_image_a_dream_is_drawn_from(tmp_path):
+    from holonomic import images, faces as fc
+    kayla, emma, sam = (230, 60, 40), (40, 200, 60), (40, 60, 230)
+    find = face_finder()
+    cfg = dict(CFG, face_learn="named")
+    m = store(tmp_path)
+    me = images.add_image(m, flat(kayla), CFG)["id"]
+    both = images.add_image(m, two_tone((225, 65, 45), emma), CFG)["id"]
+    stranger = images.add_image(m, flat(sam), CFG)["id"]
+    back = images.add_image(m, flat(GREY), CFG)["id"]              # someone seen from behind: a person, but no face
+    lake = images.add_image(m, flat((120, 124, 131)), CFG, origin="lake.png")["id"]
+    for i in (me, both, stranger, back):
+        images.set_people(m, i, True)
+    images.set_people(m, lake, False)
+    fc.name_person(m, cfg, me, "Kayla", me=True, find=find)
+    fc.name_person(m, cfg, both, "Emma", face=2, find=find)
+    fc.scan(m, cfg, find=find, again=True)
+    ok = lambda policy, i, use=False: fc.people_allowed_in_dream(m, dict(cfg, dream_image_people=policy), i, use)
+    every = (me, both, stranger, back, lake)
+    assert [ok("none", i) for i in every] == [False, False, False, False, True]
+    assert [ok("me", i) for i in every] == [True, False, False, False, True]
+    assert [ok("named", i) for i in every] == [True, True, False, False, True]
+    assert [ok("anyone", i) for i in every] == [True, True, True, True, True]
+    assert [ok("", i, use=False) for i in every] == [False, False, False, False, True]       # unset: as the older yes/no setting says
+    assert [ok("", i, use=True) for i in every] == [True, True, True, True, True]
+    # one person kept out of dreams keeps out any image they are in, whatever the rule
+    assert fc.set_dream(m, "Emma", False) and not fc.set_dream(m, "Nobody", False)
+    assert [ok("anyone", i) for i in every] == [True, False, True, True, True] and fc.people(m)[1]["dream"] is False
+    assert fc.set_dream(m, "emma", None) and ok("named", both)
+    # whose names a dream is given for the people in an image it draws on: nobody unless the user says so
+    assert fc.face_config({})["dream_name_people"] == "none" and fc.dream_names(m, cfg, both) == "" and fc.dream_names(m, cfg, None) == ""
+    assert fc.dream_names(m, dict(cfg, dream_name_people="me"), both) == " In it, known to you by face: Kayla (the person you talk with), on the left."
+    assert fc.dream_names(m, dict(cfg, dream_name_people="named"), both) == \
+        " In it, known to you by face: Kayla (the person you talk with), on the left; Emma, on the right."
+    assert fc.dream_names(m, dict(cfg, dream_name_people="named"), stranger) == "" and fc.dream_names(m, dict(cfg, dream_name_people="me"), lake) == ""
+    fc.set_dream(m, "Emma", False)
+    assert "Emma" not in fc.dream_names(m, dict(cfg, dream_name_people="named"), both)             # kept out of dreams: not named in them either
+    fc.set_dream(m, "Emma", None)
+    assert fc.dream_names(m, dict(CFG, dream_name_people="named"), both) == ""                    # faces off: nothing
+    # what was said about one image still decides for that image
+    images.set_dream_use(m, stranger, True); images.set_dream_use(m, me, False)
+    assert images.may_dream_from(m, stranger, ok("none", stranger)) and not images.may_dream_from(m, me, ok("anyone", me))
+
+
+def helper_with_faces(calls=None):
+    """The helper server with stand-ins for both models."""
+    import importlib.util, threading
+    from holonomic import images
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    find = face_finder(calls)
+    server = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0,
+                                faces=lambda ps: find(ps)[1], face_model="faces-1")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def test_the_helper_finds_faces_only_if_it_can(tmp_path):
+    import importlib.util, threading
+    from holonomic import images, faces as fc, fingerprints as fp
+    server, host = helper_with_faces()
+    cfg = dict(CFG, face_learn="named", image_fingerprint_host=host)
+    try:
+        assert fp.health(cfg)["faces"] == "faces-1" and fc.available(cfg) == "faces-1"
+        model, found = fc.make_finder(cfg)([two_tone((230, 60, 40), (40, 200, 60)), flat(GREY)])
+        assert model == "faces-1" and [len(f) for f in found] == [2, 0] and found[0][0]["box"][0] < found[0][1]["box"][0]
+    finally:
+        server.shutdown()
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    plain = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)     # no OpenCV there
+    threading.Thread(target=plain.serve_forever, daemon=True).start()
+    cfg = dict(cfg, image_fingerprint_host=f"http://127.0.0.1:{plain.server_port}")
+    try:
+        assert fc.available(cfg) is None
+        try:
+            fc.make_finder(cfg)([flat(GREY)]); assert False
+        except fc.FaceError as exc:
+            assert "faces are not available" in str(exc)
+        m = store(tmp_path)
+        images.add_image(m, flat((230, 60, 40)), CFG)
+        assert "faces are not available" in fc.scan(m, cfg)["errors"][0] and fc.waiting(m) == 1       # tried again later
+    finally:
+        plain.shutdown()
+
+
+def test_she_is_told_who_is_in_a_picture_only_as_the_user_allows(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic import images, faces as fc
+    kayla, emma = (230, 60, 40), (40, 200, 60)
+    server, host = helper_with_faces()
+    p = make(tmp_path)
+    p._cfg.update(CFG, face_learn="named", image_fingerprint_host=host, face_min=0.9)     # the stand-in's colours are not far apart
+    e = p._engine
+    keep = images._seer
+    seen = []
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        seen.append((step, prompt))
+        if step == "image":
+            return json.dumps({"description": "A photo of a woman with blonde hair and glasses standing in a kitchen by a window.",
+                               "labels": ["woman", "kitchen"], "text": "", "people": True})
+        if step == "people":
+            return json.dumps({"people": [{"name": "", "me": True, "where": "left"}, {"name": "Emma", "me": False, "where": "right"},
+                                          {"name": "Zed", "me": False, "where": ""}]})          # Zed was never said
+        return json.dumps({"notable": False, "description": "", "labels": [], "names": []})
+    images._seer = lambda ic, report: see
+    context = lambda: (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
+
+    def show(name, data, words="Look at this!"):
+        f = tmp_path / name
+        f.write_bytes(data)
+        return p.prefetch(file_message(f, words), session_id="s1")
+    try:
+        # what she says when showing a picture teaches her who is in it
+        first = show("IMG_1.HEIC", two_tone(kayla, emma), "This is me with my daughter Emma.")
+        assert [(q["name"], q["is_user"]) for q in fc.people(e)] == [("you", True), ("Emma", False)]
+        assert "## People in the attached image" not in first and "she was NOT told" in context()
+        # a later picture of her alone: recognised, but she is not told, because nobody asked
+        block = show("IMG_2.HEIC", flat((225, 65, 45)))
+        new = images.list_images(e)[0]
+        assert [q["name"] for q in fc.people_in(e, new["id"])] == ["you"] and "## People" not in block
+        assert "people recognised by face: you; she was NOT told" in context()
+        assert not any("By their face" in pr for st, pr in seen if st == "image")                # nor is the describer
+        assert "people" not in tool(p, action="images", image_id=new["id"])
+        # asked who: told
+        block = show("IMG_3.HEIC", two_tone((228, 62, 42), (42, 198, 62)), "Who is in this one?")
+        assert "## People in the attached image" in block and "do not ask who they are" in block
+        assert "- you, on the left: the person you are talking with. This is a picture of them." in block and "- Emma, on the right" in block
+        assert "people recognised by face: you, Emma; she was told" in context()
+        # the user lets her be told unasked: she is, the describer is, and the tool says who
+        p._cfg["face_name_unasked"] = True
+        seen.clear()
+        block = show("IMG_4.HEIC", flat((42, 202, 58)))
+        assert "## People in the attached image" in block and "- Emma" in block
+        assert any("By their face, the people in this image include: Emma." in pr for st, pr in seen if st == "image")
+        assert tool(p, action="images", image_id=images.list_images(e)[0]["id"])["people"] == ["Emma"]
+        # the tool: who is in it, naming, and taking a name back
+        who = tool(p, action="images", image_id=new["id"], who=True)
+        assert who["faces"] == [{"face": 1, "where": "the only face", "who": "you"}]
+        stranger = images.add_image(e, flat((40, 60, 230)), CFG)["id"]
+        assert tool(p, action="images", image_id=stranger, who=True)["faces"][0]["who"] == "someone you do not know"
+        done = tool(p, action="images", image_id=stranger, person="Sam")
+        assert done["name"] == "Sam" and done["new"] and "by their face" in done["note"]
+        assert "has 2 faces" in tool(p, action="images", image_id=1, person="Ann")["error"]
+        assert "That face will not be taken for them again" in tool(p, action="images", image_id=stranger, person="Sam", wrong=True)["note"]
+        assert "Nothing in that image was taken for Sam" in tool(p, action="images", image_id=stranger, person="Sam", wrong=True)["note"]
+        # only me: nobody else can be named, by her or from what is said
+        p._cfg["face_learn"] = "me"
+        assert "Only your own face" in tool(p, action="images", image_id=stranger, person="Sam")["error"]
+        # off: nothing at all
+        p._cfg["face_learn"] = "none"
+        assert "is off" in tool(p, action="images", image_id=new["id"], who=True)["error"]
+        assert "## People" not in show("IMG_5.HEIC", flat((226, 64, 44)), "Who is this?")
+        # every face kept, and she may ask: leave to ask about someone who keeps appearing, given once
+        p._cfg.update(face_learn="often", face_ask_names=True, face_often_images=2, face_name_unasked=False)
+        teal = (30, 180, 190)
+        assert "Someone you keep seeing" not in show("IMG_6.HEIC", flat(teal))
+        block = show("IMG_7.HEIC", flat((34, 176, 186)))
+        assert "## Someone you keep seeing" in block and "has been in 2 of the images" in block and "Ask once" in block
+        assert "she was given leave to ask who it is" in context()
+        assert "Someone you keep seeing" not in show("IMG_8.HEIC", flat((28, 184, 194)))
+    finally:
+        images._seer = keep
+        p.shutdown(); server.shutdown()
+
+
+def test_faces_from_the_command_line(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib
+    from holonomic import images, faces as fc
+    server, host = helper_with_faces()
+    p = make(tmp_path)
+    home = tmp_path / "home"
+    (home / "holonomic.json").write_text(json.dumps(dict({"embedder": "hash", "min_score": 0.3, "image_fingerprint_host": host}, **CFG)))
+    e = p._engine
+    one = images.add_image(e, flat((230, 60, 40)), CFG, origin="me.png")["id"]
+    two = images.add_image(e, two_tone((226, 64, 44), (40, 200, 60)), CFG, origin="us.png")["id"]
+    p.shutdown()
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    import holonomic.cli as cli, holonomic.embed as embed
+    keep = embed.OllamaEmbedder
+    embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+    parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+    def run(*argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            args = parser.parse_args(list(argv)); args.func(args)
+        return out.getvalue()
+    try:
+        out = run("faces")
+        assert "Whose faces she may learn: none  (no face is looked for at all)" in out and "faces ready (faces-1)" in out
+        assert "she is told who is in an image without being asked: no, only when you ask" in out and "people she knows: nobody" in out
+        assert "in images a dream picture is drawn from: none" in out and "named in dreams, going by their faces: none" in out
+        assert "Learning faces is off" in run("faces", "scan") and "is off" in run("faces", "name", str(one), "Kayla", "--me")
+        assert "Usage:" in run("faces", "learn", "everyone") and "Usage:" in run("faces", "ask", "maybe")
+        assert "only your own face is learned" in run("faces", "learn", "me")
+        assert "Only your own face may be learned" in run("faces", "name", str(two), "Emma", "--face", "2")
+        assert f"image #{one}: face 1 (the only face) is Kayla, which is you." in run("faces", "name", str(one), "Kayla", "--me")
+        assert "people you have named are learned" in run("faces", "learn", "named")
+        out = run("faces", "name", str(two), "Emma")
+        assert "has 2 faces" in out and f"faces name {two} Emma --face 1" in out
+        assert "face 2 (on the right) is Emma." in run("faces", "name", str(two), "Emma", "--face", "2")
+        assert "Looked for faces in 2 image(s)" in run("faces", "scan")
+        out = run("faces", "show", str(two))
+        assert "face 1  on the left:  Kayla (recognised)" in out and "face 2  on the right:  Emma (you said so)" in out
+        out = run("faces", "people")
+        assert "2 person(s) she knows by face." in out and "Kayla  (you)" in out and f"she recognised them in image #{two}" in out
+        assert "is never drawn from in a dream" in run("faces", "dream", "Emma", "no") and "in dreams: never" in run("faces", "people")
+        assert "noted, that is not Kayla" in run("faces", "not", str(two), "Kayla") and "Nothing in image" in run("faces", "not", str(two), "Kayla")
+        assert "only noticed when every face is kept" in run("faces", "often")
+        assert "every face is kept" in run("faces", "learn", "often") and "She may ask, once" in run("faces", "ask", "on")
+        assert "She is told who is in an image whenever" in run("faces", "unasked", "on")
+        run("faces", "scan")
+        assert "Nobody she does not know is in 3 or more images." in run("faces", "often")
+        out = run("dreams", "images", "from_images", "--who", "named", "--name-people", "me")
+        assert "are drawn from only if every face in them is someone you named" in out and "people in a dream by name, going by their faces: only you" in out
+        assert "Forgot who Emma is" in run("faces", "forget", "Emma") and "nobody called" in run("faces", "forget", "Emma")
+        assert "To do it: hermes holonomic faces forget --all --yes" in run("faces", "forget", "--all")
+        assert "and everyone she knew by face" in run("faces", "forget", "--all", "--yes") and "people she knows: nobody" in run("faces")
+        assert "Faces already kept stay where they are" in run("faces", "learn", "none")
+    finally:
+        embed.OllamaEmbedder = keep
+        server.shutdown()

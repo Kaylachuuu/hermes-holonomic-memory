@@ -24,6 +24,7 @@ from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_promp
 from . import images as _images
 from .images import IMAGE_DEFAULTS
 from .fingerprints import FINGERPRINT_DEFAULTS
+from .faces import FACE_DEFAULTS
 from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, IMAGE, IMAGE_KINDS, IMAGE_PART, REFLECT_DEFAULTS,
                       SUBJECTS, IdleReflector, read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
@@ -52,6 +53,7 @@ DEFAULTS.update(REFLECT_DEFAULTS)
 DEFAULTS.update(SLEEP_DEFAULTS)
 DEFAULTS.update(IMAGE_DEFAULTS)
 DEFAULTS.update(FINGERPRINT_DEFAULTS)
+DEFAULTS.update(FACE_DEFAULTS)
 
 _DREAM_WORD_RE = re.compile(r"\bdream(?:s|t|ed|ing)?\b", re.IGNORECASE)
 
@@ -75,7 +77,7 @@ TOOL_SCHEMA = {
         "- images: images you have been shown. With `label`, every image in which that thing was noticed (e.g. 'cat'); "
         "with `query`, images whose description matches; with `image_id`, one image and what is in each part of it; "
         "with none of these, the most recent. If the user tells you a description is wrong, pass `image_id` and "
-        "`correction` (what they said, in their words): the image is looked at again with that taken as true. With `image_id` and `similar`: true, the images that look like it, compared as pictures and not by their descriptions (the same cat, the same room). When the user names a particular animal, object or place in an image ('that is Sushi', 'this is my car'), pass `image_id`, `name` and `what` (what it is, e.g. 'a long-haired black and white cat') so you can recognise it in later images; if they say an image does NOT show something it was taken for, pass `image_id`, `name` and `wrong`: true. Do not name people this way. An image you forgot by mistake comes back with `image_id` and `restore`: true. Each result has a `file`: to show the image to the user, write "
+        "`correction` (what they said, in their words): the image is looked at again with that taken as true. With `image_id` and `similar`: true, the images that look like it, compared as pictures and not by their descriptions (the same cat, the same room). When the user names a particular animal, object or place in an image ('that is Sushi', 'this is my car'), pass `image_id`, `name` and `what` (what it is, e.g. 'a long-haired black and white cat') so you can recognise it in later images; if they say an image does NOT show something it was taken for, pass `image_id`, `name` and `wrong`: true. Do not name people this way. People are known by their faces, and only if the user has turned that on: when the user tells you who a person in an image is, pass `image_id` and `person` (their name; `me`: true if it is the user themselves; `face`: which face, 1 = leftmost, if there are several), and `wrong`: true if they say a face is NOT that person. When the user asks who is in an image, pass `image_id` and `who`: true. Do not volunteer who a person is unless a recalled block has told you, or the user asked. An image you forgot by mistake comes back with `image_id` and `restore`: true. Each result has a `file`: to show the image to the user, write "
         "MEDIA: followed by that file path on a line of its own in your reply.\n"
         "- look: look at a stored image again (`image_id`) to answer a `question` its description does not cover. "
         "Optional `section` (a part number from 'images') to look closely at one part.\n"
@@ -92,6 +94,10 @@ TOOL_SCHEMA = {
             "name": {"type": "string", "description": "The name the user gave a particular animal, object or place in image_id (images)."},
             "what": {"type": "string", "description": "What the named thing is, in a few words (images, with name)."},
             "wrong": {"type": "boolean", "description": "With image_id and name: the user says that image does not show it (images)."},
+            "person": {"type": "string", "description": "The name of a person whose face is in image_id, as the user gave it (images)."},
+            "me": {"type": "boolean", "description": "With person: the person is the user themselves (images)."},
+            "face": {"type": "integer", "description": "With person: which face in the image, 1 = leftmost (images)."},
+            "who": {"type": "boolean", "description": "With image_id: who is in the image, by their faces. Only when the user asks (images)."},
             "similar": {"type": "boolean", "description": "Find images that look like image_id, by the pictures themselves (images)."},
             "restore": {"type": "boolean", "description": "Put back an image that was forgotten, as it was (images, with image_id)."},
             "correction": {"type": "string", "description": "What the user said is wrong about an image's description (images)."},
@@ -533,10 +539,16 @@ class HolonomicMemoryProvider(MemoryProvider):
         # Kept in this call, not on the provider: Hermes may ask for memory from more than one thread, and a
         # second request starting while an image was still being looked at emptied the list the first was filling.
         seen: Dict[str, dict] = {}
+        faces: Dict[str, Any] = {"people": [], "images": [], "unknown": []}      # who is in the attached image, by face
         trace: List[str] = []
-        about_image = [b for b in (self._seen_before_block(engine, query, seen), self._may_show_block(engine, query, seen),
-                                   self._unseen_block(engine, query, sid, seen)) if b]
+        about_image = [b for b in (self._seen_before_block(engine, query, seen, faces), self._may_show_block(engine, query, seen, faces),
+                                   self._unseen_block(engine, query, sid, seen, faces)) if b]
         known = self._known_block(engine, seen, trace)
+        who = self._people_block(engine, faces, words, trace)
+        if who:
+            known = "\n\n".join(b for b in (known, who) if b)
+            told = " ".join(dict.fromkeys(p["name"] for p in faces["people"]))
+            words = told if is_trivial_prompt(words) else f"{words} {told}"
         trace.insert(0, "recognised in the attached image: " + (", ".join(
             f"{n['name']} ({'seen' if n['sure'] else 'a likeness'}{'; matched by look but not recorded with the image' if n.get('unrecorded') else ''})"
             for n in seen.values()) or "nothing"))
@@ -603,7 +615,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             line += f"\n    in the {(p.meta or {}).get('place', 'image')} [#{p.id}]: {clip(p.text)}"
         return line
 
-    def _seen_before_block(self, engine, query: str, seen: Optional[dict] = None) -> str:
+    def _seen_before_block(self, engine, query: str, seen: Optional[dict] = None, faces: Optional[dict] = None) -> str:
         """If the image attached to this message is one she has already been shown, say so: the file is
         identical, so this is certain."""
         if not self._cfg.get("image_enabled"):
@@ -616,6 +628,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                     out.append(f"- this is a picture from one of your own dreams (not a photograph of anything real): {img['caption']}")
                 elif img:
                     self._note_names(seen, img.get("named"), sure=True)
+                    self._note_people(engine, faces, image_id=img["id"])
                     when = time.strftime("%Y-%m-%d", time.localtime(img["created_at"]))
                     out.append(f"- image #{img['id']}, first shown {when}, seen {img['seen']} time(s) before now"
                                + (f": {' '.join(img['description'].split())}" if img["description"] else ""))
@@ -623,6 +636,63 @@ class HolonomicMemoryProvider(MemoryProvider):
             logger.debug("holonomic: checking for a known image failed: %s", exc)
         return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
                 + "\n".join(out)) if out else ""
+
+    def _note_people(self, engine, faces: Optional[dict], *, image_id: Optional[int] = None, data: Optional[bytes] = None) -> None:
+        """Note, for this message, whose faces are in the attached image: a kept image by its id, one that has
+        only just arrived by its bytes."""
+        if faces is None:
+            return
+        from . import faces as _faces
+        if not _faces.faces_on(self._cfg):
+            return
+        try:
+            if image_id is not None:
+                faces["images"].append(int(image_id))
+                faces["people"] += _faces.people_in(engine, image_id)
+            elif data is not None:
+                faces["people"] += _faces.recognise_picture(engine, self._cfg, data, unknown=faces["unknown"])
+        except Exception as exc:
+            logger.debug("holonomic: checking the attached image for faces failed: %s", exc)
+
+    def _people_block(self, engine, faces: dict, words: str, trace: List[str]) -> str:
+        """Who is in the attached image, if she may be told: always when the user has allowed it, otherwise
+        only when they ask who someone is.  And, where the user has allowed that too, leave to ask about
+        someone who keeps appearing."""
+        from . import faces as _faces
+        if not _faces.faces_on(self._cfg):
+            return ""
+        out, people = [], list({(p["name"], p["where"]): p for p in faces["people"]}.values())
+        if people and not _faces.may_tell(self._cfg, words):
+            trace.append(f"people recognised by face: {', '.join(p['name'] for p in people)}; she was NOT told "
+                         "(naming people unasked is off and the message does not ask who)")
+            faces["people"] = []
+        elif people:
+            trace.append(f"people recognised by face: {', '.join(p['name'] for p in people)}; she was told")
+            lines = []
+            for p in people:
+                at = "" if p["where"] == "the only face" else f", {p['where']}"
+                lines.append(f"- {p['name']}{at}" + (": the person you are talking with. This is a picture of them." if p["is_user"] else ""))
+            out.append("## People in the attached image\n"
+                       "You recognise them by their faces; this is reliable. Speak of them by name, as people you know, and do not "
+                       "ask who they are.\n" + "\n".join(lines))
+        else:
+            trace.append("people recognised by face: nobody")
+        try:
+            often = None
+            for image_id in faces["images"]:
+                often = often or _faces.keeps_appearing(engine, self._cfg, image_id=image_id)
+            often = often or _faces.keeps_appearing(engine, self._cfg, vectors=faces["unknown"])
+            if often:
+                _faces.asked(engine, often["faces"])
+                trace.append(f"someone unknown has been in {often['images']} images; she was given leave to ask who it is")
+                out.append("## Someone you keep seeing\n"
+                           f"A person in the attached image has been in {often['images']} of the images you have been shown, and you do "
+                           "not know who they are. If it fits the conversation you may ask who that is. Ask once; if you are not told, "
+                           "leave it and do not ask again. If you are told, keep it with your memory tool: action 'images', the "
+                           "image's id, and 'person' with their name.")
+        except Exception as exc:
+            logger.debug("holonomic: checking for someone who keeps appearing failed: %s", exc)
+        return "\n\n".join(out)
 
     @staticmethod
     def _note_names(seen: Optional[dict], named, *, sure: bool) -> None:
@@ -680,26 +750,28 @@ class HolonomicMemoryProvider(MemoryProvider):
                        "from earlier in the conversation in its place.")
         return "\n\n".join(out)
 
-    def _may_show_block(self, engine, query: str, seen: Optional[dict] = None) -> str:
+    def _may_show_block(self, engine, query: str, seen: Optional[dict] = None, faces: Optional[dict] = None) -> str:
         """A new image has arrived.  If part of it looks like something she knows by name, tell her before she
         answers: otherwise she can only go by the conversation, and after one photo of Theo the next cat is Theo."""
         if not self._cfg.get("image_enabled"):
             return ""
+        from . import faces as _faces
         from . import fingerprints as _fp
-        if not _fp.names_on(self._cfg):
+        if not _fp.names_on(self._cfg) and not _faces.faces_on(self._cfg):
             return ""
         try:
             as_files = set(_images.attached_as_files(query)) if self._writes_enabled else set()
             for data, where in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
                 if where in as_files or _images.known(engine, data):     # looked at for her below, or one she has seen
                     continue
+                self._note_people(engine, faces, data=data)
                 for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
                     self._note_names(seen, [{"name": m["shown"]}], sure=False)
         except Exception as exc:
             logger.debug("holonomic: checking an arriving image for named things failed: %s", exc)
         return ""                                    # what was found is said in one place: _known_block
 
-    def _unseen_block(self, engine, query: str, sid: str, seen: Optional[dict] = None) -> str:
+    def _unseen_block(self, engine, query: str, sid: str, seen: Optional[dict] = None, faces: Optional[dict] = None) -> str:
         """A picture attached as a plain file (the desktop app does this with a phone's HEIC photos) is never
         shown to the model: it is only told a file exists.  So it is looked at here, before she replies, and
         she is given what was seen, instead of answering about a picture she has not seen."""
@@ -730,6 +802,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                         self._note_names(seen, [{"name": m["shown"]}], sure=_fp._mentions(m["shown"], img.get("description") or ""))
                         seen[m["shown"].lower()]["unrecorded"] = True
                 self._note_names(seen, named, sure=True)
+                self._note_people(engine, faces, image_id=img["id"])
                 out.append(f"- image #{img['id']} ({p.name}; file: {img['file']}): "
                            + (" ".join(img["description"].split()) if img.get("description")
                               else "it could not be looked at just now. Say so; do not describe it from the user's words."))
@@ -904,8 +977,12 @@ class HolonomicMemoryProvider(MemoryProvider):
                     out["part_of_image"] = hit.meta.get("place", "")
         return out
 
-    @staticmethod
-    def _image_json(img: dict, **extra: Any) -> Dict[str, Any]:
+    @property
+    def _tell_people(self) -> bool:
+        from . import faces as _faces
+        return _faces.faces_on(self._cfg) and bool(_faces.face_config(self._cfg)["face_name_unasked"])
+
+    def _image_json(self, img: dict, **extra: Any) -> Dict[str, Any]:
         out = {"image_id": img["id"], "shown": time.strftime("%Y-%m-%d %H:%M", time.localtime(img["created_at"])),
                "file": img["file"], "size": f"{img['width']}x{img['height']}",
                "description": img["description"] or "(not described yet)", "things_in_it": img["labels"]}
@@ -913,6 +990,8 @@ class HolonomicMemoryProvider(MemoryProvider):
             out["said_when_shown"] = img["caption"]
         if img.get("named"):                # particular things in it: named by the user, or recognised by their look
             out["shows"] = [n["name"] + ("" if n["said"] else " (recognised by its look)") for n in img["named"]]
+        if img.get("people_known") and self._tell_people:        # who is in it, where the user lets her be told unasked
+            out["people"] = [p["name"] + (" (the user)" if p["is_user"] else "") for p in img["people_known"]]
         if img.get("seen", 1) > 1:
             out["times_shown"] = img["seen"]
         if img.get("sections_waiting"):
@@ -930,6 +1009,25 @@ class HolonomicMemoryProvider(MemoryProvider):
             if not img:
                 return _error(f"Image {args['image_id']} is not set aside, or its file is gone, so there is nothing to restore")
             return json.dumps(dict(self._image_json(img), note="Restored as it was. " + how))
+        if args.get("image_id") is not None and (args.get("who") or (args.get("person") or "").strip()):
+            from . import faces as _faces
+            if not _faces.faces_on(self._cfg):
+                return _error("Recognising people by their faces is off; the user has not turned it on")
+            image_id = int(args["image_id"])
+            try:
+                if not (args.get("person") or "").strip():           # who is in it: asked for, so it may be said
+                    found = _faces.look(engine, self._cfg, image_id)
+                    return json.dumps({"image_id": image_id, "faces": [
+                        {"face": f["n"], "where": f["where"], "who": f["name"] or "someone you do not know"} for f in found],
+                        "note": "Nobody's face was found in it." if not found else "Say who they are only because you were asked."})
+                if args.get("wrong"):
+                    n = _faces.not_person(engine, self._cfg, image_id, args["person"], face=args.get("face"))
+                    return json.dumps({"image_id": image_id, "note": (f"Noted: that is not {args['person']}. That face will not be taken "
+                                       "for them again.") if n else f"Nothing in that image was taken for {args['person']}."})
+                done = _faces.name_person(engine, self._cfg, image_id, args["person"], face=args.get("face"), me=bool(args.get("me")))
+            except _faces.FaceError as exc:
+                return _error(str(exc))
+            return json.dumps(dict(done, note=f"Kept. You will know {done['name']} by their face in other images."))
         if args.get("image_id") is not None and (args.get("name") or "").strip():
             from . import fingerprints as _fp
             if not _fp.names_on(self._cfg):

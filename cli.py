@@ -30,6 +30,11 @@
     hermes holonomic images removed               images set aside
     hermes holonomic images restore ID...         put one back exactly as it was
     hermes holonomic images delete ID... [--yes]  remove for good an image already set aside, files included
+    hermes holonomic faces                        knowing people by their faces: what is allowed, who she knows
+    hermes holonomic faces learn none|me|named|often     whose faces she may learn (none until you say otherwise)
+    hermes holonomic faces ask on|off             may she ask who someone is who keeps appearing (with 'often')
+    hermes holonomic faces unasked on|off         is she told who is in an image without being asked
+    hermes holonomic faces show ID | name ID NAME [--face N] [--me] | not ID NAME | people | often | dream NAME yes|no | forget NAME | scan
     hermes holonomic context                      what memory gave her for the most recent message
     hermes holonomic tidy [--apply]               find stored messages that are Hermes' notes about attachments, and remove them
     hermes holonomic profile [--history]
@@ -75,9 +80,12 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
+        return
+    if action == "faces" and args.faces_action in ("learn", "ask", "unasked"):
+        _faces_settings(args)
         return
     if action == "images" and args.images_action in ("on", "off"):
         _images_toggle(args)
@@ -103,6 +111,8 @@ def holonomic_command(args) -> None:
             _sleep(engine, cfg, args)
         elif action == "images":
             _images_cmd(engine, cfg, args)
+        elif action == "faces":
+            _faces_cmd(engine, cfg, args)
         elif action == "context":
             try:
                 print((engine.path / "last_context.txt").read_text(encoding="utf-8").rstrip())
@@ -297,6 +307,10 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_count"] = args.count
     if args.people:
         values["dream_image_use_people"] = args.people == "yes"
+    if getattr(args, "who", None):
+        values["dream_image_people"] = args.who
+    if getattr(args, "name_people", None):
+        values["dream_name_people"] = args.name_people
     if args.attempts:
         values["dream_image_candidates"] = max(1, min(args.attempts, 8))
     if args.swap:
@@ -370,7 +384,14 @@ def _dream_images(cfg, args) -> None:
         if sc["dream_image_swap"]:
             print("  one graphics card: the language models are unloaded while pictures are drawn and reloaded afterwards")
     if mode == "from_images":
-        print(f"  images with real people in them: {'may be drawn from' if sc['dream_image_use_people'] else 'are not drawn from (--people yes to allow)'}")
+        from . import faces as _f
+        policy = _f.dream_policy(load_config(home), bool(sc["dream_image_use_people"]))
+        print("  images with real people in them: " + {"none": "are not drawn from", "anyone": "may be drawn from, whoever is in them",
+              "me": "are drawn from only if every face in them is yours", "named": "are drawn from only if every face in them is someone you named"}[policy]
+              + "   (--who none|me|named|anyone)")
+        named = _f.face_config(load_config(home))["dream_name_people"]
+        print("  people in a dream by name, going by their faces: " + {"none": "nobody", "me": "only you", "named": "anyone you have named"}.get(named, "nobody")
+              + "   (--name-people none|me|named)")
         print(f"  how far a picture may move from the images it starts from: {sc['dream_image_strength']} (--strength)")
     if mode in ("pictures", "from_images"):
         print(f"  style added to every scene: {sc['dream_image_style'] or '(none)'} (--style)")
@@ -378,6 +399,161 @@ def _dream_images(cfg, args) -> None:
         print("  Image memory is off, so there are no images to dream of. Turn on with: hermes holonomic images on")
     if values:
         print("Restart Hermes for a running session to pick this up.")
+
+
+_LEARN_SAYS = {"none": "no face is looked for at all",
+               "me": "only your own face is learned and recognised; no other face is kept",
+               "named": "people you have named are learned and recognised; no other face is kept",
+               "often": "every face is kept, so that someone who keeps appearing can be noticed"}
+
+
+def _faces_status(cfg) -> None:
+    from . import faces as _f
+    fc = _f.face_config(cfg)
+    print(f"Whose faces she may learn: {fc['face_learn']}  ({_LEARN_SAYS[fc['face_learn']]})")
+    print(f"  she may ask who someone is who keeps appearing: {'yes' if fc['face_ask_names'] else 'no'}"
+          + ("" if fc["face_learn"] == "often" or not fc["face_ask_names"] else "   (only applies when every face is kept: faces learn often)"))
+    print(f"  she is told who is in an image without being asked: {'yes' if fc['face_name_unasked'] else 'no, only when you ask who someone is'}")
+    print("  change with: hermes holonomic faces learn none|me|named|often,  faces ask on|off,  faces unasked on|off")
+
+
+def _faces_settings(args) -> None:
+    from hermes_constants import get_hermes_home
+    from . import faces as _f
+    from .provider import load_config, write_config
+    home = get_hermes_home()
+    what, value = args.faces_action, (args.items[0].lower() if args.items else "")
+    if what == "learn":
+        if value not in _f.LEARN:
+            print("Usage: hermes holonomic faces learn none|me|named|often")
+            for k in _f.LEARN:
+                print(f"  {k:<6} {_LEARN_SAYS[k]}")
+            return
+        write_config(home, {"face_learn": value})
+        print(f"Whose faces she may learn: {value}  ({_LEARN_SAYS[value]}).")
+        if value == "none":
+            print("  Faces already kept stay where they are, unused. To drop them all: hermes holonomic faces forget --all --yes")
+        else:
+            print("  Every image is looked at again for faces under this rule when things are quiet (or now: hermes holonomic faces scan).")
+            print("  The helper server needs OpenCV for this: see hermes holonomic faces")
+        if (home / "holonomic" / "holonomic.db").exists():     # what is kept depends on the rule: everything is gone through again
+            engine, _ = _open()
+            if engine is not None:
+                try:
+                    engine.kv_set("faces:look_again", "1")
+                finally:
+                    engine.close()
+    elif value in ("on", "off"):
+        key = "face_ask_names" if what == "ask" else "face_name_unasked"
+        write_config(home, {key: value == "on"})
+        print({"face_ask_names": {True: "She may ask, once, who a person is who keeps appearing (applies when every face is kept: faces learn often).",
+                                  False: "She does not ask who people are."},
+               "face_name_unasked": {True: "She is told who is in an image whenever she recognises someone, and may say so.",
+                                     False: "She is told who is in an image only when you ask who someone is."}}[key][value == "on"])
+    else:
+        print(f"Usage: hermes holonomic faces {what} on|off")
+        return
+    print("Restart Hermes for a running session to pick this up.")
+
+
+def _faces_cmd(engine, cfg, args) -> None:
+    from . import faces as _f
+    from . import images as _img
+    what, items = args.faces_action, list(args.items or [])
+    fc = _f.face_config(cfg)
+    if what == "status":
+        _faces_status(cfg)
+        model = _f.available(cfg)
+        print(f"  helper server at {fc['host']}: " + (f"faces ready ({model})" if model else
+              "faces NOT available. It needs OpenCV in the Python that runs it, then a restart of the helper:"))
+        if not model:
+            print("    <ComfyUI>\\.venv\\Scripts\\python.exe -m pip install opencv-python-headless")
+        known = _f.people(engine)
+        print(f"  people she knows: {', '.join(p['name'] + (' (you)' if p['is_user'] else '') for p in known) or 'nobody'}"
+              + (f"   images not yet looked at for faces: {_f.waiting(engine)}" if _f.faces_on(cfg) else ""))
+        from .sleep import sleep_config
+        print(f"  in images a dream picture is drawn from: {_f.dream_policy(cfg, bool(sleep_config(cfg)['dream_image_use_people']))}"
+              "   (hermes holonomic dreams images --who none|me|named|anyone)")
+        print(f"  named in dreams, going by their faces: {fc['dream_name_people']}   (hermes holonomic dreams images --name-people none|me|named)")
+    elif what == "people":
+        known = _f.people(engine)
+        print(f"{len(known)} person(s) she knows by face." if known else "She knows nobody by face.")
+        ids = lambda xs: ", ".join("#" + str(i) for i in xs) or "none"
+        for p in known:
+            print(f"  {p['name']}" + ("  (you)" if p["is_user"] else "") + ("" if p["dream"] is None else f"   in dreams: {'yes' if p['dream'] else 'never'}"))
+            print(f"    you said so in image {ids(p['said'])};  she recognised them in image {ids(p['seen'])}")
+    elif what == "show":
+        if not items or not items[0].isdigit():
+            print("Usage: hermes holonomic faces show ID      (the faces in an image, numbered from the left)")
+            return
+        try:
+            found = _f.look(engine, cfg, int(items[0]))
+        except _f.FaceError as exc:
+            print(str(exc))
+            return
+        print(f"image #{items[0]}: {len(found)} face(s)" + (":" if found else "."))
+        for f in found:
+            print(f"  face {f['n']}  {f['where']}:  " + (f"{f['name']} ({'you said so' if f['said'] else 'recognised'})" if f["name"] else "not known"))
+    elif what == "name":
+        if len(items) < 2 or not items[0].isdigit():
+            print("Usage: hermes holonomic faces name ID NAME [--face N] [--me]      (a face in that image is this person; --me: it is you)")
+            return
+        try:
+            done = _f.name_person(engine, cfg, int(items[0]), " ".join(items[1:]), face=args.face, me=args.me)
+        except _f.FaceError as exc:
+            print(str(exc) + ("\n  e.g. hermes holonomic faces name " + items[0] + " " + " ".join(items[1:]) + " --face 1"
+                              if isinstance(exc, _f.NeedsChoice) else ""))
+            return
+        print(f"image #{done['image_id']}: face {done['face']} ({done['where']}) is {done['name']}" + (", which is you." if done["is_user"] else "."))
+        print("  Other images are looked at again for that face when things are quiet (or now: hermes holonomic faces scan).")
+    elif what == "not":
+        if len(items) < 2 or not items[0].isdigit():
+            print("Usage: hermes holonomic faces not ID NAME [--face N]      (a face in that image is not this person)")
+            return
+        n = _f.not_person(engine, cfg, int(items[0]), " ".join(items[1:]), face=args.face)
+        print(f"image #{items[0]}: noted, that is not {' '.join(items[1:])}. The face will not be taken for them again." if n
+              else f"Nothing in image #{items[0]} was taken for {' '.join(items[1:])}.")
+    elif what == "dream":
+        if len(items) < 2 or items[-1] not in ("yes", "no", "default"):
+            print("Usage: hermes holonomic faces dream NAME yes|no|default      (may this person be in an image a dream picture is drawn from?)")
+            return
+        name = " ".join(items[:-1])
+        ok = _f.set_dream(engine, name, {"yes": True, "no": False, "default": None}[items[-1]])
+        print(({"yes": f"{name} may be in images dreams are drawn from, where the general rule allows people.",
+                "no": f"An image with {name} in it is never drawn from in a dream.",
+                "default": f"{name}: back to the general rule."}[items[-1]]) if ok else f"She knows nobody called {name!r}.")
+    elif what == "forget":
+        if args.all:
+            if not args.yes:
+                print("This drops every face and every person she knows by face. Images and their descriptions stay. "
+                      "To do it: hermes holonomic faces forget --all --yes")
+                return
+            print(f"Dropped {_f.forget_all(engine)} face(s) and everyone she knew by face.")
+            return
+        if not items:
+            print("Usage: hermes holonomic faces forget NAME   |   hermes holonomic faces forget --all --yes")
+            return
+        name = " ".join(items)
+        print(f"Forgot who {name} is; their faces are no longer anyone's." if _f.forget_person(engine, name) else f"She knows nobody called {name!r}.")
+    elif what == "often":
+        if fc["face_learn"] != "often":
+            print("People who keep appearing are only noticed when every face is kept: hermes holonomic faces learn often")
+            return
+        groups = _f.strangers(engine, cfg)
+        print(f"{len(groups)} person(s) she does not know who are in {fc['face_often_images']} or more images." if groups
+              else f"Nobody she does not know is in {fc['face_often_images']} or more images.")
+        for g in groups:
+            print(f"  in image {', '.join('#' + str(i) for i in g['images'])}" + ("   (she has asked who this is)" if g["asked"] else "")
+                  + f"\n    to say who: hermes holonomic faces show {g['images'][0]}   then   hermes holonomic faces name {g['images'][0]} NAME --face N")
+    elif what == "scan":
+        if not _f.faces_on(cfg):
+            print("Learning faces is off. Turn it on first: hermes holonomic faces learn me|named|often")
+            return
+        t0 = time.time()
+        done = _f.scan(engine, cfg, again=True)
+        print(f"Looked for faces in {len(done['done'])} image(s) in {time.time() - t0:.0f} s.")
+        for err in done["errors"]:
+            print(f"  stopped: {err}")
 
 
 def _images_toggle(args) -> None:
@@ -927,6 +1103,15 @@ def register_cli(subparser) -> None:
     slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
     slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
     subs.add_parser("context", help="Show what memory gave the agent for the most recent message")
+    fa = subs.add_parser("faces", help="Knowing particular people by their faces (off until you turn it on)")
+    fa.add_argument("faces_action", nargs="?", default="status",
+                    choices=["status", "learn", "ask", "unasked", "people", "show", "name", "not", "dream", "forget", "often", "scan"])
+    fa.add_argument("items", nargs="*", help="A setting, an image id, a name")
+    fa.add_argument("--face", type=int, help="With 'name' and 'not': which face in the image, 1 = leftmost")
+    fa.add_argument("--me", action="store_true", help="With 'name': this is you")
+    fa.add_argument("--all", action="store_true", help="With 'forget': every face and every person")
+    fa.add_argument("--yes", action="store_true", help="With 'forget --all': actually do it")
+    fa.add_argument("--width", type=int, default=110, help="Characters of text to show")
     td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
     td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")
@@ -948,6 +1133,10 @@ def register_cli(subparser) -> None:
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
+    drm.add_argument("--name-people", choices=["none", "me", "named"], help="With 'images': whether a dream is told who the people in "
+                     "the images it draws on are, so they can be in it by name: nobody, only you, or anyone you have named")
+    drm.add_argument("--who", choices=["none", "me", "named", "anyone"], help="With 'images': whose images may be drawn from, going by "
+                     "faces: no image with people; only images where every face is yours; only where every face is someone you named; anyone")
     drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
     drm.add_argument("--enlarge", type=float, metavar="TIMES", help="With 'images': make the picture she keeps this many times larger "
                      "with an upscaling model on the image server, e.g. 2 (0 = off)")

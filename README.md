@@ -484,6 +484,53 @@ own with `images similar ID --all`.
 | `image_names` | `true` | Recognise things the user has named (needs fingerprints) |
 | `image_name_min` | `0.6` | How alike a part must be to a named thing to be offered to the vision model as it |
 
+### Faces
+
+A picture fingerprint says two things look alike; it cannot tell one person from another who looks
+similar. A face model can. With one, the agent can know a particular person in an image. This is the
+most personal thing the plugin does, so all of it is off until the user turns it on, and each part is
+turned on separately.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `face_learn` | `none` | Whose faces may be learned: `none` (no face is looked for), `me` (only the user's; no other face is kept), `named` (people the user has named; no other face is kept), `often` (every face is kept, so that someone who keeps appearing can be noticed) |
+| `face_ask_names` | `false` | With `often`: she may ask, once, who a person is who has appeared in `face_often_images` images |
+| `face_name_unasked` | `false` | Whether she is told who is in an image when the user has not asked. Off: only when the message asks who someone is |
+| `dream_image_people` | unset | Whose images a dream picture may be drawn from: `none`, `me` (every face in the image is the user's), `named` (every face is someone the user named), `anyone`. Unset follows the older `dream_image_use_people`, which is `false` |
+| `dream_name_people` | `none` | Whether a dream is told who is in the images it draws on, so they can be in it by name: `none`, `me`, `named` |
+| `face_min` | `0.40` | How alike two faces must be to be the same person |
+
+```
+hermes holonomic faces                              # what is allowed, whether the helper can do faces, who she knows
+hermes holonomic faces learn named                  # none | me | named | often
+hermes holonomic faces unasked on                   # may she say who is in a picture without being asked
+hermes holonomic faces ask on                       # with 'often': may she ask who someone is
+hermes holonomic faces show 37                      # the faces in image #37, numbered from the left
+hermes holonomic faces name 37 Kayla --me           # that face is you
+hermes holonomic faces name 66 Emma --face 2        # with several faces, say which
+hermes holonomic faces not 66 Emma                  # that face is not Emma
+hermes holonomic faces dream Emma no                # never in an image a dream is drawn from, nor named in one
+hermes holonomic faces people | often | scan | forget NAME | forget --all --yes
+hermes holonomic dreams images --who named --name-people me
+```
+
+Saying who someone is when showing a picture ("this is me", "me and my daughter Emma") teaches her
+too, within what `face_learn` allows; with several faces she needs to be told which is which, or it
+is left for `faces name`. What a person looks like is taken only from faces the user spoke for: a
+face she recognised herself is never an example. In `me` and `named` no fingerprint is kept of
+anyone else's face. Tightening `face_learn` drops what the new rule does not allow the next time
+images are gone through.
+
+The helper server does the work and needs OpenCV for it, in the same Python:
+
+```
+<ComfyUI>\.venv\Scripts\python.exe -m pip install opencv-python-headless
+```
+
+On its next start it downloads two small models from the OpenCV model zoo (YuNet to find faces,
+SFace to fingerprint them, 39 MB together). Without OpenCV everything else works and
+`hermes holonomic faces` says faces are not available.
+
 ## Inspecting the store
 
 ```

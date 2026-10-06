@@ -422,7 +422,13 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
         return None
     low, high = int(sc["dream_min_words"]), max(int(sc["dream_max_words"]), int(sc["dream_min_words"]) + 20)
     limit = max(1800, high * 9)
-    listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}" for f in rng.sample(fragments, len(fragments)))
+    from . import faces as _faces                       # who is in an image, if the user lets a dream be told
+    for f in fragments:
+        try:
+            f["who"] = _faces.dream_names(engine, cfg, f.get("image_id"))
+        except Exception:
+            f["who"] = ""
+    listing = "\n".join(f"- ({_voice(f['kind'])}) {' '.join(f['text'].split())}{f['who']}" for f in rng.sample(fragments, len(fragments)))
     # Left alone, the model opens every dream the same way: seven real dreams in a row began in a
     # corridor or a hall, and asking it to "begin differently" only changed walking to drifting.  So the
     # place a dream starts in is chosen here, and not reused while it is one of the last few.
@@ -502,6 +508,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
     """Pictures of a dream.  The dream's author says which moments and what they look like; an image generator
     draws them.  In 'from_images' mode a moment that resembles images she has seen is drawn starting from those.
     A failure here never loses the dream: it is reported and the dream stands without pictures."""
+    from . import faces as _faces
     from . import images as _images
     from . import paint as _paint
     sc = sleep_config(cfg)
@@ -517,10 +524,12 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
     if mode == "from_images":
         for f in one["fragments"]:
             image_id = f.get("image_id")
-            if image_id and _images.may_dream_from(engine, image_id, bool(sc["dream_image_use_people"])):
+            if image_id and _images.may_dream_from(engine, image_id, _faces.people_allowed_in_dream(
+                    engine, cfg, image_id, bool(sc["dream_image_use_people"]))):
                 img = _images.get_image(engine, image_id)
                 if img and img["description"]:
                     usable[int(image_id)] = img["description"] if sc["dream_image_keep_signature"] else _images.without_signature(img["description"])
+                    usable[int(image_id)] += _faces.dream_names(engine, cfg, image_id)
     n = int(sc["dream_image_count"])
     prompt = (_SCENES.format(n=n, refs=_SCENE_REFS if usable else "") + f"\n\nDREAM:\n{one['text']}"
               + ("\n\nIMAGES:\n" + "\n".join(f"[{i}] {' '.join(d.split())[:300]}" for i, d in usable.items()) if usable else ""))
