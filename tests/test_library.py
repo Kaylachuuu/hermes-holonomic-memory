@@ -359,3 +359,31 @@ def test_only_the_users_own_words_open_a_library(tmp_path):
     assert not asked("yes, " + "and another thing entirely " * 5)                            # a long message that happens to open with yes
     lib.clear_refused(root, "s")
     assert not asked("yes")
+
+
+def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
+    """A folder of assembly source had its DOS executables beside it.  A small .COM program need not contain a
+    single zero byte."""
+    import random
+    rnd = random.Random(7)
+    com = bytes(rnd.choice([0xB4, 0x09, 0xBA, 0x0D, 0x01, 0xCD, 0x21, 0xC3, 0xEB, 0xFE, 0x8A, 0x04, 0x3C, 0x24, 0x74, 0xE8, 0x90, 0x1F, 0x07]) for _ in range(52))
+    assert b"\x00" not in com and lib.looks_binary(com)
+    assert lib.looks_binary(b"MZ" + b"This program cannot be run in DOS mode.") and lib.looks_binary(b"\x7fELF\x02\x01\x01")
+    assert lib.looks_binary(bytes(range(1, 256)) * 4)
+    assert not lib.looks_binary(b"; boot sector\r\nstart:\r\n\tmov ax, 0x07C0\r\n\tmov ds, ax\r\n\x1a")      # DOS text, with its end-of-file mark
+    assert not lib.looks_binary("Größe: 512 Bytes, naïve café".encode("utf-8")) and not lib.looks_binary("日本語のメモ".encode("utf-8"))
+    assert not lib.looks_binary("Gr\xf6\xdfe: 512 Bytes \xc9\xcd\xcd\xbb box".encode("latin-1") + b" plain words follow here" * 4)
+    assert not lib.looks_binary(b"")
+    src = tmp_path / "os"; src.mkdir()
+    (src / "boot.asm").write_text("; boot sector\nstart:\n    mov si, msg\n    call print\n    jmp $\n")
+    (src / "CHOICE.COM").write_bytes(com)
+    (src / "SHELL.EXE").write_bytes(b"MZ" + bytes(200))
+    (src / "CONFIG.SYS").write_text("FILES=30\r\nBUFFERS=20\r\n")
+    root = tmp_path / "store" / "libraries"
+    lib.create(root, "my-os", str(src))
+    try:
+        report = lib.build(root, "my-os", HashEmbedder(), CFG)
+        assert report["added"] == 2 and {s["file"]: s["why"] for s in report["skipped"]} == {"CHOICE.COM": "not a text file", "SHELL.EXE": "not a text file"}
+        assert sorted(lib.info(root, "my-os")["files"]) == ["CONFIG.SYS", "boot.asm"]
+    finally:
+        lib.close_all(root)

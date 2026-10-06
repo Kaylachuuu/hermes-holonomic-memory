@@ -47,7 +47,7 @@ _BINARY = {".exe", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj"
            ".zip", ".7z", ".rar", ".gz", ".tar", ".xz", ".bz2", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic",
            ".ico", ".tif", ".tiff", ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".avi", ".mov", ".ttf", ".otf",
            ".woff", ".woff2", ".db", ".sqlite", ".npy", ".npz", ".pth", ".safetensors", ".onnx", ".doc", ".xls", ".ppt",
-           ".xlsx", ".pptx", ".epub", ".chm", ".lnk"}
+           ".xlsx", ".pptx", ".epub", ".chm", ".lnk", ".ovl", ".ovr", ".dsk", ".ima", ".vhd", ".rom", ".tpu", ".scr", ".msi", ".cab"}
 _MARKUP = {".html", ".htm", ".xhtml"}
 _HEADED = {".md", ".markdown", ".txt", ".rst", ".text", ""}
 
@@ -199,6 +199,29 @@ def _docx_text(path: Path) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", xml))
 
 
+def looks_binary(raw: bytes) -> bool:
+    """Whether a file's bytes are a program or data and not something written to be read.
+
+    A small DOS .COM program can have no zero byte in it at all, so that test alone let a folder's old
+    executables in as pieces of nonsense.  Text is nearly all printable characters and has lines; machine code
+    is scattered across every byte value."""
+    sample = raw[:16000]
+    if not sample:
+        return False
+    if b"\x00" in sample or sample[:2] in (b"MZ", b"ZM") or sample[:4] == b"\x7fELF":
+        return True
+    control = sum(1 for c in sample if c < 32 and c not in (9, 10, 13, 12, 26, 27))     # 26: the old DOS end-of-file mark
+    high = sum(1 for c in sample if c >= 127)
+    if control > max(2, len(sample) // 100):                 # more than 1 in 100 are control codes
+        return True
+    try:
+        sample.decode("utf-8")
+        return False                                         # valid UTF-8 with few control codes: text in any language
+    except UnicodeDecodeError:
+        pass
+    return high > len(sample) * 0.15                         # an old code page has some accents and box lines, not this many
+
+
 def read_file(path: Path, max_bytes: int) -> str:
     """The text of a file.  Raises LibraryError, with the reason, for one that cannot be used."""
     ext = path.suffix.lower()
@@ -217,7 +240,7 @@ def read_file(path: Path, max_bytes: int) -> str:
     if ext == ".docx":
         return _docx_text(path)
     raw = path.read_bytes()
-    if b"\x00" in raw[:8000]:
+    if looks_binary(raw):
         raise LibraryError("not a text file")
     for encoding in ("utf-8-sig", "cp1252"):
         try:
@@ -227,8 +250,6 @@ def read_file(path: Path, max_bytes: int) -> str:
             continue
     else:
         text = raw.decode("latin-1")
-    if sum(1 for c in text[:4000] if ord(c) < 32 and c not in "\n\r\t\f") > 40:
-        raise LibraryError("not a text file")
     return _html_text(text) if ext in _MARKUP else text
 
 
