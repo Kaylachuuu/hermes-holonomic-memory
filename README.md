@@ -345,7 +345,8 @@ works with any vision model.) `sleep now` prints her notes on each attempt and h
 
 A picture drawn from an image she has seen stays close to that image. If her best attempt at such a
 picture scores below `dream_image_redraw_below`, it is drawn again holding less tightly to the image
-(`dream_image_redraw_strength`), and she keeps the new best only if she scores it higher.
+(`dream_image_redraw_strength`). She then compares the new attempts with the one she had chosen, from
+her notes on all of them, and keeps whichever she prefers.
 
 **Picture size and the graphics card.** Past a certain size a picture no longer fits on the card
 beside the drawing model, and drawing becomes several times slower with no error and nothing in the

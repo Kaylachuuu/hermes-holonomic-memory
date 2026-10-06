@@ -474,7 +474,8 @@ def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
 
 
 def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
-              report: Optional[Dict[str, Any]] = None, noted: Optional[Dict[int, Dict[str, Any]]] = None) -> Tuple[int, str]:
+              report: Optional[Dict[str, Any]] = None, noted: Optional[Dict[int, Dict[str, Any]]] = None,
+              earlier: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
     """Which of several attempts at a dream picture she keeps: (index, her reason).
 
     She looks at each attempt on its own and notes what it shows, what is wrong with it and a score; then she
@@ -486,7 +487,11 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
     server is off) it is the first.  With `dream_image_choose_think` she reasons before the comparison; that
     has a fixed allowance, and if she uses it up she is asked once more without it.
 
-    `noted`, if given, is filled with her notes on each attempt she could look at, by index."""
+    `noted`, if given, is filled with her notes on each attempt she could look at, by index.
+
+    `earlier` is her note on an attempt she already chose from a first drawing.  It joins the comparison as one
+    more attempt without being looked at again, and if she prefers it the index returned is len(pictures).
+    Comparing the two drawings by score alone made her give up a detail she had just chosen a picture for."""
     from .reflect import _parse
     if not pictures or (len(pictures) < 2 and noted is None):         # one picture is still looked at when its score is wanted
         return 0, ""
@@ -509,20 +514,23 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
         except Exception as exc:
             logger.debug("holonomic: looking at dream picture %d failed: %s", i + 1, exc)
     if not notes:
-        return 0, ""
-    top = max(notes, key=lambda i: (notes[i]["score"], -i))          # the best score, the earlier attempt on a tie
-    fallback = (top, f"It scored highest of the attempts she could look at ({notes[top]['score']} of 10).")
-    if len(notes) < 2:
+        return (len(pictures), "") if earlier else (0, "")
+    known = dict(notes)
+    if earlier:
+        known[len(pictures)] = earlier
+    top = max(known, key=lambda i: (known[i]["score"], i == len(pictures), -i))      # best score; on a tie the one already chosen, then the first
+    fallback = (top, f"It scored highest of the attempts she could look at ({known[top]['score']} of 10).")
+    if len(known) < 2:
         return fallback
-    written = "\n".join(f"Attempt {i + 1} (score {n['score']} of 10): {n['shows']} Faults: {n['faults'] or 'none seen.'}"
-                        for i, n in sorted(notes.items()))
-    prompt = _CHOOSE.format(n=len(pictures), scene=scene, remembered=note, notes=written)
+    written = "\n".join(f"Attempt {i + 1}{' (the one you chose from the first drawing)' if earlier and i == len(pictures) else ''} "
+                        f"(score {n['score']} of 10): {n['shows']} Faults: {n['faults'] or 'none seen.'}" for i, n in sorted(known.items()))
+    prompt = _CHOOSE.format(n=len(pictures) + bool(earlier), scene=scene, remembered=note, notes=written)
     for think in ([True, False] if cfg.get("dream_image_choose_think") else [False]):
         try:
             data = _parse(look_at("choose", prompt, [], _CHOOSE_SCHEMA, int(cfg.get("dream_image_choose_think_tokens") or 3000), think=True)
                           if think else look_at("choose", prompt, [], _CHOOSE_SCHEMA, 200))
             best = int(data.get("best") or 0)
-            if best - 1 in notes:
+            if best - 1 in known:
                 return best - 1, _sentence(data.get("why"))[:300]
         except Exception as exc:
             logger.debug("holonomic: choosing between dream pictures failed (thinking %s): %s", think, exc)

@@ -558,9 +558,9 @@ def _images_cmd(engine, cfg, args) -> None:
 
 def _redrawn(p) -> str:
     r = p["redrawn"]
-    after = "she could not judge the new attempts" if r["after"] is None else f"the new best scored {r['after']}"
-    return (f"\n            her best scored {r['before']} of 10, so it was drawn again holding less to the image: {after}, "
-            + ("and she kept that one" if r["kept"] else "so she kept the earlier one"))
+    after = "she could not judge the new attempts" if r["after"] is None else f"the best of the new attempts scored {r['after']}"
+    return (f"\n            the one she chose scored {r['before']} of 10, so it was drawn again holding less to the image: {after}; "
+            "compared side by side, " + ("she kept a new one" if r["kept"] else "she kept the earlier one" + (f": {r['why']}" if r.get("why") else "")))
 
 
 def _print_calls(report) -> None:

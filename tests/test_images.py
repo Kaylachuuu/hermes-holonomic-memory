@@ -985,8 +985,11 @@ def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path
               {"picture": "Car windows fogging over with basil leaves.", "images": []}]
     keep = images._chooser
 
-    def run(scores, painter=None, **extra):
-        drawn, looked = [], []
+    compared = []
+
+    def run(scores, painter=None, picks=(), **extra):
+        drawn, looked, picks = [], [], list(picks)
+        compared.clear()
 
         def paint(prompt, start, size=None, strength=None):
             drawn.append((bool(start), strength))
@@ -997,7 +1000,8 @@ def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path
                 if step != "choose":
                     looked.append(step)
                     return json.dumps({"shows": "A cat.", "faults": "", "score": scores[len(looked) - 1]})
-                return json.dumps({"best": 1, "why": "The first."})
+                compared.append(prompt)
+                return json.dumps({"best": picks.pop(0) if picks else 1, "why": "The first."})
             return look_at
         images._chooser = chooser
         try:
@@ -1008,19 +1012,26 @@ def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path
             images._chooser = keep
         return report, drawn, looked
 
-    # cat: 6 and 7, redrawn: 9 and 8 -> the redrawn first attempt is kept.  basil: 5 and 5, from no image, left alone.
+    # cat: 6 and 7, she chooses the first.  basil: 5 and 5, from no image, never drawn again.  cat again: 9 and 8,
+    # compared with the one she had; she takes the first of the new ones.
     report, drawn, looked = run([6, 7, 5, 5, 9, 8])
     cat, basil = report["dreams"][0]["pictures"]
     assert drawn == [(True, None)] * 2 + [(False, None)] * 2 + [(True, 0.85)] * 2 and len(looked) == 6
-    assert cat["redrawn"] == {"before": 6, "after": 9, "kept": True} and (cat["chosen"], cat["of"], cat["score"]) == (1, 2, 9)
+    assert "Attempt 3 (the one you chose from the first drawing) (score 6 of 10)" in compared[2] and "from 1 to 3" in compared[2]
+    assert "the one you chose" not in compared[0]
+    assert cat["redrawn"] == {"before": 6, "after": 9, "kept": True, "why": "The first."} and (cat["chosen"], cat["of"], cat["score"]) == (1, 2, 9)
     assert open(cat["file"], "rb").read() == picture(768, 512, colour=(100, 0, 0))             # the fifth picture drawn
     assert "redrawn" not in basil and basil["score"] == 5
     assert [c["step"] for c in report["calls"] if c.get("drawing")] == ["draw 2 attempt(s)"] * 2 + ["draw 2 attempt(s) again, holding less to the image"]
-    # redrawn no better: the earlier one stays
-    report, drawn, looked = run([8, 7, 9, 9, 8, 6])
+    # the new ones score higher, but side by side she prefers the one she had: it stays
+    report, drawn, looked = run([8, 7, 9, 9, 9, 9], picks=[1, 1, 3])
     cat = report["dreams"][0]["pictures"][0]
-    assert cat["redrawn"] == {"before": 8, "after": 8, "kept": False} and cat["score"] == 8
+    assert cat["redrawn"]["kept"] is False and cat["redrawn"]["after"] == 9 and (cat["chosen"], cat["score"]) == (1, 8)
     assert open(cat["file"], "rb").read() == picture(768, 512, colour=(20, 0, 0))
+    # the comparison fails: the best score, and on a tie the one she already had
+    report, drawn, looked = run([8, 7, 9, 9, 8, 6], picks=[1, 1, 99])
+    cat = report["dreams"][0]["pictures"][0]
+    assert cat["redrawn"]["kept"] is False and cat["score"] == 8 and open(cat["file"], "rb").read() == picture(768, 512, colour=(20, 0, 0))
     # good enough, switched off, already as free as the redraw, or a painter that cannot be asked: drawn once
     assert len(run([9, 9, 9, 9])[1]) == 4 and len(run([1, 1, 1, 1], dream_image_redraw_below=0)[1]) == 4
     assert len(run([1, 1, 1, 1], dream_image_strength=0.85)[1]) == 4

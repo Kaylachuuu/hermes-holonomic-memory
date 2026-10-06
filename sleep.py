@@ -88,7 +88,7 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     # Each picture is drawn this many times and she keeps the one she thinks shows the moment best (needs a vision model).
     "dream_image_candidates": 3,
     # A picture drawn from an image stays close to it.  If the best attempt scores below this, the picture is drawn
-    # again holding less tightly to the image, and she keeps the new best only if it scores higher.  0 = never.
+    # again holding less tightly to the image, and she chooses between the new attempts and the one she had.  0 = never.
     "dream_image_redraw_below": 9,
     "dream_image_redraw_strength": 0.85,
     "dream_image_choose_think": False,        # let her reason before choosing (slower; falls back to choosing without)
@@ -586,17 +586,20 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             d["tries"] = d.pop("new")
             drawn.append(d)
 
-    def choose(d: dict, tries: List[bytes]) -> tuple:
+    def choose(d: dict, tries: List[bytes], earlier: Optional[dict] = None) -> tuple:
         notes: Dict[int, Dict[str, Any]] = {}
-        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes)
-        return best, why, (notes.get(best) or {}).get("score")
+        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes, earlier=earlier)
+        return best, why, notes
 
     for d in drawn:
-        d["best"], d["why"], d["score"] = choose(d, d["tries"])
+        d["best"], d["why"], notes = choose(d, d["tries"])
+        d["note"] = notes.get(d["best"])
+        d["score"] = (d["note"] or {}).get("score")
 
     # A picture drawn from an image she has seen keeps close to that image: the cat on the couch came out as the
     # cat on the couch, three times, when the dream had put the couch under water.  She noticed; nothing was done
-    # about it.  Now a best attempt she scores low is drawn again holding less tightly to the image.
+    # about it.  Now a chosen attempt she scores low is drawn again holding less tightly to the image, and she
+    # chooses between the new attempts and the one she had.
     below, looser = int(sc["dream_image_redraw_below"] or 0), min(float(sc["dream_image_redraw_strength"] or 0), 1.0)
     loose = _looser(painter, paint, sc, looser) if below > 0 and looser > float(sc["dream_image_strength"] or 0) + 0.01 else None
     again = [d for d in drawn if loose and d["start"] and d["score"] is not None and d["score"] < below]
@@ -607,10 +610,13 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             more = d.pop("new", None)
             if not more:
                 continue
-            best, why, score = choose(d, more)
-            d["redrawn"] = {"before": d["score"], "after": score, "kept": score is not None and score > d["score"]}
-            if d["redrawn"]["kept"]:
-                d.update(tries=more, best=best, why=why, score=score)
+            # She compares the new attempts with the one she had chosen, from her notes on all of them.
+            best, why, notes = choose(d, more, earlier=d["note"])
+            new = best < len(more) and best in notes
+            d["redrawn"] = {"before": d["score"], "after": max((n["score"] for n in notes.values()), default=None), "kept": new,
+                            "why": why}
+            if new:
+                d.update(tries=more, best=best, why=why, score=notes[best]["score"])
     made = []
     for d in drawn:
         try:
