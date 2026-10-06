@@ -908,6 +908,8 @@ def test_each_picture_is_drawn_several_times_and_she_keeps_one(tmp_path):
 
     def chooser(ic, report):
         def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+            if step == "what to look for":                                      # no list: she is asked the open question
+                return json.dumps({"checks": []})
             asked.append((step, prompt, [size_of(j) for j in jpegs]))
             if step != "choose":                                                # one attempt at a time, each with its own notes
                 n = int(step.split()[-1])
@@ -1037,6 +1039,8 @@ def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path
 
         def chooser(ic, report):
             def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+                if step == "what to look for":
+                    return json.dumps({"checks": []})
                 if step != "choose":
                     looked.append(step)
                     return json.dumps({"shows": "A cat.", "faults": "", "score": scores[len(looked) - 1]})
@@ -1127,6 +1131,110 @@ def test_a_signature_is_kept_out_of_dream_pictures(tmp_path):
     assert darkest(given[-1][1], corner) < 40 and len(given) == 3
 
 
+def test_each_attempt_is_questioned_about_what_the_moment_needs(tmp_path):
+    """She first lists what a picture of the moment must show, then answers for each attempt whether each thing is
+    there, and about writing and bodies.  The score comes from those answers; a second drawing gets the same list."""
+    from holonomic import images
+    asked = []
+    answers = [dict(q1="yes", q2="yes", q3="no", writing="none", bodies="None.", other="none", shows="A cat on a couch."),
+               dict(q1="yes", q2="yes", q3="yes", writing="'Rcnonu' on a cushion", bodies="The cat has five legs.", other="none", shows="A cat under water."),
+               dict(q1="yes", q2="unclear", q3="yes", writing="none", bodies="none", other="none", shows="A cat on a couch under water.")]
+    keep = images._chooser
+
+    def chooser(ic, report):
+        def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+            asked.append((step, prompt, len(jpegs), schema))
+            report.setdefault("calls", []).append({"step": step})
+            if step == "what to look for":
+                return json.dumps({"checks": ["a long-haired black and white cat.", "a white stripe between the cat's eyes", "the couch is under water", "x"]})
+            if step == "choose":
+                return json.dumps({"best": 3, "why": "Only the third has the water and nothing wrong."})
+            return json.dumps(answers[int(step.split()[-1]) - 1])
+        return look_at
+    images._chooser = chooser
+    try:
+        notes, checks, report = {}, [], {}
+        three = [picture(colour=(i, 0, 0)) for i in range(3)]
+        scene = "A cat with a white stripe between its eyes sits on a couch at the bottom of a lake."
+        assert images.pick_best(CFG, scene, three, noted=notes, checks=checks, report=report) == (2, "Only the third has the water and nothing wrong.")
+        assert checks == ["a long-haired black and white cat", "a white stripe between the cat's eyes", "the couch is under water"]
+        assert [a[0] for a in asked] == ["what to look for", "look at attempt 1", "look at attempt 2", "look at attempt 3", "choose"]
+        assert asked[0][2] == 0 and asked[1][2] == 1 and "- q2: can you see this in the picture: a white stripe between the cat's eyes?" in asked[1][1]
+        assert asked[1][3]["properties"]["q3"]["enum"] == ["yes", "no", "unclear"] and "q4" not in asked[1][3]["properties"]
+        assert "Do not answer from what the moment says should be there" in asked[1][1]
+        # two of three there; all there but two things wrong; one unclear and nothing wrong
+        assert [notes[i]["score"] for i in range(3)] == [7, 6, 8]
+        assert notes[0]["missing"] == ["the couch is under water"] and notes[0]["faults"] == "" and "Missing: the couch is under water." in notes[0]["shows"]
+        assert notes[1]["faults"] == "The cat has five legs. Writing: 'Rcnonu' on a cushion"
+        assert "Could not tell: a white stripe between the cat's eyes." in notes[2]["shows"]
+        assert report["calls"][0]["noted"].startswith("a long-haired black and white cat; a white stripe")
+        assert "Attempt 2 (score 6 of 10)" in asked[4][1] and "Faults: The cat has five legs." in asked[4][1]
+        # a second drawing: the same list, not asked for again
+        asked.clear()
+        images.pick_best(CFG, scene, three[:2], noted=notes, checks=checks, earlier={"shows": "x", "faults": "", "score": 8})
+        assert [a[0] for a in asked] == ["look at attempt 1", "look at attempt 2", "choose"]
+        # writing the moment asks for is not counted against the picture
+        asked.clear()
+        images.pick_best(CFG, "A neon sign that reads 'Bridgestone Arena' over a crowd.", three[:2], noted=notes, checks=["a neon sign"])
+        assert notes[1]["faults"] == "The cat has five legs." and notes[1]["score"] == 8
+    finally:
+        images._chooser = keep
+
+
+def test_the_picture_she_keeps_is_enlarged(tmp_path):
+    """Only the kept picture is enlarged, after she has chosen it, to the size drawn times the factor.  If the
+    image server cannot do it the picture stands as drawn and the dream is not lost."""
+    import io, random
+    from PIL import Image
+    from holonomic import images, paint as painting
+    from holonomic.sleep import sleep_once, sleep_config
+    assert sleep_config({})["dream_image_enlarge"] == 0
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=2, dream_image_candidates=2, dream_image_style="", dream_image_enlarge=2,
+               dream_image_width=768, dream_image_height=512)
+    scenes = [{"picture": "A black cat asleep on a couch in a greenhouse.", "images": []},
+              {"picture": "Car windows fogging over with basil leaves.", "images": []}]
+    order = []
+
+    def paint(prompt, start, size=None):
+        order.append("draw")
+        return picture(768, 512)
+
+    def enlarge(data, size):
+        order.append(("enlarge", size))
+        return picture(*size)
+    paint.enlarge = enlarge
+    m, ids, now = dream_store(tmp_path / "a")
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    made = report["dreams"][0]["pictures"]
+    assert order == ["draw"] * 4 + [("enlarge", (1536, 1024))] * 2 and [p["enlarged"] for p in made] == [[1536, 1024]] * 2
+    kept = images.get_image(m, made[0]["id"])                # the test's view size is smaller; the original is what was made
+    assert (kept["width"], kept["height"]) == (1536, 1024) and Image.open(kept["original"]).size == (1536, 1024)
+    assert [c["step"] for c in report["calls"] if c.get("drawing")][-2:] == ["enlarge the one she kept"] * 2
+
+    def broken(data, size):
+        raise painting.PaintError("no upscale model")
+    paint.enlarge = broken
+    m, ids, now = dream_store(tmp_path / "b")
+    report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    made = report["dreams"][0]["pictures"]
+    assert len(made) == 2 and "enlarged" not in made[0] and images.get_image(m, made[0]["id"])["width"] == 768
+    assert any("could not enlarge a picture (no upscale model)" in e for e in report["errors"])
+    # the job given to ComfyUI, and where enlarging is not on offer
+    sc = {"dream_image_api": "comfyui", "dream_image_host": "http://x", "dream_image_enlarge": 2}
+    assert painting.make_enlarger(dict(sc, dream_image_enlarge=0)) is None and painting.make_enlarger(dict(sc, dream_image_api="openai")) is None
+    seen = {}
+    keep = painting._comfy_upload, painting._comfy_run
+    painting._comfy_upload = lambda host, data, timeout: "up.png"
+    painting._comfy_run = lambda host, graph, timeout, poll: seen.update(graph) or b"big"
+    try:
+        assert painting.make_enlarger(sc)(b"small", (2048, 1536)) == b"big"
+    finally:
+        painting._comfy_upload, painting._comfy_run = keep
+    assert seen["2"] == {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "RealESRGAN_x2plus.pth"}}
+    assert seen["3"]["class_type"] == "ImageUpscaleWithModel" and (seen["4"]["inputs"]["width"], seen["4"]["inputs"]["height"]) == (2048, 1536)
+    assert seen["1"]["inputs"]["image"] == "up.png"
+
+
 def test_she_can_reason_before_choosing(tmp_path):
     """Against a stand-in for Ollama: reasoning is asked for with its own allowance; if it runs away she is asked
     again without it; if that fails too the first attempt is kept."""
@@ -1137,6 +1245,10 @@ def test_she_can_reason_before_choosing(tmp_path):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "List the separate things" in body["messages"][1]["content"]:       # no list: the open question is asked
+                reply = {"message": {"content": json.dumps({"checks": []})}, "done_reason": "stop"}
+                self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(reply).encode())
+                return
             got.append(body)
             reply = plan.pop(0)
             self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(reply).encode())
@@ -1158,14 +1270,14 @@ def test_she_can_reason_before_choosing(tmp_path):
         assert [len(g["messages"][1].get("images", [])) for g in got] == [1, 1, 1, 0]             # one picture per look, none to compare
         assert [g["think"] for g in got] == [False, False, False, True] and got[3]["options"]["num_predict"] == 3000
         assert "Attempt 2 (score 8 of 10): A cat in a boat. Faults: none seen." in got[3]["messages"][1]["content"]
-        assert report["calls"][3]["think"] is True and report["calls"][3]["thinking"] == "The first has no boat. The second has no lake."
+        assert report["calls"][4]["think"] is True and report["calls"][4]["thinking"] == "The first has no boat. The second has no lake."
         got.clear(); plan[:] = looks() + [ran_away, answer(1, "The first is clearest.")]
         report = {}
         assert images.pick_best(cfg, "A cat in a boat on a lake.", three, report=report) == (0, "The first is clearest.")
         assert [g["think"] for g in got[3:]] == [True, False] and got[4]["options"]["num_predict"] == 200
-        failed = report["calls"][3]
+        failed = report["calls"][4]
         assert "hit the 3000-token reply limit" in failed["failed"] and failed["reply_tokens"] == 3000 and "seconds" in failed
-        assert failed["thinking"].startswith("Reading the first note") and report["calls"][4]["think"] is False
+        assert failed["thinking"].startswith("Reading the first note") and report["calls"][5]["think"] is False
         got.clear(); plan[:] = looks() + [ran_away, ran_away]                                     # no comparison: the best-scored attempt
         assert images.pick_best(cfg, "A cat in a boat on a lake.", three)[0] == 1
         got.clear(); plan[:] = [note(7), note(7), note(7), answer(9, "Nonsense.")]                # a tie: the earlier one

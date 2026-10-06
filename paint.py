@@ -86,6 +86,70 @@ def release(sc: Dict[str, Any]) -> bool:
     return False
 
 
+def _comfy_upload(host: str, data: bytes, timeout: float) -> str:
+    """Give ComfyUI a picture to work on; the name it can be loaded by."""
+    body, content_type = _multipart({"overwrite": "true"}, "image", f"holonomic_{uuid.uuid4().hex[:12]}.png", data, "image/png")
+    uploaded = _post(f"{host}/upload/image", body, content_type, timeout)
+    return "/".join(p for p in (uploaded.get("subfolder"), uploaded.get("name")) if p)
+
+
+def _comfy_run(host: str, graph: Dict[str, Any], timeout: float, poll: float) -> bytes:
+    """Queue a ComfyUI job, wait for it and fetch the first picture it saved."""
+    queued = _post(f"{host}/prompt", json.dumps({"prompt": graph, "client_id": "holonomic"}).encode(), "application/json", min(timeout, 60))
+    job = queued.get("prompt_id")
+    if not job:
+        raise PaintError(f"ComfyUI did not accept the job: {json.dumps(queued)[:300]}")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        entry = (_post(f"{host}/history/{job}", None, "", min(timeout, 60)) or {}).get(job)
+        if entry:
+            for output in (entry.get("outputs") or {}).values():
+                for image in output.get("images") or []:
+                    query = urllib.parse.urlencode({"filename": image.get("filename", ""), "subfolder": image.get("subfolder", ""),
+                                                    "type": image.get("type", "output")})
+                    return _post(f"{host}/view?{query}", None, "", min(timeout, 60), raw=True)
+            status = entry.get("status") or {}
+            if status.get("completed") or status.get("status_str") == "error":
+                raise PaintError(f"ComfyUI finished without a picture: {json.dumps(status)[:300]}")
+        time.sleep(poll)
+    raise PaintError(f"The image server did not finish within {timeout:.0f} s")
+
+
+def make_enlarger(sc: Dict[str, Any]) -> Optional[Callable[[bytes, tuple], bytes]]:
+    """Something that makes a finished picture larger with an upscaling model: (picture, (width, height)) -> picture.
+    None when enlarging is off or the image server has no way to do it.
+
+    Drawing larger in the first place is not the same thing: past a certain size a picture no longer fits on
+    the graphics card beside the drawing model and every step takes several times as long.  An upscaling model
+    is small, works on the finished picture a piece at a time, and only the picture she keeps is enlarged."""
+    factor = float(sc.get("dream_image_enlarge") or 0)
+    api = str(sc.get("dream_image_api") or "").lower()
+    host = str(sc.get("dream_image_host") or "").rstrip("/")
+    if factor <= 1 or not host or api not in ("comfyui", "a1111"):
+        return None
+    timeout, poll = float(sc.get("dream_image_timeout") or 600), float(sc.get("dream_image_poll_seconds") or 1.0)
+    name = str(sc.get("dream_image_enlarge_model") or "")
+
+    def comfyui(picture: bytes, size: tuple) -> bytes:
+        graph = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": _comfy_upload(host, picture, timeout)}},
+            "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": name or "RealESRGAN_x2plus.pth"}},
+            "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+            # whatever the model's own factor, the picture comes out the size asked for
+            "4": {"class_type": "ImageScale", "inputs": {"image": ["3", 0], "upscale_method": "lanczos", "width": int(size[0]),
+                                                         "height": int(size[1]), "crop": "disabled"}},
+            "5": {"class_type": "SaveImage", "inputs": {"filename_prefix": "holonomic_dream_large", "images": ["4", 0]}},
+        }
+        return _comfy_run(host, graph, timeout, poll)
+
+    def a1111(picture: bytes, size: tuple) -> bytes:
+        body = {"image": base64.b64encode(picture).decode(), "resize_mode": 1, "upscaling_resize_w": int(size[0]),
+                "upscaling_resize_h": int(size[1]), "upscaling_crop": False, "upscaler_1": name or "R-ESRGAN 4x+"}
+        return _decode(_post(f"{host}/sdapi/v1/extra-single-image", json.dumps(body).encode(), "application/json", timeout).get("image"))
+
+    return {"comfyui": comfyui, "a1111": a1111}[api]
+
+
 def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
     api = str(sc.get("dream_image_api") or "").lower()
     host = str(sc.get("dream_image_host") or "").rstrip("/")
@@ -184,32 +248,13 @@ def make_painter(sc: Dict[str, Any]) -> Callable[[str, Optional[bytes]], bytes]:
             "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "holonomic_dream", "images": ["6", 0]}},
         })
         if start:
-            body, content_type = _multipart({"overwrite": "true"}, "image", f"holonomic_{uuid.uuid4().hex[:12]}.png", start, "image/png")
-            uploaded = _post(f"{host}/upload/image", body, content_type, timeout)
-            name = "/".join(p for p in (uploaded.get("subfolder"), uploaded.get("name")) if p)
+            name = _comfy_upload(host, start, timeout)
             graph["8"] = {"class_type": "LoadImage", "inputs": {"image": name}}
             graph["9"] = {"class_type": "ImageScale", "inputs": {"image": ["8", 0], "upscale_method": "lanczos", "width": width,
                                                                  "height": height, "crop": "center"}}
             graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["9", 0], "vae": vae_out}}
         else:
             graph["4"] = {"class_type": empty, "inputs": {"width": width, "height": height, "batch_size": 1}}
-        queued = _post(f"{host}/prompt", json.dumps({"prompt": graph, "client_id": "holonomic"}).encode(), "application/json", min(timeout, 60))
-        job = queued.get("prompt_id")
-        if not job:
-            raise PaintError(f"ComfyUI did not accept the job: {json.dumps(queued)[:300]}")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            entry = (_post(f"{host}/history/{job}", None, "", min(timeout, 60)) or {}).get(job)
-            if entry:
-                for output in (entry.get("outputs") or {}).values():
-                    for image in output.get("images") or []:
-                        query = urllib.parse.urlencode({"filename": image.get("filename", ""), "subfolder": image.get("subfolder", ""),
-                                                        "type": image.get("type", "output")})
-                        return _post(f"{host}/view?{query}", None, "", min(timeout, 60), raw=True)
-                status = entry.get("status") or {}
-                if status.get("completed") or status.get("status_str") == "error":
-                    raise PaintError(f"ComfyUI finished without a picture: {json.dumps(status)[:300]}")
-            time.sleep(poll)
-        raise PaintError(f"The image server did not finish within {timeout:.0f} s")
+        return _comfy_run(host, graph, timeout, poll)
 
     return {"a1111": a1111, "openai": openai, "comfyui": comfyui}[api]

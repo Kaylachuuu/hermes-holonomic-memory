@@ -353,6 +353,17 @@ kept. The others are discarded. (Shown all the attempts in one message, the mode
 reported seeing one picture, or two that were the same, and kept the first. One picture per look
 works with any vision model.) `sleep now` prints her notes on each attempt and how long the drawing took.
 
+Before she looks, she lists what a picture of the moment has to show (the main things, their
+distinguishing details, what the dream did to them). Each attempt is then questioned about those
+things one at a time, about any writing in it, and about the bodies of people and animals, and its
+score is worked out from her answers. Asked only what a picture showed and whether anything was
+wrong, she scored nearly everything 8 to 10 and missed details that were plainly there.
+
+`dream_image_enlarge` makes the picture she keeps larger with an upscaling model on the image server,
+after she has chosen it: `hermes holonomic dreams images --enlarge 2`. For ComfyUI, put an upscaling
+model in `models/upscale_models` (default name `RealESRGAN_x2plus.pth`). This is how to get large
+pictures without drawing them large; see the note on size below.
+
 A picture drawn from an image she has seen stays close to that image. If her best attempt at such a
 picture scores below `dream_image_redraw_below`, it is drawn again holding less tightly to the image
 (`dream_image_redraw_strength`). She then compares the new attempts with the one she had chosen, from
@@ -389,6 +400,8 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
+| `dream_image_enlarge` | `0` | Make the kept picture this many times larger with an upscaling model (comfyui, a1111); `0` = off |
+| `dream_image_enlarge_model` | | Upscaling model: a file in ComfyUI's `models/upscale_models`, or an A1111 upscaler name |
 | `dream_image_keep_signature` | `false` | Carry a signature or watermark on an image into pictures drawn from it |
 | `dream_image_redraw_below` | `9` | A picture drawn from an image is drawn again when her best attempt scores below this out of 10; `0` = never |
 | `dream_image_redraw_strength` | `0.85` | How freely the second drawing departs from the image |

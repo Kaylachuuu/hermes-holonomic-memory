@@ -94,6 +94,10 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     # again holding less tightly to the image, and she chooses between the new attempts and the one she had.  0 = never.
     "dream_image_redraw_below": 9,
     "dream_image_redraw_strength": 0.85,
+    # The picture she keeps is made this many times larger by an upscaling model on the image server (comfyui, a1111).
+    # 0 = leave it the size it was drawn.  comfyui needs the model file in models/upscale_models.
+    "dream_image_enlarge": 0,
+    "dream_image_enlarge_model": "",          # comfyui: default RealESRGAN_x2plus.pth; a1111: default 'R-ESRGAN 4x+'
     "dream_image_choose_think": False,        # let her reason before choosing (slower; falls back to choosing without)
     "dream_image_choose_think_tokens": 3000,  # allowance for that reasoning and the answer together
     # For one graphics card shared with the language model: unload the language models while pictures are drawn, then
@@ -594,7 +598,8 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
 
     def choose(d: dict, tries: List[bytes], earlier: Optional[dict] = None) -> tuple:
         notes: Dict[int, Dict[str, Any]] = {}
-        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes, earlier=earlier)
+        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes, earlier=earlier,
+                                      checks=d.setdefault("checks", []))
         return best, why, notes
 
     for d in drawn:
@@ -623,17 +628,37 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
                             "why": why}
             if new:
                 d.update(tries=more, best=best, why=why, score=notes[best]["score"])
+    # Only the picture she keeps is enlarged, after she has chosen it.
+    enlarge = getattr(paint, "enlarge", None) if paint else _paint.make_enlarger(sc)
+    factor = float(sc["dream_image_enlarge"] or 0)
+    if enlarge and factor > 1 and drawn:
+        away = _make_room(cfg, sc, report, label) if sc["dream_image_swap"] else []
+        try:
+            for d in drawn:
+                began = time.time()
+                try:
+                    w, h = d["shape"] if sized else size
+                    d["kept"] = enlarge(d["tries"][d["best"]], (int(round(w * factor)), int(round(h * factor))))
+                    d["enlarged"] = (int(round(w * factor)), int(round(h * factor)))
+                    report["calls"].append({"step": "enlarge the one she kept", "seconds": time.time() - began, "drawing": True})
+                except Exception as exc:         # the picture stands at the size it was drawn
+                    report["errors"].append(f"dream pictures{label}: could not enlarge a picture ({exc}); it is kept at the size it was drawn")
+                    break
+        finally:
+            if sc["dream_image_swap"]:
+                _come_back(sc, away, report, label)
     made = []
     for d in drawn:
         try:
-            img = _images.add_dream_image(engine, d["tries"][d["best"]], cfg, dream_id=one["id"], scene=d["scene"]["scene"], sources=d["from"])
+            img = _images.add_dream_image(engine, d.get("kept") or d["tries"][d["best"]], cfg, dream_id=one["id"], scene=d["scene"]["scene"], sources=d["from"])
         except Exception as exc:
             report["errors"].append(f"dream pictures{label}: {exc}")
             continue
         made.append(dict(d["scene"], id=img["id"], file=img["file"], **{"from": d["from"]},
                          **({"chosen": d["best"] + 1, "of": len(d["tries"]), "why": d["why"]} if len(d["tries"]) > 1 else {}),
                          **({"score": d["score"]} if d["score"] is not None else {}),
-                         **({"redrawn": d["redrawn"]} if d.get("redrawn") else {})))
+                         **({"redrawn": d["redrawn"]} if d.get("redrawn") else {}),
+                         **({"enlarged": list(d["enlarged"])} if d.get("enlarged") else {})))
     return made
 
 

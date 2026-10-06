@@ -291,6 +291,10 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_candidates"] = max(1, min(args.attempts, 8))
     if args.swap:
         values["dream_image_swap"] = args.swap == "on"
+    if args.enlarge is not None:
+        values["dream_image_enlarge"] = 0 if args.enlarge <= 1 else min(args.enlarge, 4.0)
+    if args.enlarge_model is not None:
+        values["dream_image_enlarge_model"] = args.enlarge_model.strip()
     if args.signature:
         values["dream_image_keep_signature"] = args.signature == "keep"
     if args.redraw_below is not None:
@@ -346,6 +350,10 @@ def _dream_images(cfg, args) -> None:
         if mode == "from_images" and int(sc["dream_image_redraw_below"] or 0) > 0 and int(sc["dream_image_candidates"]) >= 1:
             print(f"  a picture drawn from an image is drawn again, holding less to it, if her best attempt scores below "
                   f"{sc['dream_image_redraw_below']} of 10 (--redraw-below 0 to stop)")
+        if float(sc["dream_image_enlarge"] or 0) > 1:
+            f = float(sc["dream_image_enlarge"])
+            print(f"  the picture she keeps is enlarged {f:g} times, to {round(int(sc['dream_image_width']) * f)}x{round(int(sc['dream_image_height']) * f)}"
+                  + ("" if sc["dream_image_api"] in ("comfyui", "a1111") else "  [this image server cannot enlarge: comfyui or a1111 only]"))
         if mode == "from_images":
             print("  a signature or watermark on an image is " + ("carried into pictures drawn from it (--signature remove to stop)"
                   if sc["dream_image_keep_signature"] else "kept out of pictures drawn from it"))
@@ -696,6 +704,7 @@ def _sleep(engine, cfg, args) -> None:
                   + (_redrawn(p) if p.get("redrawn") else "")
                   + (f"\n            she chose attempt {p['chosen']} of {p['of']}" + (" drawn again" if (p.get("redrawn") or {}).get("kept") else "")
                      + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
+                  + (f"\n            enlarged to {p['enlarged'][0]}x{p['enlarged'][1]}" if p.get("enlarged") else "")
                   + (f"\n            {p['file']}" if p.get("file") else ""))
     for err in report["errors"]:
         print(f"  ERROR     {err}")
@@ -821,6 +830,10 @@ def register_cli(subparser) -> None:
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
+    drm.add_argument("--enlarge", type=float, metavar="TIMES", help="With 'images': make the picture she keeps this many times larger "
+                     "with an upscaling model on the image server, e.g. 2 (0 = off)")
+    drm.add_argument("--enlarge-model", help="With 'images': the upscaling model (comfyui: a file in models/upscale_models, default "
+                     "RealESRGAN_x2plus.pth; a1111: an upscaler name)")
     drm.add_argument("--signature", choices=["remove", "keep"], help="With 'images': whether a signature or watermark on an image is "
                      "carried into dream pictures drawn from it (default: remove)")
     drm.add_argument("--redraw-below", type=int, metavar="SCORE", help="With 'images': a picture drawn from an image is drawn again, holding "

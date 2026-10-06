@@ -438,6 +438,62 @@ do not belong. An empty string if nothing looks wrong.
 _ATTEMPT_SCHEMA = {"type": "object", "properties": {"shows": {"type": "string"}, "faults": {"type": "string"}, "score": {"type": "integer"}},
                    "required": ["shows", "faults", "score"]}
 
+_CHECKS = """\
+A picture is going to be drawn of this moment from a dream you had:
+{scene}{remembered}
+
+List the separate things someone would look for to tell whether a picture shows this moment: each main thing in it, each \
+distinguishing detail of those things (a colour, a marking, what something is made of), and anything unusual the dream did to \
+them. Each must be something that can be seen in a picture and answered yes or no. Leave out mood and anything that cannot be seen.
+
+Write:
+- checks: three to six short phrases, the most important first, e.g. 'a long-haired black and white cat', 'a white stripe between \
+the cat's eyes', 'the couch is under water'."""
+
+_CHECKS_SCHEMA = {"type": "object", "properties": {"checks": {"type": "array", "items": {"type": "string"}}}, "required": ["checks"]}
+
+_CHECKED = """\
+This picture is one attempt to show this moment from a dream you had:
+{scene}{remembered}
+
+Answer each question by looking at the picture itself, one at a time. Do not answer from what the moment says should be there.
+{questions}
+- writing: is there any writing, lettering, signature or watermark in the picture? Quote it as it appears, or say 'none'.
+- bodies: for each person or animal, look at the face, eyes, ears, limbs, hands or paws and tail. Name anything that is malformed, \
+doubled, missing or the wrong number. 'none' if there are no people or animals, or nothing is wrong with them.
+- other: anything else that looks wrong or does not belong, or 'none'.
+- shows: one sentence on what the picture shows."""
+
+
+def _checked_schema(n: int) -> dict:
+    answers = {f"q{i + 1}": {"type": "string", "enum": ["yes", "no", "unclear"]} for i in range(n)}
+    rest = {k: {"type": "string"} for k in ("writing", "bodies", "other", "shows")}
+    return {"type": "object", "properties": dict(answers, **rest), "required": list(answers) + list(rest)}
+
+
+_WRITING_ASKED_RE = re.compile(r"\b(sign|reads?|says?|written|writing|word|letter(?:ing|s)?|text|label|banner|page|book|screen)\b", re.I)
+_NOTHING = {"", "none", "none.", "no", "no.", "n/a", "nothing", "nothing.", "none seen", "none seen."}
+
+
+def _read_checked(data: dict, checks: List[str], writing_wanted: bool) -> Dict[str, Any]:
+    """Her answers about one attempt turned into a note with a score.  The score is worked out here, not asked
+    for: asked for a score she gave nearly everything 8 to 10, and it barely moved for a missing detail."""
+    there = [c for i, c in enumerate(checks) if str(data.get(f"q{i + 1}") or "").lower() == "yes"]
+    missing = [c for i, c in enumerate(checks) if str(data.get(f"q{i + 1}") or "").lower() == "no"]
+    unclear = [c for c in checks if c not in there and c not in missing]
+    wrong = []
+    for key, label in (("bodies", ""), ("other", ""), ("writing", "Writing: ")):
+        said = _sentence(data.get(key))
+        if said.strip().lower() in _NOTHING or (key == "writing" and writing_wanted):
+            continue
+        wrong.append(label + said)
+    score = 10.0 * (len(there) + 0.5 * len(unclear)) / max(1, len(checks)) - 2.0 * min(len(wrong), 2)
+    shows = _sentence(data.get("shows"))[:300]
+    told = " ".join(x for x in (shows, f"There: {'; '.join(there)}." if there else "", f"Missing: {'; '.join(missing)}." if missing else "",
+                                f"Could not tell: {'; '.join(unclear)}." if unclear else "") if x)
+    return {"shows": told[:700], "faults": " ".join(wrong)[:400], "score": max(1, min(10, int(round(score)))), "missing": missing}
+
+
 _CHOOSE = """\
 {n} pictures were drawn of this moment from a dream you had:
 {scene}{remembered}
@@ -477,7 +533,7 @@ def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
 
 def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
               report: Optional[Dict[str, Any]] = None, noted: Optional[Dict[int, Dict[str, Any]]] = None,
-              earlier: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
+              earlier: Optional[Dict[str, Any]] = None, checks: Optional[List[str]] = None) -> Tuple[int, str]:
     """Which of several attempts at a dream picture she keeps: (index, her reason).
 
     She looks at each attempt on its own and notes what it shows, what is wrong with it and a score; then she
@@ -493,7 +549,13 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
 
     `earlier` is her note on an attempt she already chose from a first drawing.  It joins the comparison as one
     more attempt without being looked at again, and if she prefers it the index returned is len(pictures).
-    Comparing the two drawings by score alone made her give up a detail she had just chosen a picture for."""
+    Comparing the two drawings by score alone made her give up a detail she had just chosen a picture for.
+
+    Before looking, she lists what the moment needs a picture to show, and each attempt is then questioned about
+    those things one by one, about writing, and about bodies.  Asked only "what does it show, anything wrong?"
+    she said a stripe between a cat's eyes was not visible when it plainly was.  `checks`, if given, is that
+    list: filled the first time, used as it is after that, so a second drawing is held to the same questions.
+    If no list can be made she is asked the open question as before."""
     from .reflect import _parse
     if not pictures or (len(pictures) < 2 and noted is None):         # one picture is still looked at when its score is wanted
         return 0, ""
@@ -505,12 +567,30 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
         return 0, ""
     notes: Dict[int, Dict[str, Any]] = noted if noted is not None else {}
     notes.clear()
+    checks = checks if checks is not None else []
+    if not checks:
+        try:
+            listed = _parse(look_at("what to look for", _CHECKS.format(scene=scene, remembered=note), [], _CHECKS_SCHEMA, 250)).get("checks")
+            checks.extend(dict.fromkeys(" ".join(str(c).split()).strip(" .")[:120] for c in (listed if isinstance(listed, list) else [])
+                                        if len(str(c).strip()) >= 4))
+            del checks[6:]
+            if report is not None and report.get("calls") and checks:
+                report["calls"][-1]["noted"] = "; ".join(checks)
+        except Exception as exc:
+            logger.debug("holonomic: listing what to look for in a dream picture failed: %s", exc)
+    wants_writing = bool(_WRITING_ASKED_RE.search(scene))
     for i, p in enumerate(pictures):
         try:
-            data = _parse(look_at(f"look at attempt {i + 1}", _ATTEMPT.format(scene=scene, remembered=note),
-                                  [_jpeg(open_image(p)[0], (1024, 1024))], _ATTEMPT_SCHEMA, 300))
-            notes[i] = {"shows": _sentence(data.get("shows"))[:400], "faults": _sentence(data.get("faults"))[:300],
-                        "score": max(1, min(10, int(data.get("score") or 1)))}
+            jpeg = [_jpeg(open_image(p)[0], (1024, 1024))]
+            if checks:
+                questions = "\n".join(f"- q{n + 1}: can you see this in the picture: {c}? yes, no, or unclear." for n, c in enumerate(checks))
+                data = _parse(look_at(f"look at attempt {i + 1}", _CHECKED.format(scene=scene, remembered=note, questions=questions),
+                                      jpeg, _checked_schema(len(checks)), 400))
+                notes[i] = _read_checked(data, checks, wants_writing)
+            else:
+                data = _parse(look_at(f"look at attempt {i + 1}", _ATTEMPT.format(scene=scene, remembered=note), jpeg, _ATTEMPT_SCHEMA, 300))
+                notes[i] = {"shows": _sentence(data.get("shows"))[:400], "faults": _sentence(data.get("faults"))[:300],
+                            "score": max(1, min(10, int(data.get("score") or 1)))}
             if report is not None and report.get("calls"):       # shown with the timings, so her choice can be followed
                 report["calls"][-1]["noted"] = f"{notes[i]['score']} of 10. {notes[i]['shows']} Faults: {notes[i]['faults'] or 'none seen.'}"
         except Exception as exc:
