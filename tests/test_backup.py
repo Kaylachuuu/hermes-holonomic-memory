@@ -142,3 +142,21 @@ def test_cli_backup_and_restore(tmp_path):
             q.shutdown()
     finally:
         sys.modules.pop("hermes_constants", None)
+
+
+def test_the_version_is_read_from_the_plugin_file_not_the_package():
+    """Under Hermes the command line's modules sit in a package Hermes makes up, with no __version__: the first
+    real run of 'backup' failed on importing it."""
+    import re
+    from pathlib import Path
+    import holonomic
+    root = Path(holonomic.__file__).resolve().parent
+    assert bk.plugin_version() == holonomic.__version__ and re.match(r"^\d+\.\d+\.\d+$", bk.plugin_version())
+    for name in ("cli.py", "provider.py", "backup.py", "library.py", "reflect.py", "sleep.py", "images.py", "faces.py", "fingerprints.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        assert not re.search(r"from \. import [^\n]*__version__", source), name
+        # nothing else may be imported from the package itself either: only its modules are there
+        for line in re.findall(r"^\s*from \. import ([^\n]+)$", source, re.M):
+            for item in line.split("#")[0].split(","):
+                module = item.split(" as ")[0].strip()
+                assert (root / f"{module}.py").exists(), f"{name}: 'from . import {module}' is not a module"

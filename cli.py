@@ -169,7 +169,7 @@ def _library_cmd(engine, cfg, args) -> None:
 
 def _backup_cmd(args) -> None:
     from hermes_constants import get_hermes_home
-    from . import __version__, backup as bk
+    from . import backup as bk
     from .provider import load_config
     home = get_hermes_home()
     cfg = load_config(home)
@@ -183,7 +183,7 @@ def _backup_cmd(args) -> None:
                 print(f"  {b['name']}   {mb(b['bytes'])}")
         elif args.holonomic_action == "backup":
             keep = int(cfg.get("backup_keep", 10)) if args.keep is None else args.keep
-            done = bk.backup(home, folder, label=args.label or "", keep=keep, version=__version__)
+            done = bk.backup(home, folder, label=args.label or "", keep=keep, version=bk.plugin_version())
             print(f"Backup written: {done['file']}\n  {done['files']} files, {mb(done['bytes'])} (the store is {mb(done['store_bytes'])})")
             for name in done["removed"]:
                 print(f"  removed old backup: {name}")

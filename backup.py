@@ -28,6 +28,18 @@ class BackupError(RuntimeError):
     """Something the person can put right; the store itself has not been harmed."""
 
 
+def plugin_version() -> str:
+    """The plugin's version, read from plugin.yaml beside this file.  Hermes loads the command line's modules into
+    a package of its own making, which has no __version__ to import."""
+    try:
+        for line in (Path(__file__).resolve().parent / "plugin.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
 def default_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
     given = str((cfg or {}).get("backup_dir") or "").strip()
     if given:

@@ -659,7 +659,8 @@ class HolonomicMemoryProvider(MemoryProvider):
         """Leave what she was just given where it can be read (`hermes holonomic context`).  When she does not
         act on something, the first question is whether she was told it, and guessing at that wasted three rounds."""
         try:
-            from . import __version__
+            from .backup import plugin_version
+            __version__ = plugin_version()
             (engine.path / "last_context.txt").write_text(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')}\nMESSAGE: {' '.join(query.split())[:400]}\n\n"
                 + (text or "(nothing was given to her for this message)") + "\n"
