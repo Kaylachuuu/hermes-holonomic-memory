@@ -69,8 +69,8 @@ TOOL_SCHEMA = {
         "- recall: search memory for `query`. Returns memories similar to it and memories linked to those. If an "
         "ordinary recall does not find what you are looking for, set `deep` to true: that also searches memories "
         "that have faded with time and follows links further. Set "
-        "`subject` to search only what you have concluded about the user ('user'), about yourself ('self') or "
-        "about the two of you ('us').\n"
+        "`subject` to search only what you have concluded about the user as a person ('user'), about what "
+        "they are working on ('projects'), about yourself ('self') or about the two of you ('us').\n"
         "- remember: store `content` as a durable fact, preference or note. Use for things worth keeping that "
         "might not be obvious from the conversation alone. Optional `about` (names/topics) and `importance` 1-3.\n"
         "- related: what is linked to a memory (`memory_id`) or filed under a name/topic (`entity`).\n"
@@ -107,7 +107,7 @@ TOOL_SCHEMA = {
             "section": {"type": "integer", "description": "A part of the image to look at closely (look)."},
             "deep": {"type": "boolean", "description": "Recall only: also search faded memories and follow links further."},
             "query": {"type": "string", "description": "What to search for (recall)."},
-            "subject": {"type": "string", "enum": ["user", "self", "us"],
+            "subject": {"type": "string", "enum": ["user", "projects", "self", "us"],
                         "description": "Limit recall to your own conclusions about this subject."},
             "content": {"type": "string", "description": "What to store (remember)."},
             "about": {"type": "array", "items": {"type": "string"}, "description": "Names or topics this concerns (remember)."},
@@ -124,7 +124,7 @@ TOOL_SCHEMA = {
 _KIND_LABEL = {DREAM_TALK_USER: "user said, talking about a dream of yours",
                DREAM_TALK_ASSISTANT: "you said, describing a dream you had; not something that happened",
                EPISODE: "your account of a past conversation", DREAM: "a dream you had",
-               DREAM_INSIGHT: "what you made of a dream", "fact": "learned about the user", "self_note": "your own note", "bond_note": "about the two of you",
+               DREAM_INSIGHT: "what you made of a dream", "fact": "learned about the user", "project_fact": "learned about a project of the user's", "self_note": "your own note", "bond_note": "about the two of you",
                "insight": "insight", IMAGE: "an image you were shown", IMAGE_PART: "part of an image you were shown",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
@@ -530,11 +530,14 @@ class HolonomicMemoryProvider(MemoryProvider):
         """Profiles written by reflection.  Always in view, so who the user is never depends on a search."""
         try:
             user, me, us = engine.profile("user"), engine.profile("self"), engine.profile("us")
+            work = engine.profile("projects")
         except Exception:
             return ""
         out = ""
         if user:
             out += f"\n\n## What you know about the user (from your own reflection on past conversations)\n{user}"
+        if work:
+            out += f"\n\n## What the user is working on (from your own reflection; details come back when the talk turns to them)\n{work}"
         if me:
             out += f"\n\n## Who you have become (from your own reflection; your core identity is defined elsewhere)\n{me}"
         if us:
@@ -1268,7 +1271,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                     return _error("recall needs 'query'")
                 subject = args.get("subject")
                 if subject and subject not in SUBJECTS:
-                    return _error("subject must be 'user', 'self' or 'us'")
+                    return _error("subject must be 'user', 'projects', 'self' or 'us'")
                 only = {"only_kinds": (SUBJECTS[subject],)} if subject else {}
                 options = recall_options(self._cfg)
                 threshold = options["min_strength"]

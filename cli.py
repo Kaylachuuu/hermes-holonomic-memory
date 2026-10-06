@@ -238,7 +238,8 @@ def holonomic_command(args) -> None:
         elif action == "relabel":
             to_dream = {"said_user": "dreamtalk_user", "said_assistant": "dreamtalk_assistant"}
             to_said = {v: k for k, v in to_dream.items()}
-            table = to_dream if args.to == "dream" else to_said
+            table = {"dream": to_dream, "said": to_said, "project": {"fact": "project_fact"},
+                     "personal": {"project_fact": "fact"}}[args.to]
             for mid in args.ids:
                 mem = engine.get(mid)
                 if mem is None:
@@ -323,8 +324,8 @@ def holonomic_command(args) -> None:
         elif action == "profile":
             if args.set:
                 who, text = args.set
-                if who not in ("user", "self", "us") or len(text.strip()) < 3:
-                    print('Usage: hermes holonomic profile --set user|self|us "text"')
+                if who not in ("user", "projects", "self", "us") or len(text.strip()) < 3:
+                    print('Usage: hermes holonomic profile --set user|projects|self|us "text"')
                     return
                 engine.set_profile(who, text)
                 print(f"Profile '{who}' set. Earlier versions are kept (see --history). "
@@ -335,7 +336,8 @@ def holonomic_command(args) -> None:
             soul = read_foundation(get_hermes_home()).strip()
             print(f"Foundation (SOUL.md, written by you, never changed by this plugin): "
                   f"{str(len(soul)) + ' characters' if soul else 'not found'}")
-            for who, title in (("user", "About the user"), ("self", "About herself"), ("us", "About the two of you")):
+            for who, title in (("user", "About the user"), ("projects", "What the user is working on"),
+                               ("self", "About herself"), ("us", "About the two of you")):
                 history = engine.profile_history(who, 10 if args.history else 1)
                 print(f"{title}:" if history else f"{title}: (none yet)")
                 for entry in history:
@@ -1138,6 +1140,30 @@ def _reflect(engine, cfg, args) -> None:
     from .provider import extract_keys
     from .reflect import ReflectionError, pending, reflect_config, reflect_once
     rc = reflect_config(cfg)
+    if args.reflect_action == "sort":
+        from .reflect import sort_facts
+        try:
+            report = sort_facts(engine, cfg, apply=bool(args.apply))
+        except ReflectionError as exc:
+            print(f"Sorting failed: {exc}")
+            return
+        print(f"{report['personal']} fact(s) are about you as a person; {report['project']} are about what you are working on.")
+        if report["to_project"]:
+            print(f"{'Marked' if args.apply else 'Would mark'} as project facts:")
+            for m in report["to_project"]:
+                print(f"  [#{m['id']}] {_clip(m['text'], 150)}")
+        print("Staying personal:")
+        for m in report["stays_personal"]:
+            print(f"  [#{m['id']}] {_clip(m['text'], 150)}")
+        for who, title in (("user", "About you"), ("projects", "What you are working on")):
+            if report["profiles"].get(who):
+                print(f"{title} ({'written' if args.apply else 'would be written'}):\n  {report['profiles'][who]}")
+        if not args.apply:
+            print("Nothing was changed. If the sorting looks right, run it again with --apply. To put one fact right "
+                  "afterwards: hermes holonomic relabel ID --as personal   (or --as project)")
+        else:
+            print("Done. To put one fact right: hermes holonomic relabel ID --as personal   (or --as project)")
+        return
     if args.reflect_action == "now":
         if args.think or args.no_think:
             cfg = dict(cfg, reflect_think=bool(args.think))
@@ -1267,8 +1293,9 @@ def register_cli(subparser) -> None:
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")
     rl = subs.add_parser("relabel", help="Correct whether pieces of conversation are labelled as dream talk")
     rl.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
-    rl.add_argument("--as", dest="to", choices=["said", "dream"], required=True,
-                    help="'said' = ordinary conversation, 'dream' = talk about a dream")
+    rl.add_argument("--as", dest="to", choices=["said", "dream", "personal", "project"], required=True,
+                    help="'said' = ordinary conversation, 'dream' = talk about a dream; for a fact about you: "
+                         "'personal' = about you as a person, 'project' = about something you are working on")
     dt = subs.add_parser("dreamtalk", help="Find stored conversation that is talk about a dream, and label it")
     dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
     dt.add_argument("--width", type=int, default=110, help="Characters of text to show")
@@ -1310,7 +1337,8 @@ def register_cli(subparser) -> None:
     fg.add_argument("ids", type=int, nargs="+", help="Memory ids, as shown in brackets")
     fg.add_argument("--yes", action="store_true", help="Actually remove them (without this, they are only shown)")
     ref = subs.add_parser("reflect", help="Reflection: turn on or off, check, or run once now")
-    ref.add_argument("reflect_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
+    ref.add_argument("reflect_action", choices=["status", "on", "off", "now", "sort"], nargs="?", default="status")
+    ref.add_argument("--apply", action="store_true", help="With 'sort': make the changes (without this, they are only shown)")
     ref.add_argument("--model", help="Ollama model that does the reflecting (with 'on')")
     ref.add_argument("--host", help="Ollama server for that model, if different from the embedding server (with 'on')")
     ref.add_argument("--depth", type=int, choices=[1, 2, 3],

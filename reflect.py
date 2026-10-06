@@ -40,9 +40,13 @@ logger = logging.getLogger(__name__)
 
 # Kinds produced by reflection.  They are never fed back in as input.
 FACT, SELF_NOTE, BOND_NOTE, INSIGHT = "fact", "self_note", "bond_note", "insight"
-DERIVED_KINDS = (FACT, SELF_NOTE, BOND_NOTE, INSIGHT, "dream")
+# What the user is working on, as against who the user is.  Kept apart so that the portrait of the person is not
+# crowded out by how a project of theirs works inside.
+PROJECT_FACT = "project_fact"
+FACT_KINDS = (FACT, PROJECT_FACT)
+DERIVED_KINDS = (FACT, PROJECT_FACT, SELF_NOTE, BOND_NOTE, INSIGHT, "dream")
 # Subjects the agent can ask its memory about, and the profile and kind that belong to each.
-SUBJECTS = {"user": FACT, "self": SELF_NOTE, "us": BOND_NOTE}
+SUBJECTS = {"user": FACT, "self": SELF_NOTE, "us": BOND_NOTE, "projects": PROJECT_FACT}
 FOUNDATION_MAX_CHARS = 20000      # a real SOUL.md ran to 10,000 characters; 6,000 cut it off mid-section
 WATERMARK = "reflect:last_id"
 # Conversation about a dream the agent had.  The conversation really happened, so it is an ordinary
@@ -87,16 +91,18 @@ _SUPERSEDED = {"type": "array", "items": {"type": "object", "properties": {
     "sources": {"type": "array", "items": {"type": "integer"}}}, "required": ["fact", "replacement", "sources"]}}
 
 _PROPOSE_SCHEMA = {"type": "object", "properties": {
-    "user_facts": _ITEMS, "self_notes": _ITEMS, "relationship_notes": _ITEMS, "insights": _ITEMS, "superseded": _SUPERSEDED},
-    "required": ["user_facts", "self_notes", "relationship_notes", "insights", "superseded"]}
-_PROPOSE_BASIC_SCHEMA = {"type": "object", "properties": {"user_facts": _ITEMS, "superseded": _SUPERSEDED},
-                         "required": ["user_facts", "superseded"]}
+    "user_facts": _ITEMS, "project_facts": _ITEMS, "self_notes": _ITEMS, "relationship_notes": _ITEMS, "insights": _ITEMS,
+    "superseded": _SUPERSEDED},
+    "required": ["user_facts", "project_facts", "self_notes", "relationship_notes", "insights", "superseded"]}
+_PROPOSE_BASIC_SCHEMA = {"type": "object", "properties": {"user_facts": _ITEMS, "project_facts": _ITEMS, "superseded": _SUPERSEDED},
+                         "required": ["user_facts", "project_facts", "superseded"]}
 _CHECK_SCHEMA = {"type": "object", "properties": {"verdicts": {"type": "array", "items": {"type": "object", "properties": {
     "item": {"type": "integer"}, "verdict": {"type": "string", "enum": ["keep", "rewrite", "drop"]},
     "text": {"type": "string"}}, "required": ["item", "verdict", "text"]}}}, "required": ["verdicts"]}
 _PROFILE_SCHEMA = {"type": "object", "properties": {
-    "user_profile": {"type": "string"}, "self_profile": {"type": "string"}, "relationship_profile": {"type": "string"}},
-    "required": ["user_profile", "self_profile", "relationship_profile"]}
+    "user_profile": {"type": "string"}, "projects_profile": {"type": "string"}, "self_profile": {"type": "string"},
+    "relationship_profile": {"type": "string"}},
+    "required": ["user_profile", "projects_profile", "self_profile", "relationship_profile"]}
 # Used when a caller asks for no particular step (kept for tests and older callers).
 _SCHEMA = _PROPOSE_SCHEMA
 
@@ -207,7 +213,8 @@ PROFILE:
 
 Reply as JSON with the one key "text"."""
 _SHORTEN_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
-_WHO = {"user": "the user", "self": "an AI assistant, written by itself", "us": "an AI assistant and its user together"}
+_WHO = {"user": "the user", "self": "an AI assistant, written by itself", "us": "an AI assistant and its user together",
+        "projects": "what the user is working on"}
 
 
 def trim_to_sentence(text: str) -> str:
@@ -226,14 +233,26 @@ in quotation marks as though the user had said them.
 State what is, not how admirable it is. No praise and no flattering adjectives about either of them ("highly \
 skilled", "dedicated", "ambitious", "nuanced", "keen"), and no conclusions the lines do not state."""
 
+_PERSONAL = """\
+who the user is as a person: their family, the people and animals in their life, their history, their age and \
+birthday, where they live, what they do for a living, their tastes, likes and dislikes, beliefs, habits, how they \
+like to be spoken to, what is going on in their life"""
+_PROJECT = """\
+what the user is making or working on: a project, what it is for, how it works, decisions made about it, how far \
+it has got, the tools and equipment used for it"""
+
 _FACTS_RULE = """\
-- user_facts: durable facts about the user as a person: their history, work, skills, projects, family, tastes, \
-plans, what is going on in their life. One standalone sentence each, in the third person, using the user's name \
-if it is known. Be specific and keep the details and the reasons: write "Kayla stopped working on her operating \
-system when her daughter was born", not "Kayla has a daughter" or "Kayla has a project". Write a fact for every \
-concrete thing the user revealed about themselves. Every fact must rest on at least one USER line. Do not write \
-facts about the conversation itself: that the user said hello, is excited to talk, or asked a question is not a \
-fact about them. At most 10.
+- user_facts: durable facts about """ + _PERSONAL + """. These are what bear on how the two of them talk and \
+relate. One standalone sentence each, in the third person, using the user's name if it is known. Be specific and \
+keep the details and the reasons: write "Kayla stopped working on her operating system when her daughter was \
+born", not "Kayla has a daughter". Write a fact for every concrete thing the user revealed about themselves. \
+Every fact must rest on at least one USER line. Do not write facts about the conversation itself: that the user \
+said hello, is excited to talk, or asked a question is not a fact about them. At most 10.
+- project_facts: durable facts about """ + _PROJECT + """. Same form: one standalone sentence, third person, \
+resting on at least one USER line. Start with whose it is and which project ("Kayla's operating system ..."). How \
+a thing the user built works inside belongs here and never in user_facts. When one remark says something about \
+the person and something about the project, write one of each: "Kayla has kept at one project for over twenty \
+years" is a user fact, "Kayla's operating system is written in x86 Assembly" a project fact. At most 10.
 - superseded: facts from EXISTING FACTS that are no longer true because the USER has plainly said so in these \
 memories. Give "fact" (its number), "replacement" (the fact that is true now, one sentence) and "sources" (the \
 USER memories that say so). People rarely change: a bad day, a one-off exception, a joke, or anything the \
@@ -298,7 +317,7 @@ about the conversation itself and not about the person; or, for a self note, it 
 Give one verdict per statement, with "item" set to its number. For "keep" and "drop", "text" may be empty."""
 
 _PROFILES = """\
-Rewrite an AI assistant's three short profiles. You are given the assistant's foundation, the current profiles, and \
+Rewrite an AI assistant's four short profiles. You are given the assistant's foundation, the current profiles, and \
 the statements its memory has just accepted. Work only from those; you are not shown the conversation.
 
 The FOUNDATION was written by the user and is fixed. Never restate it, and never write anything about the \
@@ -307,12 +326,17 @@ assistant that contradicts it.
 {rules}
 
 Write:
-- user_profile: a portrait of the user as a person, including what is new. Describe the person, not the \
-conversation, and never call them "a user". Plain prose, at most 150 words; anything past that is cut off and lost. \
-Begin with their life: who they are, the people and animals in it by name, where they live, what they do. Their \
-projects and interests come after that. Keep everything already in it unless a new statement contradicts it, but when \
-it would run past 150 words, make room by saying the technical detail of a project more briefly. Never leave out a \
-person or an animal that has a name to keep a technical detail.
+- user_profile: a portrait of the user as a person, including what is new. It is what the assistant needs in order \
+to talk with them and relate to them well: who they are, the people and animals in their life by name, their age and \
+birthday if known, where they live, what they do for a living, their likes and dislikes, beliefs and preferences. \
+Write it only from the statements marked "fact about the user". Their projects do not belong in it: at most name \
+one in passing where it says something about the person. If the current profile describes how a project works, \
+leave that out now. Otherwise keep what is already in it unless a new statement contradicts it. Describe the \
+person, not the conversation, and never call them "a user". Plain prose, at most 150 words; anything past that is \
+cut off and lost.
+- projects_profile: what the user is working on, from the statements marked "fact about a project of the user's" \
+and the current one. One or two sentences for each project: what it is, what it is for, where it stands. Not how \
+it works inside. Plain prose, at most 100 words. If there is nothing to say, return an empty string.
 - self_profile: who the assistant has become beyond the FOUNDATION, first person: its own opinions, tastes, \
 interests, humour and habits, as they actually showed up. Leave out its name, its role and anything else the \
 FOUNDATION already says. Do not describe the assistant by what it understands about the user or how it supports \
@@ -321,7 +345,7 @@ string if there is none. At most 120 words.
 - relationship_profile: the state of the relationship, from the assistant's side. If it is too early to say \
 anything specific, repeat the current one exactly, or return an empty string. At most 100 words."""
 
-_KIND_TITLE = {FACT: "fact about the user", SELF_NOTE: "the assistant's note about itself",
+_KIND_TITLE = {FACT: "fact about the user", PROJECT_FACT: "fact about a project of the user's", SELF_NOTE: "the assistant's note about itself",
                BOND_NOTE: "note about the two of them", INSIGHT: "insight"}
 
 
@@ -423,7 +447,7 @@ def salvage(raw: str) -> Dict[str, Any]:
     that runs to its limit has usually begun to repeat itself, and what came before the repeating is sound."""
     out: Dict[str, Any] = {}
     decoder = json.JSONDecoder()
-    for key in ("user_facts", "self_notes", "relationship_notes", "insights"):
+    for key in ("user_facts", "project_facts", "self_notes", "relationship_notes", "insights"):
         m = re.search(r'"%s"\s*:\s*\[' % key, raw or "")
         items, had, at = [], set(), m.end() if m else -1
         while m:
@@ -513,7 +537,7 @@ def build_check_prompt(items: List[dict], by_id: Dict[int, dict], known_text: st
         lines = [by_id[s] for s in item["sources"] if s in by_id]
         cited = "\n".join("    " + _line(m) for m in lines)
         block = f"STATEMENT {n} ({_KIND_TITLE[item['kind']]}): {item['text']}\n  cites:\n{cited}"
-        if item["kind"] == FACT:
+        if item["kind"] in FACT_KINDS:
             missing = unsupported_names(item["text"], " ".join(m["text"] for m in lines), known_text)
             if missing:
                 block += ("\n  note: these words in the statement appear nowhere in its lines: " + ", ".join(missing)
@@ -529,6 +553,7 @@ def build_profile_prompt(accepted: List[dict], superseded: List[dict], profiles:
     return (_PROFILES.format(rules=_RULES)
             + f"\n\nFOUNDATION:\n{_foundation(foundation) if depth > 1 else '(not shown at this depth; leave the self and relationship profiles as they are)'}"
             + f"\n\nCURRENT USER PROFILE:\n{profiles.get('user') or '(empty)'}"
+            + f"\n\nCURRENT PROJECTS PROFILE:\n{profiles.get('projects') or '(empty)'}"
             + f"\n\nCURRENT SELF PROFILE:\n{profiles.get('self') or '(empty)'}"
             + f"\n\nCURRENT RELATIONSHIP PROFILE:\n{profiles.get('us') or '(empty)'}"
             + "\n\nNEWLY ACCEPTED STATEMENTS:\n" + ("\n".join(lines) or "(none)"))
@@ -643,7 +668,8 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     valid = set(by_id)
     current = {who: engine.profile(who) for who in SUBJECTS}
     user_said = {m["id"] for m in batch if m["kind"] == "said_user"}
-    existing = engine.related_of_kind(sorted(user_said), FACT)
+    existing = engine.related_of_kind(sorted(user_said), FACT) + engine.related_of_kind(sorted(user_said), PROJECT_FACT)
+    kind_of = {f["id"]: f.get("kind", FACT) for f in existing}
 
     # ---- step 1: propose
     try:
@@ -671,13 +697,16 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     not_assistant = {m["id"] for m in batch if m["kind"] not in ASSISTANT_KINDS and m["kind"] not in DREAM_TALK_KINDS}
     report["cut_off"] = []
     facts = _clean_items(data.get("user_facts"), valid, 10, report["cut_off"])
-    report["dropped_assistant_only"] = [f["text"] for f in facts if not set(f["sources"]) & not_assistant]
+    about_work = _clean_items(data.get("project_facts"), valid, 10, report["cut_off"])
+    report["dropped_assistant_only"] = [f["text"] for f in facts + about_work if not set(f["sources"]) & not_assistant]
     # ...and from then on it cites only those lines.  The checker therefore judges it against what
     # the user said, not against the assistant's paraphrase of it ("expanding its functionality"
     # for "three choices where the original had two").
     facts = [dict(f, sources=[s for s in f["sources"] if s in not_assistant])
              for f in facts if set(f["sources"]) & not_assistant]
-    groups = [(FACT, facts)]
+    about_work = [dict(f, sources=[s for s in f["sources"] if s in not_assistant])
+                  for f in about_work if set(f["sources"]) & not_assistant]
+    groups = [(FACT, facts), (PROJECT_FACT, about_work)]
     if depth > 1:
         groups += [(SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4, report["cut_off"])),
                    (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3, report["cut_off"])),
@@ -715,7 +744,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     # Quotation marks in a statement about the user must enclose the user's own words.
     unquoted = []
     for item in items:
-        if item["kind"] in (FACT, INSIGHT):
+        if item["kind"] in (FACT, PROJECT_FACT, INSIGHT):
             spoken = " ".join(by_id[s]["text"] for s in item["sources"] if s in not_assistant)
             fixed = unquote_unsaid(item["text"], spoken)
             if fixed != item["text"]:
@@ -729,7 +758,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     items = unquoted
     report["accepted"] = [{"kind": i["kind"], "text": i["text"]} for i in items]
     report["proposed"] = {kind: [{"text": i["text"], "sources": i["sources"]} for i in items if i["kind"] == kind]
-                          for kind in (FACT, SELF_NOTE, BOND_NOTE, INSIGHT)}
+                          for kind in (FACT, PROJECT_FACT, SELF_NOTE, BOND_NOTE, INSIGHT)}
 
     # ---- step 3: profiles, written from the accepted items only
     limit = int(rc["profile_max_chars"])
@@ -738,15 +767,19 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
         told = [e for e in (earlier or []) if e.get("text") and e["text"] not in {i["text"] for i in items}] + items
         pdata = _parse(call("profiles", _SYSTEM, build_profile_prompt(told, superseded, current, foundation, depth),
                             _PROFILE_SCHEMA, budget))
-        wanted = {"user": "user_profile"} if depth <= 1 else {"user": "user_profile", "self": "self_profile",
-                                                              "us": "relationship_profile"}
+        wanted = {"user": "user_profile", "projects": "projects_profile"}
+        if depth > 1:
+            wanted.update({"self": "self_profile", "us": "relationship_profile"})
         # A profile is rewritten only when this pass learned something of its kind.  Every rewrite drifts a
         # little ("networking" came back as "inquiry"), so one with nothing new to say is left as it is.
-        fed = {"user": {FACT}, "self": {SELF_NOTE, INSIGHT}, "us": {BOND_NOTE}}
+        fed = {"user": {FACT}, "projects": {PROJECT_FACT}, "self": {SELF_NOTE, INSIGHT}, "us": {BOND_NOTE}}
         kinds = {i["kind"] for i in items}
         for who, key in wanted.items():
-            if current.get(who) and not (kinds & fed[who]) and not (who == "user" and superseded):
+            changed = {kind_of.get(x["fact"], FACT) for x in superseded}
+            if current.get(who) and not (kinds & fed[who]) and not (changed & fed[who]):
                 continue
+            if who == "projects" and not current.get(who) and not (kinds & fed[who]):
+                continue                             # nothing known about any project: no profile of them yet
             whole = once_each(respell_names(" ".join(str(pdata.get(key) or "").split()), known, own, seen, wrote))
             was = len(whole)
             for _ in range(2):                       # asked to say it shorter, twice at most, before anything is cut
@@ -773,7 +806,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
 
     for item in items:
         # The same conclusion reached again strengthens the existing memory instead of duplicating it.
-        near = engine.recall(item["text"], k=1, min_score=0.0, only_kinds=(item["kind"],))
+        # A fact is looked for among both kinds of fact: the same thing must not be kept once as each.
+        near = engine.recall(item["text"], k=1, min_score=0.0,
+                             only_kinds=FACT_KINDS if item["kind"] in FACT_KINDS else (item["kind"],))
         if near and near[0].direct >= 0.88:
             engine.reinforce([near[0].id], 0.2)
             report["reinforced"].append(near[0].id)
@@ -783,7 +818,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
                               meta={"sources": item["sources"]})
         report["stored"].extend(ids)
     for item in superseded:
-        new_ids = engine.remember(item["replacement"], kind=FACT, session="reflection", chain=False,
+        new_ids = engine.remember(item["replacement"], kind=kind_of.get(item["fact"], FACT), session="reflection", chain=False,
                                   links=item["sources"] + [item["fact"]], keys=key_fn(item["replacement"]) if key_fn else [],
                                   trust=0.6, salience=1.1, meta={"sources": item["sources"], "replaces": item["fact"]})
         engine.supersede(item["fact"], new_ids[0] if new_ids else None, reason=item["replacement"])
@@ -794,6 +829,104 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
             report["profiles_updated"].append(who)
     engine.kv_set(WATERMARK, str(max(mark, batch[-1]["id"])))
     engine.kv_set("reflect:last_run", str(time.time()))
+    return report
+
+
+_SORT = """\
+Below are statements an assistant's memory holds about its user. Each is one of two kinds:
+
+PERSONAL: """ + _PERSONAL + """.
+PROJECT: """ + _PROJECT + """.
+
+A statement about what the user does for a living, or about what a project means to them or says about them, is \
+PERSONAL. A statement about what a project is, how it works, what it is built with or how far it has got is PROJECT.
+
+List the numbers of the PROJECT statements in "project". Every other statement is taken to be PERSONAL.
+
+STATEMENTS:
+{lines}"""
+_SORT_SCHEMA = {"type": "object", "properties": {"project": {"type": "array", "items": {"type": "integer"}}},
+                "required": ["project"]}
+
+_PORTRAIT = """\
+Write two short profiles for an AI assistant from what its memory holds about its user. Work only from the \
+statements below.
+
+{rules}
+
+Write:
+- user_profile: a portrait of the user as a person, from the PERSONAL statements only. It is what the assistant \
+needs in order to talk with them and relate to them well: who they are, the people and animals in their life by \
+name, their age and birthday if known, where they live, what they do for a living, their likes and dislikes, \
+beliefs and preferences. Their projects do not belong in it. Never call them "a user". Plain prose, at most 150 words.
+- projects_profile: what the user is working on, from the PROJECT statements only. One or two sentences for each \
+project: what it is, what it is for, where it stands. Not how it works inside. Plain prose, at most 100 words. An \
+empty string if there are no PROJECT statements.
+
+PERSONAL:
+{personal}
+
+PROJECT:
+{project}"""
+_PORTRAIT_SCHEMA = {"type": "object", "properties": {"user_profile": {"type": "string"}, "projects_profile": {"type": "string"}},
+                    "required": ["user_profile", "projects_profile"]}
+
+
+def sort_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None, apply: bool = False,
+               batch: int = 25) -> Dict[str, Any]:
+    """Go through the facts already held and tell the ones about a project from the ones about the person, then
+    write the user's profile afresh from the personal ones and a projects profile from the others.  Nothing is
+    changed unless `apply` is set.  Facts already marked as project facts stay so."""
+    rc = reflect_config(cfg)
+    report: Dict[str, Any] = {"calls": [], "to_project": [], "personal": 0, "project": 0, "profiles": {}, "applied": apply}
+    if llm is None:
+        if not rc["reflect_model"]:
+            raise ReflectionError("No reflection model is set. Run: hermes holonomic reflect on --model NAME")
+        call = _make_llm(rc, report)
+    else:
+        call = _wrap_test_llm(llm)
+    budget = int(rc["reflect_max_tokens"])
+    facts = sorted(engine.recent(100000, kind=FACT), key=lambda m: m["id"])
+    already = sorted(engine.recent(100000, kind=PROJECT_FACT), key=lambda m: m["id"])
+    moving: List[dict] = []
+    for start in range(0, len(facts), batch):
+        group = facts[start:start + batch]
+        lines = "\n".join(f"[{m['id']}] {' '.join(m['text'].split())}" for m in group)
+        picked = _parse(call("sort", _SYSTEM, _SORT.format(lines=lines), _SORT_SCHEMA, budget)).get("project")
+        ids = {int(i) for i in picked if isinstance(i, (int, float))} if isinstance(picked, list) else set()
+        moving += [m for m in group if m["id"] in ids]
+    gone = {m["id"] for m in moving}
+    personal = [m for m in facts if m["id"] not in gone]
+    project = already + moving
+    report.update(to_project=[{"id": m["id"], "text": m["text"]} for m in moving], personal=len(personal), project=len(project),
+                  stays_personal=[{"id": m["id"], "text": m["text"]} for m in personal])
+    if personal or project:
+        def listed(items: List[dict]) -> str:      # the newest 80: a prompt has its limits
+            return "\n".join(f"- {' '.join(m['text'].split())}" for m in items[-80:]) or "(none)"
+        data = _parse(call("profiles", _SYSTEM, _PORTRAIT.format(rules=_RULES, personal=listed(personal), project=listed(project)),
+                           _PORTRAIT_SCHEMA, budget))
+        limit = int(rc["profile_max_chars"])
+        for who, key in (("user", "user_profile"), ("projects", "projects_profile")):
+            whole = once_each(" ".join(str(data.get(key) or "").split()))
+            for _ in range(2):
+                if len(whole) <= limit:
+                    break
+                shorter = _parse(call("shorten", _SYSTEM, _SHORTEN.format(who=_WHO[who], words=max(40, int(limit / 7.5)),
+                                                                         text=whole, has=len(whole.split())),
+                                      _SHORTEN_SCHEMA, budget)).get("text")
+                shorter = once_each(" ".join(str(shorter or "").split()))
+                if not 20 <= len(shorter) < len(whole):
+                    break
+                whole = shorter
+            text = trim_to_sentence(whole[:limit])
+            if len(text) >= 20:
+                report["profiles"][who] = text
+    if apply:
+        for m in moving:
+            engine.set_kind(m["id"], PROJECT_FACT)
+        for who, text in report["profiles"].items():
+            if text != engine.profile(who):
+                engine.set_profile(who, text)
     return report
 
 

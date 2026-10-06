@@ -452,6 +452,11 @@ def test_cli_relabel(tmp_path):
         out = run("relabel", str(a), str(f), "999", "--as", "said")
         assert "dreamtalk_assistant -> said_assistant" in out and "is 'fact'; nothing to change" in out and "[#999] no such memory" in out
         assert "said_user -> dreamtalk_user" in run("relabel", str(b), "--as", "dream")
+        assert "fact -> project_fact" in run("relabel", str(f), "--as", "project") and "project_fact -> fact" in run("relabel", str(f), "--as", "personal")
+        assert "nothing to change" in run("relabel", str(b), "--as", "project")
+        assert "What the user is working on: (none yet)" in run("profile")
+        assert "Profile 'projects' set" in run("profile", "--set", "projects", "A memory plugin for her assistant.")
+        assert "A memory plugin for her assistant." in run("profile")
         assert "said_assistant" in run("show", str(a)) and "dreamtalk_user" in run("show", str(b))
     finally:
         embed.OllamaEmbedder = keep

@@ -521,7 +521,7 @@ def test_the_profile_is_written_from_everything_a_run_took_in(tmp_path):
         return answer(ids, text="", user_profile="Kayla works in IT. " + " ".join(f"She likes walk number {i} by the lake." for i in range(60)))
     report = reflect_once(m, {}, llm=stubborn, start_after=0)
     assert report["profile_cut"]["user"] > 0 and len(m.profile("user")) <= 1200 and m.profile("user").endswith(".")
-    assert "Never leave out a person or an animal that has a name" in _PROFILES and "cut off and lost" in _PROFILES
+    assert "the people and animals in their life by name" in _PROFILES and "cut off and lost" in _PROFILES
 
 
 def test_a_profile_with_nothing_new_is_left_as_it_is(tmp_path):
@@ -565,3 +565,84 @@ def test_a_reply_cut_off_at_the_limit_keeps_what_was_whole(tmp_path):
     m.remember("One more thing to think about, I like tea.", kind="said_user", session="s9")
     with pytest.raises(ReflectionError):
         reflect_once(m, {}, llm=nothing)
+
+
+def test_facts_about_a_project_are_kept_apart_from_facts_about_the_person(tmp_path):
+    """Her profile had become half the inner workings of a plugin.  Who she is and what she is working on are
+    different things to know, and only the first belongs in a portrait of her."""
+    from holonomic.reflect import reflect_once, FACT, PROJECT_FACT, _PROPOSE_SCHEMA, _PROFILE_SCHEMA
+    m, ids = seeded(tmp_path)
+    cat = m.remember("I have two cats, Sushi and Theo, and my favourite colour is teal", kind="said_user", session="s1")[0]
+    seen = {}
+
+    def llm(system, user, step):
+        seen[step] = user
+        return answer(ids, user_facts=[{"text": "Kayla has two cats, Sushi and Theo.", "sources": [cat]},
+                                       {"text": "Kayla's favourite colour is teal.", "sources": [cat]}],
+                      project_facts=[{"text": "Kayla's operating system is written in x86 assembly.", "sources": [ids["os"]]},
+                                     {"text": "Kayla's operating system has a yacht mode.", "sources": [ids["hi"]]}],    # the assistant's line only
+                      self_notes=[], user_profile="Kayla has two cats, Sushi and Theo, and her favourite colour is teal.",
+                      projects_profile="An operating system written in x86 assembly, which she is most excited about.")
+    report = reflect_once(m, {}, llm=llm)
+    assert "project_facts" in _PROPOSE_SCHEMA["required"] and "projects_profile" in _PROFILE_SCHEMA["required"]
+    assert "- project_facts:" in seen["propose"] and "never in user_facts" in seen["propose"]
+    assert "(fact about a project of the user's): Kayla's operating system is written in x86 assembly." in seen["check"]
+    assert "(fact about a project of the user's) Kayla's operating system is written" in seen["profiles"]
+    assert "CURRENT PROJECTS PROFILE:" in seen["profiles"] and "Their projects do not belong in it" in seen["profiles"]
+    kinds = {r["text"]: r["kind"] for r in m.recent(20)}
+    assert kinds["Kayla has two cats, Sushi and Theo."] == FACT and kinds["Kayla's operating system is written in x86 assembly."] == PROJECT_FACT
+    assert "Kayla's operating system has a yacht mode." not in kinds and "Kayla's operating system has a yacht mode." in report["dropped_assistant_only"]
+    assert {"user", "projects"} <= set(report["profiles_updated"])
+    assert m.profile("user").startswith("Kayla has two cats") and m.profile("projects").startswith("An operating system")
+    # the same thing learned again is found whichever kind it was kept as, and is not kept twice
+    count = m.stats()["memories"]
+
+    def swapped(system, user, step):
+        return answer(ids, user_facts=[{"text": "Kayla's operating system is written in x86 assembly.", "sources": [ids["os"]]}],
+                      project_facts=[], self_notes=[], user_profile="Kayla now only writes assembly all day long.",
+                      projects_profile="Something else entirely is said here now.")
+    report = reflect_once(m, {}, llm=swapped, start_after=0)
+    assert report["stored"] == [] and len(report["reinforced"]) == 1 and m.stats()["memories"] == count
+    # a pass that learned nothing about a project leaves the projects profile alone
+    assert report["profiles_updated"] == ["user"] and m.profile("projects").startswith("An operating system")
+
+
+def test_the_projects_profile_is_not_written_from_nothing(tmp_path):
+    from holonomic.reflect import reflect_once
+    m, ids = seeded(tmp_path)
+    report = reflect_once(m, {}, llm=lambda system, user, step: answer(ids, projects_profile="She is working on many great things indeed."))
+    assert "projects" not in report["profiles_updated"] and m.profile("projects") == ""
+
+
+def test_facts_already_held_are_sorted_once(tmp_path):
+    from holonomic.reflect import sort_facts, FACT, PROJECT_FACT
+    m, ids = seeded(tmp_path)
+    held = {}
+    for key, text in (("cats", "Kayla has two cats, Sushi and Theo."), ("job", "Kayla is a Network Administrator."),
+                      ("waves", "Kayla's memory system converts embeddings into a pattern of wave phases."),
+                      ("asm", "Kayla's operating system is written in x86 assembly.")):
+        held[key] = m.remember(text, kind=FACT, session="reflection", chain=False)[0]
+    old = m.remember("Kayla's bootloader loads stage two at 0x7E00.", kind=PROJECT_FACT, session="reflection", chain=False)[0]
+    m.set_profile("user", "Kayla's memory system converts embeddings into wave phases and she has cats.")
+    seen = {}
+
+    def llm(system, user, step):
+        seen[step] = user
+        if step == "sort":
+            return json.dumps({"project": [held["waves"], held["asm"], 99999]})
+        return json.dumps({"user_profile": "Kayla is a Network Administrator and lives with her cats, Sushi and Theo.",
+                           "projects_profile": "An operating system in x86 assembly, and a memory system for her assistant."})
+    report = sort_facts(m, {}, llm=llm)
+    assert [x["id"] for x in report["to_project"]] == [held["waves"], held["asm"]] and (report["personal"], report["project"]) == (2, 3)
+    assert f"[{held['cats']}] Kayla has two cats" in seen["sort"] and "0x7E00" not in seen["sort"]       # what is sorted already is not asked about
+    personal, project = seen["profiles"].rsplit("\nPROJECT:\n", 1)
+    assert "Network Administrator" in personal and "wave phases" not in personal.rsplit("PERSONAL:\n", 1)[1]
+    assert "wave phases" in project and "0x7E00" in project and "two cats" not in project
+    # nothing changed without apply
+    assert m.get(held["waves"])["kind"] == FACT and "wave phases" in m.profile("user") and m.profile("projects") == ""
+    sort_facts(m, {}, llm=llm, apply=True)
+    assert m.get(held["waves"])["kind"] == PROJECT_FACT and m.get(held["asm"])["kind"] == PROJECT_FACT and m.get(held["cats"])["kind"] == FACT
+    assert m.profile("user").startswith("Kayla is a Network Administrator") and m.profile("projects").startswith("An operating system")
+    assert m.get(old)["kind"] == PROJECT_FACT
+    # recall can be kept to one kind
+    assert {h.id for h in m.recall("Kayla", k=10, min_score=0.0, only_kinds=(PROJECT_FACT,))} == {held["waves"], held["asm"], old}

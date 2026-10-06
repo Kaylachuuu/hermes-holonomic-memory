@@ -148,7 +148,7 @@ hermes holonomic reflect                      # status: on or off, memories wait
 hermes holonomic reflect now --dry-run        # run once and show the result without storing it
 hermes holonomic reflect now                  # run once now, whether or not it is switched on
 hermes holonomic profile --history
-hermes holonomic profile --set user "Kayla is ..."     # write a starting profile: user, self or us
+hermes holonomic profile --set user "Kayla is ..."     # write a starting profile: user, projects, self or us
 ```
 
 | Key | Default | Meaning |
@@ -173,6 +173,19 @@ A pass reads what is new since the last one, and can miss something (it once wro
 cats). `hermes holonomic reflect now --again 3` goes over the last three days of conversation again.
 Facts she already has are reinforced, not stored twice, and the mark for what is new does not move
 back. `--dry-run` shows what it would add.
+
+**Who the user is, and what the user is working on.** Reflection keeps two kinds of fact about the user. A
+personal fact is about them as a person: family, the people and animals in their life, age and birthday, what
+they do for a living, likes and dislikes, beliefs, how they like to be spoken to. A project fact is about
+something they are making: what it is, how it works, decisions made, how far it has got. The user's profile is
+written from personal facts only, because it is what she needs in order to talk with them and relate to them.
+A separate, shorter profile says what they are working on, a sentence or two for each project. Project facts
+are recalled like any other memory when the talk turns to the project; they no longer shape the portrait of
+the person.
+
+    hermes holonomic reflect sort              sort the facts she already has, and show the two profiles it would write
+    hermes holonomic reflect sort --apply      do it
+    hermes holonomic relabel ID --as project   put one fact right (or --as personal)
 
 Guards that run on every reflection. A name one letter off from one that is well established (it wrote
 "Kaylar" for "Kayla" through a whole run once) is put right before the fact is stored, and the report says so;

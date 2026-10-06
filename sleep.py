@@ -168,7 +168,7 @@ together by accident, so this list is usually empty or has one item. Do not inve
 
 # Whose words a fragment is.  Without this the dreamer reads the user's "I started a project
 # twenty years ago" as its own history, and wakes up talking about "my technical work".
-_VOICE = {"said_user": "said to me", "asked_user": "asked of me", "said_assistant": "I said", "fact": "I know this about her or him",
+_VOICE = {"said_user": "said to me", "asked_user": "asked of me", "said_assistant": "I said", "fact": "I know this about her or him", "project_fact": "I know this about what she or he is working on",
           EPISODE: "I remember", "self_note": "about myself", "bond_note": "about the two of us", "insight": "I noticed",
           "note": "I noted", "core": "I noted", IMAGE: "I saw this in an image I was shown"}
 
@@ -354,7 +354,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
     if len(recent) + len(pictures) < 2:
         return []
     # Favour what was strongly written and what the agent or the user actually stated.
-    weights = [m["strength"] * (1.5 if m["kind"] in ("said_user", "fact", EPISODE) else 1.0) for m in recent]
+    weights = [m["strength"] * (1.5 if m["kind"] in ("said_user", "fact", "project_fact", EPISODE) else 1.0) for m in recent]
     seeds: List[dict] = []
     pool = list(zip(recent, weights))
     used_sessions: set = set()
