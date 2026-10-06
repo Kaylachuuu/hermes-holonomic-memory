@@ -1097,22 +1097,20 @@ def _reflect(engine, cfg, args) -> None:
             one()
             return
         # Going over conversation that was read before: a pass can miss something.
-        from .reflect import WATERMARK
         first = engine.first_id_since(time.time() - float(args.again) * 86400.0)
-        mark = int(engine.kv_get(WATERMARK, "0") or 0)
         if first is None:
             print(f"Nothing was said in the last {args.again:g} day(s).")
             return
         print(f"Going over the last {args.again:g} day(s) again, from memory #{first}"
               + (" (dry run: nothing stored)." if args.dry_run else ". Facts she already has are reinforced, not stored twice."))
-        at, passes = first - 1, 0
-        while at < mark and passes < 25:
+        at, passes, more = first - 1, 0, True
+        while more and passes < 25:                  # to the end: what is new since the last pass is read as well
             report = one(at)
             passes += 1
-            if not report or not report.get("read") or report.get("last_id", at) <= at:
-                break
-            at = report["last_id"]
-        if at < mark and passes >= 25:
+            more = bool(report and report.get("read") and report.get("last_id", at) > at)
+            if more:
+                at = report["last_id"]
+        if more:
             print(f"Stopped after {passes} passes, at memory #{at}. Run it again with fewer days to go over the rest.")
         return
     last_run = engine.kv_get("reflect:last_run")
