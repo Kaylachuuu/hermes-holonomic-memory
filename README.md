@@ -229,8 +229,14 @@ In conversation:
 - "Use the x86 and fat-filesystems libraries for this." They are open until the conversation ends. From the
   next message on she is given what they have on each message, with the file each piece came from, and she
   can look things up in them herself.
+- Opening is yours to decide, and that is enforced, not merely asked of her: the tool opens a library only
+  when your own message asks for it (it names the library and speaks of a library, data store or reference
+  material), or when you say yes after she has asked whether to open it. Told only in her instructions not to
+  open one unasked, she reasoned that it was "logical" to and did.
+- A question a library would answer does not need it open. She may look the answer up once, says which
+  library it came from, and nothing more from that library reaches the conversation.
 - A new conversation is told which libraries the last one used, so she can ask whether to pick the work up
-  again. She does not open one unasked.
+  again.
 
 From the command line:
 

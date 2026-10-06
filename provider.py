@@ -301,11 +301,14 @@ LIBRARY_TOOL = {
         "- update: read the folder of library `name` again, taking in files that are new or changed and dropping "
         "ones that are gone.\n"
         "- status: how library `name` stands: its files and pieces, whether it is still being built, files left out and why.\n"
-        "- open: open `names` (one or more libraries) for this conversation. Only when the user asks to work with "
-        "them. They stay open until the conversation ends or they are closed.\n"
+        "- open: open `names` (one or more libraries) for this conversation, so that what they have on each message "
+        "is given to you from then on. This is the user's decision: it works only when the user's own message asks "
+        "for it (\"use the x86 library\"), and is refused otherwise. If you think a library should be open, ask "
+        "the user; when they say yes, open it. They stay open until the conversation ends or they are closed.\n"
         "- close: close `names`, or every open library if none is given.\n"
-        "- search: look up `query` in the open libraries (or only in `names`, which must be open). Use it for exact "
-        "details: a file format, an instruction, a number. Results name the file they came from."
+        "- search: look up `query` once. In the open libraries by default; or in `names`, which need not be open. "
+        "Use it when the user asks something a library would answer, and for exact details: a file format, an "
+        "instruction, a number. Results name the library and file they came from; say so when you use one."
     ),
     "parameters": {
         "type": "object",
@@ -415,6 +418,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         self._backlog: List[tuple] = []                 # turns that failed to store, retried later
         self._last_user: Dict[str, int] = {}            # session -> id of the user's previous message
         self._looked_at: set = set()                    # images kept while preparing a reply, not to be counted twice
+        self._said: Dict[str, str] = {}                 # session -> the user's latest message, in their own words
 
     # ------------------------------------------------------------- lifecycle
 
@@ -592,6 +596,8 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._last_count = None
+        # Kept before anything else: "yes" is a trivial prompt, and it is also how the user agrees to a library being opened.
+        self._said[session_id or self._session_id] = _images.strip_image_markers(query)
         if is_trivial_prompt(query):
             return ""
         engine = self._ensure_engine()
@@ -1103,8 +1109,20 @@ class HolonomicMemoryProvider(MemoryProvider):
             if action == "open":
                 if not wanted:
                     return _error("open needs 'names': which libraries to open")
+                wanted = [_library._need(root, n)[0] for n in wanted]
+                said = self._said.get(sid, "")
+                unasked = [n for n in wanted if n not in _library.opened(root, sid) and not _library.user_asked(root, sid, said, n)]
+                if unasked:
+                    _library.note_refused(root, sid, wanted)
+                    return json.dumps({"opened": False, "not_opened": unasked, "open_in_this_conversation": _library.opened(root, sid),
+                                       "why": "The user's message did not ask for this to be opened, and an open library feeds "
+                                              "every message of the conversation, which is theirs to decide.",
+                                       "what_you_can_do": "To answer the question in front of you, look it up once: action 'search' "
+                                                          "with these names. If you think it should be open for the rest of the "
+                                                          "conversation, ask the user; when they say yes, call open again."})
+                _library.clear_refused(root, sid)
                 now = _library.open_for(root, sid, wanted)
-                return json.dumps({"open_in_this_conversation": now, "libraries": [_library.summary(root, n) for n in now],
+                return json.dumps({"opened": True, "open_in_this_conversation": now, "libraries": [_library.summary(root, n) for n in now],
                                    "note": "From the next message on, what these have on each message is given to you. "
                                            "Use action 'search' to look something up now."})
             if action == "close":
@@ -1114,17 +1132,20 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if not query:
                     return _error("search needs 'query'")
                 now = _library.opened(root, sid)
-                if not now:
-                    return _error("No library is open in this conversation. Open one first (action 'open'), and only if the "
-                                  "user has asked to work with it.")
-                which = [_library.clean_name(n) for n in wanted] or now
-                closed = [n for n in which if n not in now]
-                if closed:
-                    return _error(f"Not open in this conversation: {', '.join(closed)}. Open: {', '.join(now)}.")
+                which = [_library._need(root, n)[0] for n in wanted] or now
+                if not which:
+                    have = _library.names(root)
+                    return _error("Say which library to look in, with 'names'. There " + (f"are: {', '.join(have)}." if have else "are none yet."))
                 found = _library.search(root, which, query, engine.embedder, self._cfg,
                                         k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
-                return json.dumps({"searched": which, "count": len(found), "results": [
-                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"]} for f in found]})
+                out = {"searched": which, "count": len(found), "results": [
+                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"]} for f in found]}
+                looked = [n for n in which if n not in now]
+                if looked:
+                    out["note"] = (f"A single lookup: {', '.join(looked)} is not open in this conversation, and nothing more from it "
+                                   "will reach you unless you look again or the user asks for it to be opened. Say which library "
+                                   "an answer came from.")
+                return json.dumps(out)
             return _error(f"Unknown action: {action}")
         except LibraryError as exc:
             return _error(exc)

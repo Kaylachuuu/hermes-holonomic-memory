@@ -587,6 +587,48 @@ def last_used(root: Path, session: str, days: float = 30) -> Optional[dict]:
     return {"names": kept, "when": time.strftime("%Y-%m-%d", time.localtime(last["at"]))} if kept else None
 
 
+# ----------------------------------------------------------------- whether the user asked
+
+_CUE = re.compile(r"\b(librar(?:y|ies)|data\s?stores?|reference(?:s| material)?)\b", re.IGNORECASE)
+_YES = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok|okay|please|please do|go ahead|do it|go for it|open it|open them|use it|use them|"
+                  r"yes please|sounds good|that would be great|absolutely|definitely)\b", re.IGNORECASE)
+_NO = re.compile(r"\b(no|not|don'?t|do not|never|nope|close|stop)\b", re.IGNORECASE)
+_ASKED: Dict[str, List[str]] = {}       # conversation -> libraries she tried to open unasked, and may be told yes to
+
+
+def _mentions(message: str, name: str) -> bool:
+    plain = re.sub(r"[^a-z0-9]+", " ", message.lower())
+    return bool(re.search(r"\b" + r"\s*".join(re.escape(part) for part in re.split(r"[-_]+", name) if part) + r"\b", plain))
+
+
+def user_asked(root: Path, session: str, message: str, name: str) -> bool:
+    """Whether the user's own message asks for this library to be opened.
+
+    Being told in her instructions to open a library only when asked was not enough: asked a question the library
+    could answer, she reasoned that opening it was 'logical' and did.  An open library feeds every message of the
+    conversation, so that is the user's to decide, and it is decided here from the user's words: the message names
+    the library and speaks of a library (or data store, or reference material); or it speaks of all the libraries;
+    or it says yes after she asked whether to open this one."""
+    message = " ".join(str(message or "").split())
+    if not message:
+        return False
+    if _CUE.search(message) and (_mentions(message, name) or re.search(r"\b(all|every|both)\b", message, re.IGNORECASE)):
+        return not re.search(r"\b(don'?t|do not|never)\s+(open|use|load)\b", message, re.IGNORECASE)
+    with _LOCK:
+        waiting = name in _ASKED.get(f"{root}|{session}", [])
+    return waiting and len(message) <= 80 and bool(_YES.search(message)) and not _NO.search(message)
+
+
+def note_refused(root: Path, session: str, wanted: List[str]) -> None:
+    with _LOCK:
+        _ASKED[f"{root}|{session}"] = list(dict.fromkeys(wanted))
+
+
+def clear_refused(root: Path, session: str) -> None:
+    with _LOCK:
+        _ASKED.pop(f"{root}|{session}", None)
+
+
 # ----------------------------------------------------------------- looking things up
 
 def _source(meta: dict) -> str:
@@ -657,7 +699,8 @@ def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:
     listed = []
     for n in have:
         s = summary(root, n)
-        listed.append(f"- {n}: {s['pieces']} pieces from {s['files']} files" + (f". {s['about']}" if s["about"] else "")
+        listed.append(f"- {n}: {s['pieces']} piece{'s' if s['pieces'] != 1 else ''} from {s['files']} file{'s' if s['files'] != 1 else ''}"
+                      + (f". {s['about']}" if s["about"] else "")
                       + (" (still being built)" if s.get("building", {}).get("running") else ""))
     now = opened(root, session)
     if now:
@@ -667,8 +710,9 @@ def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:
         last = last_used(root, session, float(cfg.get("library_remember_days", 30)))
         if last:
             state += (f" The last conversation that used any had {', '.join(last['names'])} open ({last['when']}). If the user "
-                      "seems to be picking that work up again, ask whether to open it; do not open it unasked.")
+                      "seems to be picking that work up again, ask whether to open it.")
     return ("\n\n# Reference libraries\nReference material kept apart from your memory:\n" + "\n".join(listed) + "\n" + state
-            + " Open a library with the holonomic_library tool (action 'open') only when the user asks to work with it; it "
-            "stays open for that conversation alone. While one is open, what it has on each message is given to you, and "
-            "you can look things up in it (action 'search').")
+            + " When the user asks a question that one of these would answer, you may look it up once with the "
+            "holonomic_library tool (action 'search', with the library in 'names') and say which library it came from. "
+            "Opening a library (action 'open') makes it feed every message of the conversation, so that is the user's "
+            "decision: it works only when the user's own message asks for it. If you think one should be open, ask them.")

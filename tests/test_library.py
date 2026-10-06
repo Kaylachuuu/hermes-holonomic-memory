@@ -172,7 +172,8 @@ def test_a_library_is_open_in_one_conversation_only(tmp_path):
         assert lib.last_used(root, "tuesday", days=0) is None
         told = lib.prompt_block(root, "tuesday", CFG)
         assert "- x86: " in told and "Booting an x86 machine" in told and "None is open in this conversation" in told
-        assert "had x86 open" in told and "do not open it unasked" in told
+        assert "had x86 open" in told and "ask whether to open it" in told and "works only when the user's own message asks" in told
+        assert "- x86: " in told and " pieces from 4 files" in told
         assert "Open in this conversation: x86." in lib.prompt_block(root, "monday", CFG)
         # the same conversation under a new id keeps it; closing ends it
         lib.carry_over(root, "monday-2", "monday")
@@ -230,15 +231,34 @@ def test_she_makes_opens_and_uses_a_library_through_her_tool(tmp_path):
         # made, but not open: nothing reaches her, and she cannot look anything up
         p.sync_turn("I had a lovely walk by the lake this morning", "That sounds peaceful.", session_id="monday")
         assert "Reference material" not in p.prefetch("how does INT 13h read sectors with AH=42h", session_id="monday")
-        assert "No library is open" in lib_tool(p, action="search", query="INT 13h")["error"]
+        assert "Say which library" in lib_tool(p, action="search", query="INT 13h")["error"]
         assert "error" in lib_tool(p, action="open", names=["nope"]) and "error" in lib_tool(p, action="open")
+        # Asked a question the library answers, she may look it up once; she may not open it on her own.
+        p.prefetch("how does INT 13h read sectors with AH=42h", session_id="monday")
+        refused = lib_tool(p, action="open", names=["x86"])
+        assert refused["opened"] is False and refused["not_opened"] == ["x86"] and refused["open_in_this_conversation"] == []
+        assert "ask the user" in refused["what_you_can_do"]
+        once = lib_tool(p, action="search", query="INT 13h AH=42h extended read", names=["x86"])
+        assert once["results"][0]["source"] == "boot.md > Reading sectors" and "A single lookup: x86 is not open" in once["note"]
+        assert lib_tool(p, action="list")["open_in_this_conversation"] == []
+        assert "Reference material" not in p.prefetch("and how many sectors can it read at once", session_id="monday")
+        # She asks, the user says yes: now it opens.  A yes to nothing in particular opens nothing.
+        p.prefetch("yes please", session_id="monday")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is True
+        assert lib_tool(p, action="close")["open_in_this_conversation"] == []
+        p.prefetch("yes please", session_id="monday")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is False                  # that yes was already used
+        p.prefetch("no, leave it closed", session_id="monday")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is False
+        # The user asks in their own words.
+        p.prefetch("Let's work on the bootloader. Use the x86 library for this conversation.", session_id="monday")
         assert lib_tool(p, action="open", names=["x86"])["open_in_this_conversation"] == ["x86"]
         p._cfg["library_min_score"] = 0.1
         given = p.prefetch("how does INT 13h read sectors with AH=42h", session_id="monday")
         assert "## Reference material (from the library open in this conversation: x86)" in given and "disk address packet" in given
         found = lib_tool(p, action="search", query="FAT12 cluster number bits")
-        assert found["searched"] == ["x86"] and found["results"][0]["source"] == "fs/fat12.txt"
-        assert "Not open" in lib_tool(p, action="search", query="x", names=["other"])["error"]
+        assert found["searched"] == ["x86"] and found["results"][0]["source"] == "fs/fat12.txt" and "note" not in found
+        assert "error" in lib_tool(p, action="search", query="x", names=["other"])
         context = (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
         assert "reference libraries open in this conversation: x86" in context
         # reference material is not her memory: none of it was stored there
@@ -248,7 +268,7 @@ def test_she_makes_opens_and_uses_a_library_through_her_tool(tmp_path):
         assert "Reference material" not in p.prefetch("how does INT 13h read sectors with AH=42h", session_id="tuesday")
         p.on_session_switch("tuesday", reset=True)
         assert "None is open in this conversation" in p.system_prompt_block() and "had x86 open" in p.system_prompt_block()
-        assert "No library is open" in lib_tool(p, action="search", query="INT 13h")["error"]
+        assert "Say which library" in lib_tool(p, action="search", query="INT 13h")["error"]
         # the first conversation compressed and renamed keeps its library
         p.on_session_switch("monday")
         p.on_session_switch("monday-b", parent_session_id="monday")
@@ -320,3 +340,22 @@ def test_a_build_that_loses_its_embedding_server_keeps_what_it_had(tmp_path):
         assert report["unchanged"] == kept["files"] and report["added"] == 4 - kept["files"] and lib.summary(root, "x86")["files"] == 4
     finally:
         lib.close_all(root)
+
+
+def test_only_the_users_own_words_open_a_library(tmp_path):
+    root = tmp_path / "libraries"
+    asked = lambda message, name="x86", session="s": lib.user_asked(root, session, message, name)
+    assert asked("Use the x86 library for this conversation") and asked("can you open the X86 data store?")
+    assert asked("Please use the fat-filesystems and x86 libraries", "fat-filesystems") and asked("use the fat filesystems library", "fat-filesystems")
+    assert asked("load all of my libraries") and asked("I want the reference material from x86 for this")
+    # a question the library would answer is not a request to open it; nor is naming it
+    assert not asked("What address does the x86 boot sector load its second stage at?")
+    assert not asked("I was writing x86 assembly last night") and not asked("which libraries do you have?")
+    assert not asked("don't open the x86 library yet") and not asked("") and not asked("yes")
+    assert not asked("use the marigold library")                                             # another library
+    lib.note_refused(root, "s", ["x86"])
+    assert asked("yes") and asked("Sure, go ahead") and asked("yes please") and asked("ok")
+    assert not asked("no") and not asked("not now") and not asked("yes", "marigold") and not asked("yes", session="other")
+    assert not asked("yes, " + "and another thing entirely " * 5)                            # a long message that happens to open with yes
+    lib.clear_refused(root, "s")
+    assert not asked("yes")
