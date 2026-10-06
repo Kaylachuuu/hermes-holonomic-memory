@@ -22,7 +22,10 @@
     hermes holonomic images dream ID... yes|no|default     allow or forbid dream pictures drawn from particular images
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
-    hermes holonomic images forget ID [--yes] [--keep-files]
+    hermes holonomic images forget ID...          set an image aside: she no longer recalls it; nothing is deleted
+    hermes holonomic images removed               images set aside
+    hermes holonomic images restore ID...         put one back exactly as it was
+    hermes holonomic images delete ID... [--yes]  remove for good an image already set aside, files included
     hermes holonomic tidy [--apply]               find stored messages that are Hermes' notes about attachments, and remove them
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
@@ -194,8 +197,8 @@ def holonomic_command(args) -> None:
                     if mem.get("kind") == "image" and (mem.get("meta") or {}).get("image_id"):
                         from . import images as _img          # what an image showed: forget the image with it
                         _img.forget_image(engine, int(mem["meta"]["image_id"]))
-                        print(f"  #{mid} described image #{mem['meta']['image_id']}, which is forgotten too. Its file is still on "
-                              f"disk; `hermes holonomic images forget` removes files.")
+                        print(f"  #{mid} described image #{mem['meta']['image_id']}, which is set aside with it. To put the image back: "
+                              f"hermes holonomic images restore {mem['meta']['image_id']}")
                         continue
                     engine.forget(mid)
                 print(f"Forgot {', '.join('#' + str(m) for m in real)}. This cannot be undone. "
@@ -429,6 +432,9 @@ def _images_cmd(engine, cfg, args) -> None:
                  + ("straight away" if ic["image_sections_when"] == "now" else f"after {ic['image_idle_seconds']} s of quiet")))
         print(f"  images kept: {_img.count_images(engine)}   waiting for a description: {waiting['images']}   "
               f"parts waiting to be looked at: {waiting['sections']}")
+        aside = len(_img.removed_images(engine))
+        if aside:
+            print(f"  set aside (forgotten, not deleted): {aside}   (hermes holonomic images removed)")
         print(f"  files are in: {engine.path / 'images'}")
         if not ic["image_enabled"]:
             print("  Turn on with: hermes holonomic images on --model NAME [--host URL]")
@@ -559,21 +565,62 @@ def _images_cmd(engine, cfg, args) -> None:
         except (_img.ImageError, ReflectionError) as exc:
             print(f"Could not look: {exc}")
     elif what == "forget":
-        found = [_img.get_image(engine, int(raw)) for raw in items if raw.isdigit()]
-        found = [img for img in found if img]
+        found = [img for img in (_img.get_image(engine, int(raw)) for raw in items if raw.isdigit()) if img]
         if not found:
-            print("No such image. Usage: hermes holonomic images forget ID... [--yes] [--keep-files]")
+            print("No such image. Usage: hermes holonomic images forget ID...")
             return
         for img in found:
             _print_image(img, args.width)
-        if not args.yes:
-            print(f"Nothing removed. To forget {'this image' if len(found) == 1 else 'these images'} for good"
-                  f"{'' if args.keep_files else ', and delete the files'}, run the same command with --yes.")
+            _img.forget_image(engine, img["id"])
+        ids = " ".join(str(i["id"]) for i in found)
+        print(f"Set aside image {', '.join('#' + str(i['id']) for i in found)}. She no longer recalls or shows "
+              f"{'it' if len(found) == 1 else 'them'}; nothing has been deleted.\n"
+              f"  to put {'it' if len(found) == 1 else 'them'} back as before:  hermes holonomic images restore {ids}\n"
+              f"  to remove for good, files included:  hermes holonomic images delete {ids}")
+    elif what == "removed":
+        gone = _img.removed_images(engine)
+        if not gone:
+            print("No images are set aside.")
             return
-        for img in found:
-            _img.forget_image(engine, img["id"], delete_files=not args.keep_files)
-        print(f"Forgot image {', '.join('#' + str(i['id']) for i in found)}"
-              + (" (files kept on disk)." if args.keep_files else " and deleted the files. This cannot be undone."))
+        print(f"{len(gone)} image(s) set aside. `images restore ID` puts one back as it was; `images delete ID` removes it for good.")
+        for g in gone:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(g["removed_at"])) if g["removed_at"] else "by an earlier version"
+            print(f"  image #{g['id']}  {g['origin'] or '(no file name)'}  set aside {when}"
+                  + ("" if g["files_present"] else "  [its file is missing: cannot be restored]"))
+            if g["description"]:
+                print(f"    {_clip(g['description'], args.width)}")
+            print(f"    {g['original']}")
+    elif what == "restore":
+        if not items or not all(raw.isdigit() for raw in items):
+            print("Usage: hermes holonomic images restore ID...      (see what is set aside: hermes holonomic images removed)")
+            return
+        for raw in items:
+            img = _img.restore_image(engine, cfg, int(raw))
+            if not img:
+                print(f"image #{raw}: nothing to restore (it is not set aside, or its file is gone).")
+                continue
+            print(f"Restored image #{raw}" + (" with her description, its parts and what was said about it." if img["description"]
+                                               else ". It had no description; she will describe it afresh (hermes holonomic images process)."))
+            _print_image(img, args.width)
+    elif what == "delete":
+        aside = {g["id"]: g for g in _img.removed_images(engine)}
+        if not items or not all(raw.isdigit() for raw in items):
+            print("Usage: hermes holonomic images delete ID... [--yes]      (only images already set aside with `images forget`)")
+            return
+        wanted = [int(raw) for raw in items]
+        for i in [i for i in wanted if i not in aside]:
+            print(f"image #{i} has not been set aside, so it is not deleted. Set it aside first: hermes holonomic images forget {i}")
+        wanted = [i for i in wanted if i in aside]
+        if not wanted:
+            return
+        for i in wanted:
+            print(f"  image #{i}  {aside[i]['origin'] or '(no file name)'}  {_clip(aside[i]['description'], args.width)}")
+        if not args.yes:
+            print(f"Nothing deleted. To delete {'this image' if len(wanted) == 1 else 'these images'} and "
+                  f"{'its' if len(wanted) == 1 else 'their'} files for good, run the same command with --yes. This cannot be undone.")
+            return
+        done = [i for i in wanted if _img.delete_image(engine, i)]
+        print(f"Deleted image {', '.join('#' + str(i) for i in done)} and the files. This cannot be undone.")
 
 
 def _redrawn(p) -> str:
@@ -802,7 +849,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream", "removed", "restore", "delete"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")

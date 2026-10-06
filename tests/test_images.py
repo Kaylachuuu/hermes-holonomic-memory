@@ -171,21 +171,48 @@ def test_a_description_that_fails_is_tried_again(tmp_path):
 
 
 def test_forgetting_an_image(tmp_path):
+    """Forgetting sets an image aside and can be undone exactly; deleting works only on an image already set
+    aside, so getting rid of one for good takes two steps."""
+    import os
     from holonomic import images
     m = store(tmp_path)
     data = picture()
-    img = images.add_image(m, data, CFG)
+    img = images.add_image(m, data, CFG, caption="This is Sushi.", origin="IMG_2018.HEIC")
     images.process(m, CFG, see=eyes({"centre": {"description": "A cat asleep on a cushion.", "labels": ["cat"]}}))
-    img = images.get_image(m, img["id"])
-    assert m.stats()["memories"] == 2
+    assert images.set_people(m, img["id"], False) and images.set_signature(m, img["id"], "bottom right")
+    before = images.get_image(m, img["id"], sections=True)
+    assert m.stats()["memories"] == 2 and not images.delete_image(m, img["id"])              # not set aside: not deleted
+    assert os.path.exists(before["original"]) and images.count_images(m) == 1
     assert images.forget_image(m, img["id"]) and not images.forget_image(m, img["id"])
     assert m.stats()["memories"] == 0 and images.get_image(m, img["id"]) is None and images.find_by_label(m, "cat") == []
-    assert open(img["original"], "rb").read() == data and images.count_images(m) == 0       # the file stays unless asked
-    back = images.add_image(m, data, CFG)                                    # shown again after being forgotten: starts over
-    assert back["new"] and back["id"] == img["id"] and back["seen"] == 1 and back["sections_waiting"] == 9
-    images.forget_image(m, back["id"], delete_files=True)
-    import os
-    assert not os.path.exists(img["original"]) and not os.path.exists(img["file"])
+    assert images.all_labels(m) == [] and images.pending(m) == {"images": 0, "sections": 0} and images.count_images(m) == 0
+    assert open(before["original"], "rb").read() == data                                     # nothing is destroyed
+    aside = images.removed_images(m)
+    assert [(a["id"], a["origin"], a["description"], a["parts"], a["files_present"]) for a in aside] == \
+        [(img["id"], "IMG_2018.HEIC", before["description"], 1, True)]
+    # restored: the same words, parts, labels, what was said and what was corrected
+    back = images.restore_image(m, CFG, img["id"])
+    again = images.get_image(m, img["id"], sections=True)
+    same = lambda i: (i["description"], i["caption"], i["origin"], i["labels"], i["people"], i["signature"], i["sections_waiting"],
+                      [(x["place"], x["description"], x["looked_at"]) for x in i["sections"]])
+    assert back and same(again) == same(before) and m.stats()["memories"] == 2 and images.removed_images(m) == []
+    assert [i["id"] for i in images.find_by_label(m, "cat")] == [img["id"]] and images.restore_image(m, CFG, img["id"]) is None
+    part = next(x for x in again["sections"] if x["description"])
+    assert m.get(part["memory_id"])["meta"] == {"image_id": img["id"], "section": part["section"], "place": "centre"}
+    assert abs(m.get(again["memory_id"])["created_at"] - m.get(part["memory_id"])["created_at"]) < 60    # not made to look new
+    assert [h.id for h in m.recall("a cat asleep on a cushion", k=3)][:1] in ([again["memory_id"]], [part["memory_id"]])
+    # shown again while set aside: she starts over with it
+    images.forget_image(m, img["id"])
+    fresh = images.add_image(m, data, CFG)
+    assert fresh["new"] and fresh["id"] == img["id"] and fresh["seen"] == 1 and fresh["sections_waiting"] == 9 and fresh["labels"] == []
+    # deleted for good: only after being set aside, and then nothing is left
+    images.forget_image(m, img["id"])
+    assert images.delete_image(m, img["id"]) and not images.delete_image(m, img["id"])
+    assert not os.path.exists(before["original"]) and not os.path.exists(before["file"])
+    assert images.removed_images(m) == [] and images.restore_image(m, CFG, img["id"]) is None
+    row = images._row(m, img["id"])
+    assert (row["caption"], row["origin"], row["meta"]) == ("", "", "{}")
+    assert images.add_image(m, data, CFG)["new"]                                             # and it can be shown afresh
 
 
 def test_images_fade_with_sleep_but_stay_within_deep_recall(tmp_path):
@@ -287,8 +314,12 @@ def test_provider_keeps_recalls_and_shows_images(tmp_path):
         hit = tool(p, action="recall", query="black cat asleep on a grey sofa beside a window")["results"][0]
         assert hit["kind"] == "image" and hit["image_id"] == img["id"] and hit["file"] == img["file"]
         assert tool(p, action="stats")["images"] == 1
-        assert tool(p, action="forget", memory_id=img["memory_id"]) == {"forgotten": True, "image_id": img["id"]}
+        gone = tool(p, action="forget", memory_id=img["memory_id"])
+        assert (gone["forgotten"], gone["image_id"]) == (True, img["id"]) and "restore=true" in gone["note"]
         assert images.count_images(e) == 0 and open(img["original"], "rb").read() == picture()
+        back = tool(p, action="images", image_id=img["id"], restore=True)                    # a mistake she can undo herself
+        assert back["image_id"] == img["id"] and images.count_images(e) == 1 and "error" in tool(p, action="images", image_id=img["id"], restore=True)
+        assert tool(p, action="recall", query="black cat asleep on a grey sofa beside a window")["results"][0]["image_id"] == img["id"]
     finally:
         images._seer = keep
         p.shutdown()
@@ -381,8 +412,17 @@ def test_cli_images(tmp_path):
         assert "image #1: dream pictures may be drawn from it" in out and "image #9: no such image" in out
         assert "dream pictures drawn from it: always allowed" in run("images", "show", "1")
         assert "back to the general rule" in run("images", "dream", "1", "default") and "Usage:" in run("images", "dream", "1", "perhaps")
-        assert "Nothing removed." in run("images", "forget", "1") and "images kept: 1" in run("images")
-        assert "Forgot image #1 and deleted the files" in run("images", "forget", "1", "--yes")
+        assert "has not been set aside, so it is not deleted" in run("images", "delete", "1", "--yes") and "images kept: 1" in run("images")
+        assert "No images are set aside." in run("images", "removed")
+        out = run("images", "forget", "1")
+        assert "Set aside image #1" in out and "nothing has been deleted" in out and "images restore 1" in out and "images delete 1" in out
+        assert "images kept: 0" in run("images") and list((home / "holonomic" / "images").glob("*"))
+        assert "image #1" in run("images", "removed") and "1 image(s) set aside" in run("images", "removed")
+        assert "Restored image #1 with her description" in run("images", "restore", "1") and "images kept: 1" in run("images")
+        assert "nothing to restore" in run("images", "restore", "1")
+        run("images", "forget", "1")
+        assert "Nothing deleted." in run("images", "delete", "1") and list((home / "holonomic" / "images").glob("*"))
+        assert "Deleted image #1 and the files" in run("images", "delete", "1", "--yes")
         assert "images kept: 0" in run("images") and not list((home / "holonomic" / "images").glob("*"))
         assert "Image memory is OFF" in run("images", "off")
     finally:

@@ -73,7 +73,7 @@ TOOL_SCHEMA = {
         "- images: images you have been shown. With `label`, every image in which that thing was noticed (e.g. 'cat'); "
         "with `query`, images whose description matches; with `image_id`, one image and what is in each part of it; "
         "with none of these, the most recent. If the user tells you a description is wrong, pass `image_id` and "
-        "`correction` (what they said, in their words): the image is looked at again with that taken as true. Each result has a `file`: to show the image to the user, write "
+        "`correction` (what they said, in their words): the image is looked at again with that taken as true. An image you forgot by mistake comes back with `image_id` and `restore`: true. Each result has a `file`: to show the image to the user, write "
         "MEDIA: followed by that file path on a line of its own in your reply.\n"
         "- look: look at a stored image again (`image_id`) to answer a `question` its description does not cover. "
         "Optional `section` (a part number from 'images') to look closely at one part.\n"
@@ -87,6 +87,7 @@ TOOL_SCHEMA = {
             "label": {"type": "string", "description": "A thing to find in images, e.g. 'cat' (images)."},
             "image_id": {"type": "integer", "description": "An image id as shown, e.g. image #3 (images, look)."},
             "question": {"type": "string", "description": "What you want to know about the image (look)."},
+            "restore": {"type": "boolean", "description": "Put back an image that was forgotten, as it was (images, with image_id)."},
             "correction": {"type": "string", "description": "What the user said is wrong about an image's description (images)."},
             "section": {"type": "integer", "description": "A part of the image to look at closely (look)."},
             "deep": {"type": "boolean", "description": "Recall only: also search faded memories and follow links further."},
@@ -800,6 +801,11 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     def _images_action(self, engine, args: Dict[str, Any], limit: int) -> str:
         how = "To show an image to the user, write MEDIA: followed by its file path on a line of its own."
+        if args.get("image_id") is not None and args.get("restore"):
+            img = _images.restore_image(engine, self._cfg, int(args["image_id"]))
+            if not img:
+                return _error(f"Image {args['image_id']} is not set aside, or its file is gone, so there is nothing to restore")
+            return json.dumps(dict(self._image_json(img), note="Restored as it was. " + how))
         if args.get("image_id") is not None and (args.get("correction") or "").strip():
             img = _images.redescribe(engine, self._cfg, int(args["image_id"]), correction=args["correction"], key_fn=extract_keys)
             if not img:
@@ -889,8 +895,10 @@ class HolonomicMemoryProvider(MemoryProvider):
                     return _error(f"No memory with id {mid}")
                 if action == "forget":
                     image_id = (current.get("meta") or {}).get("image_id") if current["kind"] == IMAGE else None
-                    if image_id:            # forgetting what an image showed forgets the image; its file stays on disk
-                        return json.dumps({"forgotten": _images.forget_image(engine, int(image_id)), "image_id": image_id})
+                    if image_id:            # forgetting what an image showed sets the image aside; nothing is destroyed
+                        return json.dumps({"forgotten": _images.forget_image(engine, int(image_id)), "image_id": image_id,
+                                           "note": "The image is set aside, not destroyed. If this was a mistake, the 'images' action "
+                                                   "with this image_id and restore=true puts it back exactly as it was."})
                     return json.dumps({"forgotten": engine.forget(mid)})
                 rating = args.get("rating")
                 if rating == "helpful":

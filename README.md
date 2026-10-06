@@ -288,8 +288,18 @@ hermes holonomic images process               # describe everything that is wait
 hermes holonomic images list | show 3 | find cat | labels
 hermes holonomic images look 3 "what colour is the car?" [--section 4]
 hermes holonomic images redo 3 --fix "That is a couch, not someone's lap"      # describe again, with a correction taken as true
-hermes holonomic images forget 3 --yes [--keep-files]
+hermes holonomic images forget 3                  # set aside: she no longer recalls it; nothing is deleted
+hermes holonomic images removed                   # what is set aside
+hermes holonomic images restore 3                 # put it back exactly as it was
+hermes holonomic images delete 3 --yes            # remove for good; only works on an image already set aside
 ```
+
+Forgetting an image, from the command line or by the agent in conversation, only sets it aside: her
+description, the parts, what was said when it was shown and every correction are kept with it, and
+the files stay on disk, so `restore` brings it back exactly. The agent can undo its own mistake the
+same way. Removing an image and its files for good is a second step, `delete`, which refuses any
+image that has not been set aside first and is available only from the command line.
+
 
 | Key | Default | Meaning |
 |---|---|---|

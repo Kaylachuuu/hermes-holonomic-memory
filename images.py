@@ -390,6 +390,8 @@ def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", cap
     with engine._lock:
         try:
             if row:                                  # forgotten once, shown again: it starts over
+                db.execute("DELETE FROM image_labels WHERE image_id = ?", (row["id"],))
+                db.execute("DELETE FROM image_sections WHERE image_id = ?", (row["id"],))
                 db.execute("UPDATE images SET file=?, view=?, width=?, height=?, bytes=?, format=?, realm=?, source=?, session=?, "
                            "origin=?, caption=?, created_at=?, last_seen=?, meta=?, seen=1, memory_id=NULL, described_at=NULL, "
                            "sections_at=NULL, claimed_at=NULL, forgotten=0 WHERE id=?", values + (row["id"],))
@@ -1221,28 +1223,98 @@ def memory_ids(engine, described_before: Optional[float] = None) -> List[int]:
 
 
 def forget_image(engine, image_id: int, *, delete_files: bool = False) -> bool:
-    """Forget an image: its description, its parts and its labels.  The files are removed only when asked,
-    because that cannot be undone."""
+    """Set an image aside: she no longer recalls it, lists it or shows it, but nothing is destroyed.  What she
+    wrote about it and its parts is kept with the image so that `restore_image` can put it back exactly, and
+    the files stay where they are.  Only `delete_image`, on an image already set aside, removes it for good:
+    getting rid of an image takes two steps so that it cannot happen by one mistake.
+
+    `delete_files` is accepted for callers written before this and is ignored."""
     row = _row(engine, image_id)
     if row is None or row["forgotten"]:
         return False
+    whole = engine.get(int(row["memory_id"])) if row["memory_id"] else None
     with engine._lock:
-        db = _db(engine)
-        mids = [row["memory_id"]] + [r["memory_id"] for r in db.execute("SELECT memory_id FROM image_sections WHERE image_id = ?", (row["id"],))]
-    for mid in mids:
+        parts = _db(engine).execute("SELECT idx, memory_id FROM image_sections WHERE image_id = ? ORDER BY idx", (row["id"],)).fetchall()
+    kept = {"at": time.time(), "text": (whole or {}).get("text", ""), "created_at": (whole or {}).get("created_at"), "parts": {}}
+    for part in parts:
+        mem = engine.get(int(part["memory_id"])) if part["memory_id"] else None
+        if mem and mem.get("text"):
+            kept["parts"][str(part["idx"])] = {"text": mem["text"], "created_at": mem.get("created_at")}
+    for mid in [row["memory_id"]] + [part["memory_id"] for part in parts]:
         if mid:
             engine.forget(int(mid))
+    with engine._lock:        # labels and the grid of parts stay: every search for them leaves out images set aside
+        _db(engine).execute("UPDATE images SET forgotten = 1, memory_id = NULL, claimed_at = NULL, meta = ? WHERE id = ?",
+                            (json.dumps(dict(json.loads(row["meta"] or "{}"), removed=kept)), row["id"]))
+    return True
+
+
+def removed_images(engine) -> List[dict]:
+    """Images set aside and not yet deleted, most recently removed first."""
+    with engine._lock:
+        rows = _db(engine).execute("SELECT * FROM images WHERE forgotten = 1 ORDER BY id DESC").fetchall()
+    out = []
+    for r in rows:
+        kept = json.loads(r["meta"] or "{}").get("removed") or {}
+        out.append({"id": int(r["id"]), "origin": r["origin"], "caption": r["caption"], "realm": r["realm"], "removed_at": kept.get("at"),
+                    "description": kept.get("text", ""), "parts": len(kept.get("parts") or {}), "original": str(engine.path / r["file"]),
+                    "file": str(engine.path / (r["view"] or r["file"])), "files_present": (engine.path / r["file"]).exists()})
+    return sorted(out, key=lambda i: -(i["removed_at"] or 0))
+
+
+def restore_image(engine, cfg: Dict[str, Any], image_id: int) -> Optional[dict]:
+    """Put back an image that was set aside, with what she had written about it and its parts, what was said
+    when it was shown, and every correction.  None if there is no such image set aside or its file is gone."""
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"] != 1 or not (engine.path / row["file"]).exists():
+        return None
+    meta = json.loads(row["meta"] or "{}")
+    kept = meta.pop("removed", None)
+    if kept is None:
+        # Set aside by a version that kept nothing but the file: she is shown it again and starts over.
+        return add_image(engine, (engine.path / row["file"]).read_bytes(), cfg, origin=row["origin"], realm=row["realm"],
+                         source=row["source"], session=row["session"], count=False)
+    with engine._lock:
+        db = _db(engine)
+        labels = db.execute("SELECT label, section FROM image_labels WHERE image_id = ?", (row["id"],)).fetchall()
+        parts = db.execute("SELECT idx, place FROM image_sections WHERE image_id = ? ORDER BY idx", (row["id"],)).fetchall()
+    named = lambda section, n: [l["label"] for l in labels if l["section"] == section][:n]
+    whole_id = None
+    if kept.get("text"):
+        whole_id = engine.remember(kept["text"], kind=IMAGE, realm=row["realm"], session=row["session"], chain=False, whole=True,
+                                   keys=named(-1, 8), trust=0.6, meta={"image_id": int(row["id"])}, created_at=kept.get("created_at"))[0]
+    part_ids = {}
+    for part in parts:
+        was = (kept.get("parts") or {}).get(str(part["idx"]))
+        if was and whole_id:
+            part_ids[part["idx"]] = engine.remember(
+                was["text"], kind=IMAGE_PART, realm=row["realm"], session=row["session"], chain=False, whole=True,
+                keys=named(part["idx"], 4), links=[whole_id], salience=0.7, trust=0.6, created_at=was.get("created_at"),
+                meta={"image_id": int(row["id"]), "section": int(part["idx"]), "place": part["place"]})[0]
+    with engine._lock:
+        db = _db(engine)
+        db.execute("UPDATE images SET forgotten = 0, memory_id = ?, meta = ? WHERE id = ?", (whole_id, json.dumps(meta), row["id"]))
+        for idx, mid in part_ids.items():
+            db.execute("UPDATE image_sections SET memory_id = ? WHERE image_id = ? AND idx = ?", (mid, row["id"], idx))
+    return get_image(engine, row["id"])
+
+
+def delete_image(engine, image_id: int) -> bool:
+    """Remove for good an image that was already set aside: its files, what was written about it, what was said
+    when it was shown.  Refused for an image that has not been set aside first.  This cannot be undone."""
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"] != 1:
+        return False
     with engine._lock:
         db = _db(engine)
         db.execute("DELETE FROM image_labels WHERE image_id = ?", (row["id"],))
         db.execute("DELETE FROM image_sections WHERE image_id = ?", (row["id"],))
-        db.execute("UPDATE images SET forgotten = 1, memory_id = NULL, caption = '', origin = '', meta = '{}' WHERE id = ?", (row["id"],))
-    if delete_files:
-        for rel in {row["file"], row["view"]}:
-            try:
-                (engine.path / rel).unlink()
-            except OSError:
-                pass
+        db.execute("UPDATE images SET forgotten = 2, memory_id = NULL, caption = '', origin = '', meta = '{}' WHERE id = ?", (row["id"],))
+    for rel in {row["file"], row["view"]}:
+        try:
+            (engine.path / rel).unlink()
+        except OSError:
+            pass
     return True
 
 
