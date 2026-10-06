@@ -243,14 +243,20 @@ From the command line:
     hermes holonomic library                               what there is
     hermes holonomic library create NAME "FOLDER" [--about "what it is for"]
     hermes holonomic library update NAME                   read the folder again: new and changed files in, missing ones out
+    hermes holonomic library rebuild NAME                  read every file again (after an update changes how files are cut)
     hermes holonomic library show NAME                     its files, and how many pieces each became
     hermes holonomic library search NAME "words"           what she would be given
     hermes holonomic library delete NAME --yes             remove the library (the folder of material is not touched)
 
 What is read: text of any kind (Markdown, plain text, source code, HTML with its markup removed), `.docx`,
 and `.pdf` if `pypdf` is installed in Hermes' Python (a scanned PDF is pictures and has no text to read).
-Files are cut into pieces at headings and paragraphs, and the pieces of one section are bound together, so
-finding one brings its neighbour. Exact words count for more here than in memory (`library_lexical_weight`),
+Writing is cut into pieces at its headings and paragraphs; source code at its routines (assembly labels,
+Pascal and BASIC procedures, C and Python functions), with the comment above a routine kept with it, so a
+piece is "BOOT.ASM > ReadSectors" and not merely somewhere in BOOT.ASM. An old copy of a source file under
+another name (BOOT.BAK, DIR.OLD) is recognised by what is in it. The pieces of one section are bound together,
+so finding one brings its neighbour. A passage that is in several files (a backup, an earlier version of the
+project) is given once, with a note of where else it is. A file that is a program and not text is left out,
+judged by its contents. Exact words count for more here than in memory (`library_lexical_weight`),
 because a question about `INT 13h` wants the passage that says `INT 13h`. A build can be stopped and run
 again; only what is new or changed is read. `hermes holonomic context` shows what the libraries gave her.
 

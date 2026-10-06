@@ -329,10 +329,73 @@ def _pack(text: str, size: int) -> List[str]:
     return pieces
 
 
+# Where a routine begins, by kind of source.  The name it captures becomes the piece's heading, so a piece of
+# BOOT.ASM is "BOOT.ASM > ReadSectors" and not merely somewhere in BOOT.ASM.
+_ASM = {".asm", ".inc", ".s", ".nasm", ".mac", ".a86", ".a"}
+_ROUTINE = {
+    "asm": re.compile(r"^(?!\.)([A-Za-z_@$?][\w@$?.]*):(?!:)"),                       # a label at the margin; .local ones are inside a routine
+    "pascal": re.compile(r"^\s*(?:procedure|function|constructor|destructor)\s+([\w.]+)", re.IGNORECASE),
+    "basic": re.compile(r"^\s*(?:DECLARE\s+)?(?:STATIC\s+)?(?:SUB|FUNCTION)\s+([\w.$%&!#]+)", re.IGNORECASE),
+    "python": re.compile(r"^(?:async\s+)?(?:def|class)\s+(\w+)"),
+    "c": re.compile(r"^[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*\{?\s*$"),
+}
+_SOURCE = {**{e: "asm" for e in _ASM}, ".pas": "pascal", ".pp": "pascal", ".dpr": "pascal", ".bas": "basic", ".bi": "basic",
+           ".frm": "basic", ".py": "python", ".c": "c", ".h": "c", ".cpp": "c", ".hpp": "c", ".cc": "c"}
+_COMMENT = {"asm": ";", "pascal": "{", "basic": "'", "python": "#", "c": "/"}
+_BANNER = re.compile(r"^\s*[;'#/*{(]+\s*[-=*_~]{2,}\s*(?:PROCEDURE|PROC|FUNCTION|ROUTINE|CMD|SUB|MACRO)?\s*([A-Za-z_][\w ]{1,40}?)\s*[-=*_~]{2,}", re.IGNORECASE)
+
+
+def _routines(text: str, kind: str, least: int = 350) -> List[Tuple[str, str]]:
+    """(routine name, its lines) for a source file.  A routine starts at its name; comments standing just above the
+    name go with it.  A run of short routines or data labels is kept together until it is `least` characters long,
+    so that a table of one-line labels does not become a hundred pieces."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start, mark = _ROUTINE[kind], _COMMENT[kind]
+    out: List[Tuple[str, List[str]]] = [("", [])]
+    for i, line in enumerate(lines):
+        m = start.match(line) if not (kind == "c" and line.lstrip().startswith(("if", "for", "while", "switch", "else", "return"))) else None
+        if m and sum(len(x) + 1 for x in out[-1][1]) >= least:
+            body = out[-1][1]
+            carried: List[str] = []
+            while body and (not body[-1].strip() or body[-1].lstrip().startswith(mark)):      # the comments above it are its own
+                carried.insert(0, body.pop())
+            if not "".join(body).strip():                 # nothing but those comments came before: no cut after all
+                body.extend(carried)
+                body.append(line)
+                if not out[-1][0]:
+                    out[-1] = (m.group(1), body)
+                continue
+            name = m.group(1)
+            banner = next((b.group(1).strip() for b in (_BANNER.match(c) for c in carried) if b), "")
+            out.append((banner if banner and kind == "asm" and len(banner) > len(name) and name.lower() in banner.lower() else name, carried + [line]))
+        else:
+            if m and not out[-1][0]:
+                out[-1] = (m.group(1), out[-1][1])
+            out[-1][1].append(line)
+    return [(name, "\n".join(body)) for name, body in out if "".join(body).strip()]
+
+
+_MNEMONIC = re.compile(r"^\s*(?:[A-Za-z_.@$?][\w@$?.]*:)?\s*(?:mov|call|jmp|jn?[zecbla]e?|int|push|pop|ret|xor|cmp|add|sub|lodsb|stosb|"
+                       r"cli|sti|db|dw|dd|equ|org|inc|dec|loop|test|shl|shr)\b", re.IGNORECASE)
+
+
+def _reads_as_assembly(text: str) -> bool:
+    lines = [ln for ln in text.split("\n")[:400] if ln.strip() and not ln.lstrip().startswith(";")]
+    return len(lines) >= 5 and sum(1 for ln in lines if _MNEMONIC.match(ln)) >= 0.5 * len(lines)
+
+
 def pieces_of(text: str, name: str, size: int = 1100) -> List[Tuple[str, str]]:
-    """(heading path, piece) for a file's text, in order."""
-    headed = Path(name).suffix.lower() in _HEADED | _MARKUP | {".pdf", ".docx"}
+    """(heading path, piece) for a file's text, in order.  Writing is cut at its headings, source at its routines."""
+    ext = Path(name).suffix.lower()
     out = []
+    kind = _SOURCE.get(ext)
+    if kind is None and ext not in _HEADED | _MARKUP | {".pdf", ".docx"} and _reads_as_assembly(text):
+        kind = "asm"                                  # BOOT.BAK, DIR.OLD: an earlier copy of a source file, whatever it is called
+    if kind:
+        for routine, body in _routines(text, kind):
+            out += [(routine, piece) for piece in _pack(body, max(200, size))]
+        return out
+    headed = ext in _HEADED | _MARKUP | {".pdf", ".docx"}
     for heading, body in _sections(text, headed):
         out += [(heading, piece) for piece in _pack(body, max(200, size))]
     return out
@@ -386,9 +449,11 @@ def create(root: Path, name: str, folder: str, about: str = "") -> dict:
 
 
 def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Optional[Callable[[dict], None]] = None,
-          stop: Optional[threading.Event] = None) -> dict:
+          stop: Optional[threading.Event] = None, fresh: bool = False) -> dict:
     """Bring a library up to date with its folder: new and changed files are read in, files that are gone are
-    taken out, files that have not changed are left alone.  Safe to stop and run again."""
+    taken out, files that have not changed are left alone.  Safe to stop and run again.
+
+    `fresh` reads every file again whether it has changed or not: for when the way files are cut has changed."""
     name, data = _need(root, name)
     folder = Path(data["folder"])
     if not folder.is_dir():
@@ -410,6 +475,10 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
                 pass
         files.pop(rel, None)
 
+    if fresh:
+        for rel in list(files):
+            drop(rel)
+        _save_info(root, name, data)
     for rel in [r for r in files if r not in here]:
         drop(rel)
         report["removed"] += 1
@@ -670,7 +739,7 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
         if info(root, name) is None:
             continue
         lib = store(root, name, embedder, cfg)
-        for hit in lib.recall(query[:2000], k=k * 2, min_score=floor, lexical=float(cfg.get("library_lexical_weight", 0.35)),
+        for hit in lib.recall(query[:2000], k=k * 4, min_score=floor, lexical=float(cfg.get("library_lexical_weight", 0.35)),
                               only_kinds=(PIECE,)):
             meta = hit.meta or {}
             text = hit.text.split("\n", 1)[1] if "\n" in hit.text else hit.text       # without the heading that leads it
@@ -681,7 +750,24 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
     if found:
         best = found[0]["score"]
         found = [f for f in found if f["score"] >= best - float(cfg.get("library_score_band", 0.2))]
-    return found[:k]
+    # The same passage kept in several files (a backup, an earlier version of the project) is given once, with a
+    # note of where else it is.  Four copies of one boot sector are one answer, and would leave no room for a second.
+    kept: List[dict] = []
+    for f in found:
+        words = set(re.findall(r"[a-z0-9_]+", f["text"].lower()))
+        twin = next((k for k in kept if len(words & k["_words"]) >= 0.8 * max(1, len(words | k["_words"]))), None)
+        if twin is not None:
+            rank = lambda x: (bool(x["section"]), Path(x["file"]).suffix.lower() in _SOURCE, -x["file"].count("/"))
+            if rank(f) > rank(twin):                      # of two copies, show the one that names its routine, in the real source file
+                for key in ("file", "section", "source", "library", "id"):
+                    f[key], twin[key] = twin[key], f[key]
+            if f["source"] != twin["source"] and f["source"] not in twin["also_in"]:
+                twin["also_in"].append(f["source"])
+            continue
+        kept.append(dict(f, _words=words, also_in=[]))
+    for f in kept:
+        f.pop("_words")
+    return kept[:k]
 
 
 def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str, Any]) -> Tuple[str, List[str]]:
@@ -704,7 +790,8 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
             break
         if len(text) > room:
             text = text[:room].rsplit("\n", 1)[0].rstrip() + "\n[...]"
-        lines.append(f"[{f['library']}: {f['source']}]\n{text}\n")
+        also = f" (the same passage is also in: {', '.join(f['also_in'][:4])})" if f.get("also_in") else ""
+        lines.append(f"[{f['library']}: {f['source']}]{also}\n{text}\n")
     notes.append("pieces given: " + "; ".join(f"{f['library']}: {f['source']} ({f['score']})" for f in found[:len(lines)]))
     return (head + "This is reference material, not something you remember. Rely on it for exact details over your "
             "own recollection, and say which file a detail came from if asked.\n\n" + "\n".join(lines).rstrip()), notes

@@ -1139,7 +1139,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                 found = _library.search(root, which, query, engine.embedder, self._cfg,
                                         k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
                 out = {"searched": which, "count": len(found), "results": [
-                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"]} for f in found]}
+                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"],
+                     **({"same_passage_also_in": f["also_in"]} if f.get("also_in") else {})} for f in found]}
                 looked = [n for n in which if n not in now]
                 if looked:
                     out["note"] = (f"A single lookup: {', '.join(looked)} is not open in this conversation, and nothing more from it "

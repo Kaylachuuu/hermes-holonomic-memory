@@ -88,14 +88,14 @@ def _library_cmd(engine, cfg, args) -> None:
         if len(r["skipped"]) > 40:
             print(f"  ... and {len(r['skipped']) - 40} more left out")
 
-    def building(name: str) -> None:
+    def building(name: str, fresh: bool = False) -> None:
         started, last = time.time(), [0.0]
 
         def progress(r: dict) -> None:
             if time.time() - last[0] >= 2.0:
                 last[0] = time.time()
                 print(f"  {r['done']}/{r['total']} files, {r['pieces']} pieces, {time.time() - started:.0f} s", flush=True)
-        show_report(lib.build(root, name, engine.embedder, cfg, progress=progress))
+        show_report(lib.build(root, name, engine.embedder, cfg, progress=progress, fresh=fresh))
     try:
         if what == "list":
             have = lib.names(root)
@@ -119,6 +119,16 @@ def _library_cmd(engine, cfg, args) -> None:
                 print("Usage: hermes holonomic library update NAME")
                 return
             building(lib.clean_name(items[0]))
+        elif what == "rebuild":
+            if len(items) != 1:
+                print("Usage: hermes holonomic library rebuild NAME")
+                return
+            name = lib.clean_name(items[0])
+            if lib.info(root, name) is None:
+                print(f"There is no library called '{name}'.")
+                return
+            print(f"Reading every file of '{name}' again ...")
+            building(name, fresh=True)
         elif what == "show":
             if len(items) != 1:
                 print("Usage: hermes holonomic library show NAME")
@@ -145,7 +155,8 @@ def _library_cmd(engine, cfg, args) -> None:
             if not found:
                 print("Nothing matched.")
             for f in found:
-                print(f"[{f['score']:.2f}{' linked' if f['linked'] else ''}] {f['source']}\n    {_clip(f['text'], args.width)}")
+                print(f"[{f['score']:.2f}{' linked' if f['linked'] else ''}] {f['source']}"
+                      + (f"\n    also in: {', '.join(f['also_in'])}" if f.get("also_in") else "") + f"\n    {_clip(f['text'], args.width)}")
         elif what == "delete":
             if len(items) != 1:
                 print("Usage: hermes holonomic library delete NAME --yes")
@@ -1346,7 +1357,7 @@ def register_cli(subparser) -> None:
     fa.add_argument("--yes", action="store_true", help="With 'forget --all': actually do it")
     fa.add_argument("--width", type=int, default=110, help="Characters of text to show")
     lb = subs.add_parser("library", help="Reference libraries: material to work from, kept apart from memory")
-    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "show", "search", "delete"])
+    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "rebuild", "show", "search", "delete"])
     lb.add_argument("items", nargs="*", help="A library name; for 'create' the folder too; for 'search' the words")
     lb.add_argument("--about", help="With 'create': one line saying what the library is for")
     lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")

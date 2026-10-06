@@ -62,7 +62,7 @@ def test_a_file_is_cut_at_headings_and_paragraphs():
     assert "```\nmov ax, 0x07C0\nmov ds, ax\n```" in code                       # a block of code is not cut in two
     # underlined headings, and a file with no headings at all
     assert [h for h, _ in lib.pieces_of("Title\n=====\n\nSome words here.\n\nPart\n----\n\nMore words.\n", "a.rst")] == ["Title", "Title > Part"]
-    assert lib.pieces_of("; code\nstart:\n    jmp $\n", "a.asm") == [("", "; code\nstart:\n    jmp $")]
+    assert lib.pieces_of("; code\nstart:\n    jmp $\n", "a.asm") == [("start", "; code\nstart:\n    jmp $")]
     long = lib.pieces_of("\n".join(f"line {i} of a very long listing" for i in range(200)), "a.asm", 400)
     assert len(long) > 5 and all(len(p) <= 400 for _, p in long) and long[0][1].startswith("line 0 ")
     assert lib.pieces_of("   \n\n", "a.txt") == []
@@ -385,5 +385,93 @@ def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
         report = lib.build(root, "my-os", HashEmbedder(), CFG)
         assert report["added"] == 2 and {s["file"]: s["why"] for s in report["skipped"]} == {"CHOICE.COM": "not a text file", "SHELL.EXE": "not a text file"}
         assert sorted(lib.info(root, "my-os")["files"]) == ["CONFIG.SYS", "boot.asm"]
+    finally:
+        lib.close_all(root)
+
+
+ASM = """;- VXOS boot sector
+[BITS 16]
+        Jmp   Start
+OEM_ID          db "VERSA   "
+
+Start:
+        Cli
+        Mov   AX, 0x07C0
+""" + "\n".join(f"        Mov   AX, {i}        ;step {i} of setting up the stack and segments" for i in range(12)) + """
+
+Load_FAT:
+        ;Save starting cluster of boot image
+        Mov   DX, WORD [DI + 0x001A]
+""" + "\n".join(f"        Add   CX, {i}        ;compute size of FAT, part {i}" for i in range(12)) + """
+.Loop:
+        Call  ReadSectors
+        Jmp   .Loop
+
+;----PROCEDURE DisplayMessage--------------------------------------------------
+;- Prints the ASCIZ string at DS:SI using the BIOS teletype service          -
+;------------------------------------------------------------------------------
+DisplayMessage:
+        Lodsb
+        Or    AL, AL
+        Jz    .Done
+        Mov   AH, 0x0E
+        Int   0x10
+.Done:
+        Ret
+""" + "\n".join(f"        Nop                  ;padding line {i} so the routine is long enough" for i in range(8)) + """
+
+;----PROCEDURE ReadSectors-----------------------------------------------------
+;- Reads CX sectors from disk starting at AX into memory location ES:BX      -
+ReadSectors:
+        Mov   DI, 0x0005          ;Five retries for error
+        Int   0x13
+        Ret
+msgA: db 1
+msgB: db 2
+msgC: db 3
+"""
+
+
+def test_source_is_cut_at_its_routines_and_named_for_them(tmp_path):
+    """A search of real assembly found the right file and could not say which routine: a piece was only
+    'somewhere in BOOT.ASM'."""
+    cut = lib.pieces_of(ASM, "BOOT.ASM", 1100)
+    names = [h for h, _ in cut]
+    assert names == ["Start", "Load_FAT", "DisplayMessage", "ReadSectors"]
+    by = dict(cut)
+    assert by["DisplayMessage"].startswith(";----PROCEDURE DisplayMessage") and "Prints the ASCIZ string" in by["DisplayMessage"]     # its comment goes with it
+    assert ".Loop:" in by["Load_FAT"] and "Call  ReadSectors" in by["Load_FAT"]                # a local label does not start a routine
+    assert "msgA: db 1" in by["ReadSectors"] and "msgC: db 3" in by["ReadSectors"]             # one-line labels do not each become a piece
+    assert "PROCEDURE ReadSectors" not in by["DisplayMessage"]
+    pas = "program x;\n" + "var a: integer;\n" * 30 + "procedure SetBoot(drive: byte);\nbegin\n" + "  writeln(1);\n" * 30 + "end;\n\nfunction GetBoot: byte;\nbegin\n" + "  GetBoot := 1;\n" * 30 + "end;\n"
+    assert [h for h, _ in lib.pieces_of(pas, "SETBOOTF.PAS")] == ["", "SetBoot", "GetBoot"]
+    c = "#include <stdio.h>\n" + "int x;\n" * 60 + "\nint main(int argc, char **argv)\n{\n" + "    if (x) {\n        x++;\n    }\n" * 12 + "}\n\nstatic void load_boot(void)\n{\n" + "    x--;\n" * 60 + "}\n"
+    assert [h for h, _ in lib.pieces_of(c, "BOOTMGR.C")] == ["", "main", "load_boot"]
+    assert lib.pieces_of("; just a comment\n", "X.INC") == [("", "; just a comment")]
+    # in a library: found by the routine's name, and cited by it
+    src = tmp_path / "os"; (src / "OLD").mkdir(parents=True)
+    (src / "BOOT.ASM").write_text(ASM)
+    (src / "OLD" / "BOOT.BAK").write_text(ASM.replace("Five retries", "5 retries"))
+    (src / "OLD" / "BOOT.ASM").write_text(ASM)
+    root = tmp_path / "store" / "libraries"
+    lib.create(root, "versa", str(src))
+    try:
+        lib.build(root, "versa", HashEmbedder(), CFG)
+        found = lib.search(root, ["versa"], "ReadSectors reads sectors from disk into memory", HashEmbedder(), CFG, floor=0.1, k=4)
+        assert found[0]["section"] == "ReadSectors" and found[0]["source"].endswith("BOOT.ASM > ReadSectors")
+        # the copy kept in another folder is the same passage: given once, with where else it is
+        assert len([f for f in found if f["section"] == "ReadSectors"]) == 1 and len(found[0]["also_in"]) >= 1
+        assert len({f["section"] for f in found}) == len(found)                                 # so there is room for other routines
+        lib.open_for(root, "s", ["versa"])
+        block, _ = lib.context_block(root, "s", "ReadSectors reads sectors from disk into memory", HashEmbedder(), dict(CFG, library_min_score=0.1))
+        assert "(the same passage is also in: " in block
+        # reading everything again, for when the way files are cut has changed
+        before = lib.summary(root, "versa")["pieces"]
+        again = lib.build(root, "versa", HashEmbedder(), CFG, fresh=True)
+        assert again["added"] == 3 and again["unchanged"] == 0 and lib.summary(root, "versa")["pieces"] == before
+        assert [h for h, _ in lib.pieces_of(ASM, "BOOT.BAK")] == ["Start", "Load_FAT", "DisplayMessage", "ReadSectors"]   # an old copy is still assembly
+        assert [h for h, _ in lib.pieces_of("Notes on the boot sector.\n\nIt loads the kernel.\n", "NOTES.BAK")] == [""]
+        assert not lib._reads_as_assembly("We call it a day and then test the loop again.\n" * 9)
+        assert lib.store(root, "versa", HashEmbedder(), CFG).stats()["memories"] == before
     finally:
         lib.close_all(root)
