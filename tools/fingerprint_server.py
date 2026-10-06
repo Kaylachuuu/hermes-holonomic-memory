@@ -100,6 +100,10 @@ def load_face_finder(folder: str, *, min_score: float = 0.8, max_side: int = 128
     """A function from pictures to the faces in each: where it is, how sure, and a unit-length fingerprint."""
     import cv2
     import numpy as np
+    try:                                    # OpenCV 5 warns on every face it looks for; the warning means nothing here
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except Exception:
+        pass
     detector_path, recogniser_path = [_fetch(name, url, folder) for name, url in FACE_MODELS.items()]
     recogniser = cv2.FaceRecognizerSF.create(recogniser_path, "")
     lock = threading.Lock()
