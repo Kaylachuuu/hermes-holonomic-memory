@@ -1295,6 +1295,8 @@ def _reflect(engine, cfg, args) -> None:
                 print(f"  cut off   {text}   (stopped mid-sentence; not stored)")
             for text in report.get("dropped_assistant_only") or []:
                 print(f"  dropped   {text}   (rested only on the assistant's own words)")
+            for text in report.get("dropped_library") or []:
+                print(f"  dropped   {text}   (a reference library is her tool, not part of your work)")
             for item in report.get("superseded") or []:
                 print(f"  REPLACES  [#{item['fact']}] {item['was']}\n        ->  {item['replacement']}   <- "
                       f"{', '.join('#' + str(s) for s in item['sources'])}")

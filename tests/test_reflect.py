@@ -688,3 +688,43 @@ def test_statements_that_say_the_same_thing_twice_are_kept_once(tmp_path):
     assert snug in found and theo in found and sushi not in found
     assert merge_facts(m, {}, ask=False)["merged"] == []                                            # the retired are not found again
     assert m.unsupersede(sushi) and m.get(sushi)["trust"] > 0 and "superseded_by" not in m.get(sushi)["meta"] and not m.unsupersede(theo)
+
+
+def test_a_reference_library_is_not_part_of_the_users_project(tmp_path):
+    """After a test of the library feature, reflection stored 'Kayla's OS project includes a library called
+    marigold', and her profile said her operating system included the marigold and versa-os libraries."""
+    from holonomic.reflect import reflect_once, about_a_library, build_prompt, _PROFILES
+    from holonomic import library as lib
+    have = ["marigold", "versa-os"]
+    assert about_a_library("Kayla's OS project includes a library called marigold.", have)
+    assert about_a_library("Kayla's operating system includes the marigold and versa-os libraries.", have)
+    assert about_a_library("Kayla asked for the versa-os library to be opened.", have)
+    assert about_a_library("Kayla uses a reference library for her OS work.", have)
+    assert not about_a_library("Kayla is working on Versa again.", have) and not about_a_library("Kayla has two cats.", have)
+    assert not about_a_library("Kayla is writing a graphics library in C.", have)                 # a library of her own making
+    assert not about_a_library("Kayla's OS project includes a library called marigold.", [])      # no libraries: nothing to confuse
+    assert "REFERENCE LIBRARIES." in build_prompt([], libraries=have) and "(there are these: marigold, versa-os)" in build_prompt([], libraries=have)
+    assert "do not list libraries" in _PROFILES
+    m, ids = seeded(tmp_path)
+    src = tmp_path / "material"; src.mkdir()
+    (src / "notes.md").write_text("# Marigold\n\nThe boot sector loads its second stage at 0x9B40.\n")
+    root = lib.root_of(m)
+    lib.create(root, "marigold", str(src)); lib.build(root, "marigold", HashEmbedder(), {})
+    said = m.remember("Use the marigold library for this conversation, please. I am picking my operating system back up.", kind="said_user", session="s1")[0]
+    seen = {}
+
+    def llm(system, user, step):
+        seen[step] = user
+        return answer(ids, user_facts=[], self_notes=[], project_facts=[
+            {"text": "Kayla's OS project includes a library called marigold.", "sources": [said]},
+            {"text": "Kayla is working on her operating system again.", "sources": [said]}],
+            projects_profile="Kayla has picked her operating system back up after a long time away.")
+    try:
+        report = reflect_once(m, {}, llm=llm)
+        assert "(there are these: marigold)" in seen["propose"] and "like a shelf of manuals" in seen["propose"]
+        assert report["dropped_library"] == ["Kayla's OS project includes a library called marigold."]
+        texts = {r["text"] for r in m.recent(20)}
+        assert "Kayla is working on her operating system again." in texts and not [t for t in texts if "includes a library" in t]
+        assert "includes a library" not in seen["check"] and "includes a library" not in seen["profiles"]
+    finally:
+        lib.close_all(root)

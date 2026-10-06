@@ -237,6 +237,9 @@ In conversation:
   library it came from, and nothing more from that library reaches the conversation.
 - A new conversation is told which libraries the last one used, so she can ask whether to pick the work up
   again.
+- Reflection knows what a library is: a tool of hers, not part of what you are making. What a library's files
+  say is not stored again as a fact, and a statement that your project "includes" a library is dropped. From an
+  evening spent in a library, what is kept is that you are working on the thing again, and what you decided.
 
 From the command line:
 

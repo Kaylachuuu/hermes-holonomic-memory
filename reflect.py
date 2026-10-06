@@ -338,7 +338,7 @@ person, not the conversation, and never call them "a user". Plain prose, at most
 cut off and lost.
 - projects_profile: what the user is working on, from the statements marked "fact about a project of the user's" \
 and the current one. One or two sentences for each project: what it is, what it is for, where it stands. Mention every project. Not how \
-it works inside: no mechanisms, no names of tools or parts. Plain prose, at most 100 words. If there is nothing to say, return an empty string.
+it works inside: no mechanisms, no names of tools or parts. A reference library is the assistant's tool, not part of a project: do not list libraries or what is in them. Plain prose, at most 100 words. If there is nothing to say, return an empty string.
 - self_profile: who the assistant has become beyond the FOUNDATION, first person: its own opinions, tastes, \
 interests, humour and habits, as they actually showed up. Leave out its name, its role and anything else the \
 FOUNDATION already says. Do not describe the assistant by what it understands about the user or how it supports \
@@ -501,11 +501,23 @@ def _foundation(text: str) -> str:
     return text.strip()[:FOUNDATION_MAX_CHARS] or "(none)"
 
 
+_LIBRARIES = """\
+REFERENCE LIBRARIES. The assistant can open "reference libraries": collections of files the user has given it to \
+look things up in{named}. A library is a tool of the assistant's, like a shelf of manuals. It is not part of \
+anything the user is making: never write that a project "includes", "has" or "uses" a library. What the files in a \
+library say (how a routine works, what a table lists, an address, a signature) is already kept in the library; it \
+is not a fact to store, whoever read it out. From a conversation spent looking things up in a library, at most \
+this is worth keeping: that the user is working on that thing again, and anything they decided or plan to do \
+about it. That the user asked for a library to be opened is about the conversation, not about them."""
+
+
 def build_prompt(memories: List[dict], profiles: Optional[Dict[str, str]] = None, foundation: str = "",
-                 existing_facts: Optional[List[dict]] = None, depth: int = 3) -> str:
+                 existing_facts: Optional[List[dict]] = None, depth: int = 3, libraries: Optional[List[str]] = None) -> str:
     """The propose step.  (`profiles` is unused here; profiles are written in their own step.)"""
     facts = "\n".join(f"[{f['id']}] {' '.join(f['text'].split())}" for f in existing_facts or []) or "(none)"
-    tail = (f"EXISTING FACTS ABOUT THE USER (already stored; related to these memories):\n{facts}\n\n"
+    named = f" (there are these: {', '.join(libraries)})" if libraries else ""
+    tail = (_LIBRARIES.format(named=named) + "\n\n"
+            f"EXISTING FACTS ABOUT THE USER (already stored; related to these memories):\n{facts}\n\n"
             "MEMORIES:\n" + "\n".join(_line(m) for m in memories))
     if depth <= 1:
         return _PROPOSE_BASIC.format(rules=_RULES, facts=_FACTS_RULE) + "\n\n" + tail
@@ -531,6 +543,22 @@ def unsupported_names(statement: str, cited_text: str, known_text: str = "") -> 
         if parts and not all(p in have for p in parts) and word not in out:
             out.append(word)
     return out
+
+
+def about_a_library(text: str, libraries: Optional[List[str]] = None) -> bool:
+    """Whether a statement treats a reference library as part of the user's work, or is about one being opened: it
+    says 'library' together with a word of belonging or of opening.  Only when there are libraries at all: a
+    programmer may well be writing a library of their own."""
+    if not libraries:
+        return False
+    plain = " ".join(text.lower().split())
+    if not re.search(r"\blibrar(?:y|ies)\b", plain):
+        return False
+    named = any(re.search(r"(?<![a-z0-9])" + re.escape(n.lower()) + r"(?![a-z0-9])", plain) for n in libraries)
+    if not named and not re.search(r"\breference librar", plain):
+        return False
+    return bool(re.search(r"\b(includ\w*|contain\w*|consist\w*|compris\w*|has|have|part of|made up of|open(?:ed|s|ing)?|"
+                          r"us(?:e|es|ed|ing)|asked|request\w*|access\w*|called|named)\b", plain))
 
 
 def build_check_prompt(items: List[dict], by_id: Dict[int, dict], known_text: str = "") -> str:
@@ -671,11 +699,16 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     current = {who: engine.profile(who) for who in SUBJECTS}
     user_said = {m["id"] for m in batch if m["kind"] == "said_user"}
     existing = engine.related_of_kind(sorted(user_said), FACT) + engine.related_of_kind(sorted(user_said), PROJECT_FACT)
+    try:
+        from . import library as _library
+        libraries = _library.names(_library.root_of(engine))
+    except Exception:
+        libraries = []
     kind_of = {f["id"]: f.get("kind", FACT) for f in existing}
 
     # ---- step 1: propose
     try:
-        data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth),
+        data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth, libraries),
                            _PROPOSE_BASIC_SCHEMA if depth <= 1 else _PROPOSE_SCHEMA, budget))
     except ReflectionError as exc:
         data = salvage(getattr(exc, "partial", ""))
@@ -701,6 +734,11 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     facts = _clean_items(data.get("user_facts"), valid, 10, report["cut_off"])
     about_work = _clean_items(data.get("project_facts"), valid, 10, report["cut_off"])
     report["dropped_assistant_only"] = [f["text"] for f in facts + about_work if not set(f["sources"]) & not_assistant]
+    # A reference library is her tool, not a part of what the user is making.  Asked nicely, the model still wrote
+    # "Kayla's OS project includes a library called marigold"; a statement like that is dropped here.
+    report["dropped_library"] = [f["text"] for f in facts + about_work if about_a_library(f["text"], libraries)]
+    facts = [f for f in facts if f["text"] not in report["dropped_library"]]
+    about_work = [f for f in about_work if f["text"] not in report["dropped_library"]]
     # ...and from then on it cites only those lines.  The checker therefore judges it against what
     # the user said, not against the assistant's paraphrase of it ("expanding its functionality"
     # for "three choices where the original had two").
