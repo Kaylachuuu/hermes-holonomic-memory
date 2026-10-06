@@ -87,6 +87,10 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_count": 3,           # pictures per dream
     # Each picture is drawn this many times and she keeps the one she thinks shows the moment best (needs a vision model).
     "dream_image_candidates": 3,
+    # A picture drawn from an image stays close to it.  If the best attempt scores below this, the picture is drawn
+    # again holding less tightly to the image, and she keeps the new best only if it scores higher.  0 = never.
+    "dream_image_redraw_below": 9,
+    "dream_image_redraw_strength": 0.85,
     "dream_image_choose_think": False,        # let her reason before choosing (slower; falls back to choosing without)
     "dream_image_choose_think_tokens": 3000,  # allowance for that reasoning and the answer together
     # For one graphics card shared with the language model: unload the language models while pictures are drawn, then
@@ -536,46 +540,108 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
         sized = False
     # Everything is drawn first and chosen from afterwards.  On one graphics card the language model has to make
     # room for the image generator and come back before she can look at what was drawn.
-    away = _make_room(cfg, sc, report, label) if sc["dream_image_swap"] else []
     drawn: List[dict] = []
-    try:
-        for s in scenes:
-            try:
-                # A picture drawn from a tall image is tall: cutting the middle out of a portrait to fill a wide
-                # frame took the top off the head of the first person drawn this way.
-                turned = bool(s["from"]) and sized and _images.is_portrait(engine, s["from"][0]) != (size[1] > size[0])
-                shape = (size[1], size[0]) if turned else size
-                start = _images.blend(engine, s["from"], shape) if s["from"] else None
-                # The scene says what the dream did; what she remembers of the image says what the thing looks like.
-                # Without it a long-haired cat came out short-haired, because the scene only said "a cat".
-                recalled = ""
-                if start and sc["dream_image_describe_source"]:
-                    recalled = " ".join(" ".join(usable[i].split("Writing in the image:")[0].split())[:400] for i in s["from"] if i in usable)
-                if recalled:
-                    words = s["scene"] + " As remembered: " + recalled.rstrip(". ") + (". " + style if style else "")
-                else:
-                    words = s["scene"] + (", " + style if style else "")
-                began = time.time()
-                tries = [painter(words, start, size=shape) if sized else painter(words, start) for _ in range(attempts)]
-                report["calls"].append({"step": f"draw {attempts} attempt(s)", "seconds": time.time() - began, "drawing": True})
-            except Exception as exc:             # the server is off, or sent back something that is not a picture
-                report["errors"].append(f"dream pictures{label}: {exc}")
-                break
-            drawn.append({"scene": s, "tries": tries, "recalled": recalled, "from": s["from"] if start else []})
-    finally:
-        if sc["dream_image_swap"]:
-            _come_back(sc, away, report, label)
+
+    def draw(jobs: List[tuple], what: str) -> None:
+        """jobs: (entry, a function that draws one attempt for it).  Adds the attempts to entry['new']."""
+        away = _make_room(cfg, sc, report, label) if sc["dream_image_swap"] else []
+        try:
+            for d, one_attempt in jobs:
+                try:
+                    began = time.time()
+                    d["new"] = [one_attempt() for _ in range(attempts)]
+                    report["calls"].append({"step": what.format(n=attempts), "seconds": time.time() - began, "drawing": True})
+                except Exception as exc:             # the server is off, or sent back something that is not a picture
+                    report["errors"].append(f"dream pictures{label}: {exc}")
+                    break
+        finally:
+            if sc["dream_image_swap"]:
+                _come_back(sc, away, report, label)
+
+    jobs = []
+    for s in scenes:
+        try:
+            # A picture drawn from a tall image is tall: cutting the middle out of a portrait to fill a wide
+            # frame took the top off the head of the first person drawn this way.
+            turned = bool(s["from"]) and sized and _images.is_portrait(engine, s["from"][0]) != (size[1] > size[0])
+            shape = (size[1], size[0]) if turned else size
+            start = _images.blend(engine, s["from"], shape) if s["from"] else None
+        except Exception as exc:
+            report["errors"].append(f"dream pictures{label}: {exc}")
+            continue
+        # The scene says what the dream did; what she remembers of the image says what the thing looks like.
+        # Without it a long-haired cat came out short-haired, because the scene only said "a cat".
+        recalled = ""
+        if start and sc["dream_image_describe_source"]:
+            recalled = " ".join(" ".join(usable[i].split("Writing in the image:")[0].split())[:400] for i in s["from"] if i in usable)
+        if recalled:
+            words = s["scene"] + " As remembered: " + recalled.rstrip(". ") + (". " + style if style else "")
+        else:
+            words = s["scene"] + (", " + style if style else "")
+        d = {"scene": s, "recalled": recalled, "from": s["from"] if start else [], "words": words, "start": start, "shape": shape}
+        jobs.append((d, lambda w=words, st=start, sh=shape: painter(w, st, size=sh) if sized else painter(w, st)))
+    draw(jobs, "draw {n} attempt(s)")
+    for d, _ in jobs:
+        if d.get("new"):
+            d["tries"] = d.pop("new")
+            drawn.append(d)
+
+    def choose(d: dict, tries: List[bytes]) -> tuple:
+        notes: Dict[int, Dict[str, Any]] = {}
+        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes)
+        return best, why, (notes.get(best) or {}).get("score")
+
+    for d in drawn:
+        d["best"], d["why"], d["score"] = choose(d, d["tries"])
+
+    # A picture drawn from an image she has seen keeps close to that image: the cat on the couch came out as the
+    # cat on the couch, three times, when the dream had put the couch under water.  She noticed; nothing was done
+    # about it.  Now a best attempt she scores low is drawn again holding less tightly to the image.
+    below, looser = int(sc["dream_image_redraw_below"] or 0), min(float(sc["dream_image_redraw_strength"] or 0), 1.0)
+    loose = _looser(painter, paint, sc, looser) if below > 0 and looser > float(sc["dream_image_strength"] or 0) + 0.01 else None
+    again = [d for d in drawn if loose and d["start"] and d["score"] is not None and d["score"] < below]
+    if again:
+        draw([(d, lambda d=d: loose(d["words"], d["start"], size=d["shape"]) if sized else loose(d["words"], d["start"])) for d in again],
+             "draw {n} attempt(s) again, holding less to the image")
+        for d in again:
+            more = d.pop("new", None)
+            if not more:
+                continue
+            best, why, score = choose(d, more)
+            d["redrawn"] = {"before": d["score"], "after": score, "kept": score is not None and score > d["score"]}
+            if d["redrawn"]["kept"]:
+                d.update(tries=more, best=best, why=why, score=score)
     made = []
     for d in drawn:
-        best, why = _images.pick_best(cfg, d["scene"]["scene"], d["tries"], remembered=d["recalled"], report=report)
         try:
-            img = _images.add_dream_image(engine, d["tries"][best], cfg, dream_id=one["id"], scene=d["scene"]["scene"], sources=d["from"])
+            img = _images.add_dream_image(engine, d["tries"][d["best"]], cfg, dream_id=one["id"], scene=d["scene"]["scene"], sources=d["from"])
         except Exception as exc:
             report["errors"].append(f"dream pictures{label}: {exc}")
             continue
         made.append(dict(d["scene"], id=img["id"], file=img["file"], **{"from": d["from"]},
-                         **({"chosen": best + 1, "of": len(d["tries"]), "why": why} if len(d["tries"]) > 1 else {})))
+                         **({"chosen": d["best"] + 1, "of": len(d["tries"]), "why": d["why"]} if len(d["tries"]) > 1 else {}),
+                         **({"score": d["score"]} if d["score"] is not None else {}),
+                         **({"redrawn": d["redrawn"]} if d.get("redrawn") else {})))
     return made
+
+
+def _looser(painter: Callable[..., bytes], given: Optional[Callable[..., bytes]], sc: Dict[str, Any],
+            strength: float) -> Optional[Callable[..., bytes]]:
+    """The same painter holding less tightly to the image it starts from, or None if that cannot be asked of it."""
+    from . import paint as _paint
+    if given is None:
+        if str(sc.get("dream_image_api") or "").lower() == "openai":        # that interface has no such setting
+            return None
+        try:
+            return _paint.make_painter(dict(sc, dream_image_strength=strength))
+        except _paint.PaintError:
+            return None
+    try:
+        if "strength" not in inspect.signature(painter).parameters:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return lambda *a, **k: painter(*a, strength=strength, **k)
 
 
 def _hosts(cfg: Dict[str, Any]) -> List[str]:

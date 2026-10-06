@@ -287,6 +287,8 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_candidates"] = max(1, min(args.attempts, 8))
     if args.swap:
         values["dream_image_swap"] = args.swap == "on"
+    if args.redraw_below is not None:
+        values["dream_image_redraw_below"] = max(0, min(args.redraw_below, 11))
     if args.think:
         values["dream_image_choose_think"] = args.think == "on"
     if args.encoder:
@@ -335,6 +337,9 @@ def _dream_images(cfg, args) -> None:
         print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}, "
               f"each drawn {sc['dream_image_candidates']} time(s)" + (" and she keeps the best" if int(sc["dream_image_candidates"]) > 1 else "")
               + (", reasoning before she chooses (--think off to stop)" if sc["dream_image_choose_think"] and int(sc["dream_image_candidates"]) > 1 else ""))
+        if mode == "from_images" and int(sc["dream_image_redraw_below"] or 0) > 0 and int(sc["dream_image_candidates"]) >= 1:
+            print(f"  a picture drawn from an image is drawn again, holding less to it, if her best attempt scores below "
+                  f"{sc['dream_image_redraw_below']} of 10 (--redraw-below 0 to stop)")
         if sc["dream_image_swap"]:
             print("  one graphics card: the language models are unloaded while pictures are drawn and reloaded afterwards")
     if mode == "from_images":
@@ -551,6 +556,13 @@ def _images_cmd(engine, cfg, args) -> None:
               + (" (files kept on disk)." if args.keep_files else " and deleted the files. This cannot be undone."))
 
 
+def _redrawn(p) -> str:
+    r = p["redrawn"]
+    after = "she could not judge the new attempts" if r["after"] is None else f"the new best scored {r['after']}"
+    return (f"\n            her best scored {r['before']} of 10, so it was drawn again holding less to the image: {after}, "
+            + ("and she kept that one" if r["kept"] else "so she kept the earlier one"))
+
+
 def _print_calls(report) -> None:
     for c in report["calls"]:
         if c.get("drawing"):
@@ -614,7 +626,9 @@ def _sleep(engine, cfg, args) -> None:
             print(f"  IMAGES    drew on what she saw in image {', '.join('#' + str(i) for i in seen)}")
         for p in d.get("pictures") or []:
             print(f"  PICTURE   {p['scene']}" + (f"   <- from image {', '.join('#' + str(i) for i in p['from'])}" if p.get("from") else "")
-                  + (f"\n            she chose attempt {p['chosen']} of {p['of']}" + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
+                  + (_redrawn(p) if p.get("redrawn") else "")
+                  + (f"\n            she chose attempt {p['chosen']} of {p['of']}" + (" drawn again" if (p.get("redrawn") or {}).get("kept") else "")
+                     + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
                   + (f"\n            {p['file']}" if p.get("file") else ""))
     for err in report["errors"]:
         print(f"  ERROR     {err}")
@@ -740,6 +754,8 @@ def register_cli(subparser) -> None:
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     drm.add_argument("--attempts", type=int, help="With 'images': how many times each picture is drawn; she keeps the one she thinks best")
+    drm.add_argument("--redraw-below", type=int, metavar="SCORE", help="With 'images': a picture drawn from an image is drawn again, holding "
+                     "less to the image, when her best attempt scores below this out of 10 (0 = never)")
     drm.add_argument("--think", choices=["on", "off"], help="With 'images': let her reason before choosing between attempts")
     drm.add_argument("--swap", choices=["on", "off"], help="With 'images': for one graphics card: unload the language models while "
                                                            "pictures are drawn and reload them when the dream is over")

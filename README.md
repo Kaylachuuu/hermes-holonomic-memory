@@ -341,7 +341,17 @@ Each picture is drawn several times. The vision model looks at each attempt on i
 it shows, what looks wrong and a score; then it reads its notes side by side and chooses which one is
 kept. The others are discarded. (Shown all the attempts in one message, the model this was tuned with
 reported seeing one picture, or two that were the same, and kept the first. One picture per look
-works with any vision model.) `sleep now` prints her notes on each attempt and how long the drawing took. With one graphics card
+works with any vision model.) `sleep now` prints her notes on each attempt and how long the drawing took.
+
+A picture drawn from an image she has seen stays close to that image. If her best attempt at such a
+picture scores below `dream_image_redraw_below`, it is drawn again holding less tightly to the image
+(`dream_image_redraw_strength`), and she keeps the new best only if she scores it higher.
+
+**Picture size and the graphics card.** Past a certain size a picture no longer fits on the card
+beside the drawing model, and drawing becomes several times slower with no error and nothing in the
+image server's log but the step time. With Z-Image-Turbo on a 16 GB card, 1024x768 drew at about 2
+seconds a step and 1280x960 at about 9. If drawing is slow, try the next size down before anything
+else: `hermes holonomic dreams images --size 1024x768 --test "a cat asleep on a couch"`. With one graphics card
 shared between the language model and the image generator, `--swap on` unloads the language models
 (not the embedding model) while pictures are drawn, asks the image server to free the card when it
 is done, and loads them again exactly as they were, so the agent is ready to talk when the dream
@@ -361,6 +371,8 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_api`, `dream_image_host`, `dream_image_model` | none | The image generator |
 | `dream_image_count` | `3` | Pictures per dream |
 | `dream_image_candidates` | `3` | Each picture is drawn this many times; she looks at them and keeps one |
+| `dream_image_redraw_below` | `9` | A picture drawn from an image is drawn again when her best attempt scores below this out of 10; `0` = never |
+| `dream_image_redraw_strength` | `0.85` | How freely the second drawing departs from the image |
 | `dream_image_choose_think` | `false` | Let her reason before comparing her notes on the attempts; if the reasoning runs away she is asked again without it |
 | `dream_image_swap` | `false` | One graphics card: unload the language models while pictures are drawn, reload them after |
 | `dream_image_width`, `dream_image_height` | `768`, `512` | Size of a dream picture |

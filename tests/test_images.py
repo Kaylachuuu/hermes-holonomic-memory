@@ -972,6 +972,62 @@ def test_one_graphics_card_is_shared_and_given_back(tmp_path):
     assert report["dreams"][0]["pictures"] and "could not make room" in report["errors"][0]            # no server to ask: the pictures are still drawn
 
 
+def test_a_low_scoring_picture_from_an_image_is_drawn_again_more_freely(tmp_path):
+    """The best attempt at a picture drawn from an image scores low: it is drawn again holding less to the image,
+    and the new best is kept only if she scores it higher.  A picture drawn from nothing is not drawn again."""
+    import random
+    from holonomic import images
+    from holonomic.sleep import sleep_once, sleep_config
+    assert sleep_config({})["dream_image_redraw_below"] == 9 and sleep_config({})["dream_image_redraw_strength"] == 0.85
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=2, dream_image_candidates=2, dream_image_style="", dream_image_strength=0.7)
+    scenes = [{"picture": "A black cat asleep on a couch at the bottom of a lake.", "images": [ids["cat"]]},
+              {"picture": "Car windows fogging over with basil leaves.", "images": []}]
+    keep = images._chooser
+
+    def run(scores, painter=None, **extra):
+        drawn, looked = [], []
+
+        def paint(prompt, start, size=None, strength=None):
+            drawn.append((bool(start), strength))
+            return picture(768, 512, colour=(len(drawn) * 20, 0, 0))
+
+        def chooser(ic, report):
+            def look_at(step, prompt, jpegs, schema, max_tokens, think=False):
+                if step != "choose":
+                    looked.append(step)
+                    return json.dumps({"shows": "A cat.", "faults": "", "score": scores[len(looked) - 1]})
+                return json.dumps({"best": 1, "why": "The first."})
+            return look_at
+        images._chooser = chooser
+        try:
+            store, _, when = dream_store(tmp_path / f"run{len(list(tmp_path.iterdir()))}")
+            report = sleep_once(store, dict(cfg, **extra), llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=when,
+                                paint=painter or paint)
+        finally:
+            images._chooser = keep
+        return report, drawn, looked
+
+    # cat: 6 and 7, redrawn: 9 and 8 -> the redrawn first attempt is kept.  basil: 5 and 5, from no image, left alone.
+    report, drawn, looked = run([6, 7, 5, 5, 9, 8])
+    cat, basil = report["dreams"][0]["pictures"]
+    assert drawn == [(True, None)] * 2 + [(False, None)] * 2 + [(True, 0.85)] * 2 and len(looked) == 6
+    assert cat["redrawn"] == {"before": 6, "after": 9, "kept": True} and (cat["chosen"], cat["of"], cat["score"]) == (1, 2, 9)
+    assert open(cat["file"], "rb").read() == picture(768, 512, colour=(100, 0, 0))             # the fifth picture drawn
+    assert "redrawn" not in basil and basil["score"] == 5
+    assert [c["step"] for c in report["calls"] if c.get("drawing")] == ["draw 2 attempt(s)"] * 2 + ["draw 2 attempt(s) again, holding less to the image"]
+    # redrawn no better: the earlier one stays
+    report, drawn, looked = run([8, 7, 9, 9, 8, 6])
+    cat = report["dreams"][0]["pictures"][0]
+    assert cat["redrawn"] == {"before": 8, "after": 8, "kept": False} and cat["score"] == 8
+    assert open(cat["file"], "rb").read() == picture(768, 512, colour=(20, 0, 0))
+    # good enough, switched off, already as free as the redraw, or a painter that cannot be asked: drawn once
+    assert len(run([9, 9, 9, 9])[1]) == 4 and len(run([1, 1, 1, 1], dream_image_redraw_below=0)[1]) == 4
+    assert len(run([1, 1, 1, 1], dream_image_strength=0.85)[1]) == 4
+    plain = []
+    assert len(run([1, 1, 1, 1], painter=lambda prompt, start, size=None: plain.append(1) or picture(768, 512))[2]) == 4 and len(plain) == 4
+
+
 def test_she_can_reason_before_choosing(tmp_path):
     """Against a stand-in for Ollama: reasoning is asked for with its own allowance; if it runs away she is asked
     again without it; if that fails too the first attempt is kept."""

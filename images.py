@@ -474,7 +474,7 @@ def _chooser(ic: Dict[str, Any], report: Dict[str, Any]) -> Callable[..., str]:
 
 
 def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembered: str = "",
-              report: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
+              report: Optional[Dict[str, Any]] = None, noted: Optional[Dict[int, Dict[str, Any]]] = None) -> Tuple[int, str]:
     """Which of several attempts at a dream picture she keeps: (index, her reason).
 
     She looks at each attempt on its own and notes what it shows, what is wrong with it and a score; then she
@@ -484,9 +484,11 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
 
     If the comparison fails the best-scored attempt is kept; if she cannot look at all (no vision model, the
     server is off) it is the first.  With `dream_image_choose_think` she reasons before the comparison; that
-    has a fixed allowance, and if she uses it up she is asked once more without it."""
+    has a fixed allowance, and if she uses it up she is asked once more without it.
+
+    `noted`, if given, is filled with her notes on each attempt she could look at, by index."""
     from .reflect import _parse
-    if len(pictures) < 2:
+    if not pictures or (len(pictures) < 2 and noted is None):         # one picture is still looked at when its score is wanted
         return 0, ""
     try:
         look_at = _chooser(image_config(cfg), report if report is not None else {})
@@ -494,7 +496,8 @@ def pick_best(cfg: Dict[str, Any], scene: str, pictures: List[bytes], *, remembe
     except Exception as exc:
         logger.debug("holonomic: choosing between dream pictures failed: %s", exc)
         return 0, ""
-    notes: Dict[int, Dict[str, Any]] = {}
+    notes: Dict[int, Dict[str, Any]] = noted if noted is not None else {}
+    notes.clear()
     for i, p in enumerate(pictures):
         try:
             data = _parse(look_at(f"look at attempt {i + 1}", _ATTEMPT.format(scene=scene, remembered=note),
