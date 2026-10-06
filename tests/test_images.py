@@ -1841,6 +1841,36 @@ def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
         assert calls == [10]                                    # looked at once, not twice
         new = images.list_images(e)[0]
         assert new["named"] == [{"name": "Sushi", "said": False, "alike": new["named"][0]["alike"]}] and new["named"][0]["alike"] > 0.9
+        kept = (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
+        assert ("--- not given to her; for checking ---\nrecognised in the attached image: Sushi (seen)\n"
+                "a statement that she recognises it was given\nplugin version ") in kept
+        assert "--- not given to her" not in block
+        # another request for memory arriving while this image is still being looked at must not lose what was found in it
+        second = tmp_path / "IMG_7734.HEIC"
+        second.write_bytes(two_tone((60, 90, 120), (212, 38, 30)))
+        describe = images.describe
+
+        def slow(engine, cfg, image_id, **kw):
+            done = describe(engine, cfg, image_id, **kw)
+            p.prefetch("What do the tomato plants need this week?", session_id="s2")
+            return done
+        images.describe = slow
+        try:
+            block = p.prefetch(file_message(second, "Look at this!"), session_id="s1")
+        finally:
+            images.describe = describe
+        assert "## The attached image shows Sushi" in block and "Sushi is Kayla's cat" in block
+        # recording the name with the image fails: she is still told, from the match and from what she wrote
+        third = tmp_path / "IMG_7735.HEIC"
+        third.write_bytes(two_tone((90, 60, 120), (214, 36, 32)))
+        keep_note = fp.note_recognised
+        fp.note_recognised = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("could not write"))
+        try:
+            block = p.prefetch(file_message(third, "Look at this!"), session_id="s1")
+        finally:
+            fp.note_recognised = keep_note
+        assert "## The attached image shows Sushi" in block
+        assert "matched by look but not recorded with the image" in (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
     finally:
         images._seer = keep
         p.shutdown(); server.shutdown()

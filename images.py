@@ -716,7 +716,7 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
             if row["caption"] and _fp.names_on(cfg):
                 _fp.learn_from_caption(engine, cfg, image_id, see)
         except Exception as exc:
-            logger.debug("holonomic: keeping names for image %s failed: %s", image_id, exc)
+            logger.warning("holonomic: keeping names for image %s failed: %s", image_id, exc)
     except BaseException:
         with engine._lock:
             _db(engine).execute("UPDATE images SET claimed_at = NULL WHERE id = ?", (int(image_id),))
