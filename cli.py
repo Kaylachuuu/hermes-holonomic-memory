@@ -21,6 +21,8 @@
     hermes holonomic images signature ID none|bottom-right|...   say where an image is signed or watermarked (kept out of dream pictures)
     hermes holonomic images fingerprints [on|off|redo] [--host URL]   recognise pictures from the pictures themselves (needs the helper server)
     hermes holonomic images similar ID [--all]    images that look like this one
+    hermes holonomic images name ID NAME [--what "..."] [--not]   this image shows (or does not show) a particular named thing
+    hermes holonomic images names [forget NAME]   the things she knows by name and where she has seen them
     hermes holonomic images dream ID... yes|no|default     allow or forbid dream pictures drawn from particular images
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
@@ -412,6 +414,9 @@ def _print_image(img, width: int = 110, full: bool = False) -> None:
         print(f"    things in it: {', '.join(img['labels'])}")
     if full:
         print(f"    real people in it: {'yes' if img.get('people') else 'no'}   (wrong? hermes holonomic images people {img['id']} yes|no)")
+        for n in img.get("named") or []:
+            print(f"    shows {n['name']}: " + ("you said so" if n["said"] else f"she recognised it by its look (alike {n['alike']:.2f})")
+                  + f"   (wrong? hermes holonomic images name {img['id']} \"{n['name']}\" --not)")
         signed = img.get("signature")
         print(f"    signature or watermark: {'not checked yet (checked the first time a dream draws from it)' if not signed else signed}"
               f"   (wrong? hermes holonomic images signature {img['id']} none|bottom-right|...)")
@@ -568,6 +573,49 @@ def _images_cmd(engine, cfg, args) -> None:
                 print(f"  stopped: {err}")
         if not fc["image_fingerprints"]:
             print("  Turn on with: hermes holonomic images fingerprints on [--host URL]")
+    elif what == "names":
+        from . import fingerprints as _fp
+        if items and items[0] == "forget":
+            for raw in items[1:] or [""]:
+                print(f"Forgot the name {raw!r}: nothing is recognised as it any more." if _fp.forget_name(engine, raw)
+                      else "Usage: hermes holonomic images names forget NAME      (a name from `hermes holonomic images names`)")
+            return
+        known = _fp.names(engine)
+        on = _fp.names_on(cfg)
+        print(f"{len(known)} named thing(s)." + ("" if on else "  Recognising them is OFF: it needs picture fingerprints "
+                                                 "(hermes holonomic images fingerprints on)."))
+        for k in known:
+            ids = lambda xs: ", ".join("#" + str(i) for i in xs) or "none"
+            print(f"  {k['name']}" + (f"  ({k['what']})" if k["what"] else ""))
+            print(f"    you said so in image {ids(k['examples'])};  she recognised it in image {ids(k['recognised'])}"
+                  + (f";  you said it is not in image {ids(k['not'])}" if k["not"] else ""))
+        if not known:
+            print('  Name something: hermes holonomic images name ID NAME [--what "a long-haired black and white cat"]')
+            print("  or tell her when you show her a picture: \"This is Sushi, my cat.\"")
+    elif what == "name":
+        from . import fingerprints as _fp
+        if len(items) < 2 or not items[0].isdigit():
+            print('Usage: hermes holonomic images name ID NAME [--what "what it is"]      this image shows that particular thing\n'
+                  "       hermes holonomic images name ID NAME --not                   this image does not show it")
+            return
+        image_id, name = int(items[0]), " ".join(items[1:])
+        if not _fp.names_on(cfg):
+            print("Named things need picture fingerprints. Turn them on: hermes holonomic images fingerprints on")
+            return
+        if getattr(args, "not_it", False):
+            print(f"image #{image_id}: noted, it does not show {name}. It will not be taken for it again."
+                  if _fp.not_named(engine, cfg, image_id, name, key_fn=extract_keys)
+                  else f"Nothing is known by the name {name!r}, or there is no image #{image_id}.")
+            return
+        try:
+            done = _fp.name_thing(engine, cfg, image_id, name, what=args.what or "", key_fn=extract_keys)
+        except _fp.NameRefused as exc:
+            print(str(exc))
+            return
+        print(f"image #{image_id} shows {done['name']}" + (f" ({done['what']})" if done["what"] else "") + ". "
+              + ("She looked at it again with that in mind; its parts will be looked at again when things are quiet "
+                 "(or now: hermes holonomic images process)." if done["looked_again"] else "What is written about it already says so."))
+        print(f"  Later images in which something looks like {done['name']} will be checked for it.")
     elif what == "similar":
         from . import fingerprints as _fp
         if not items or not items[0].isdigit():
@@ -926,7 +974,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream", "removed", "restore", "delete", "fingerprints", "similar"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream", "removed", "restore", "delete", "fingerprints", "similar", "name", "names"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")
@@ -937,6 +985,8 @@ def register_cli(subparser) -> None:
     im.add_argument("--section", type=int, help="With 'look': a part number, to look closely at one part")
     im.add_argument("-n", type=int, default=20, help="With 'list': how many (default 20)")
     im.add_argument("--width", type=int, default=110, help="Characters of text to show")
+    im.add_argument("--what", help="With 'name': what the named thing is, e.g. \"a long-haired black and white cat\"")
+    im.add_argument("--not", dest="not_it", action="store_true", help="With 'name': the image does NOT show that thing")
     im.add_argument("--all", action="store_true", help="With 'similar': list every image with its figures, not only those alike enough")
     im.add_argument("--yes", action="store_true", help="With 'forget': actually remove")
     im.add_argument("--keep-files", action="store_true", help="With 'forget': leave the image files on disk")

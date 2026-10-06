@@ -680,6 +680,13 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
         corrections = [c for c in json.loads(row["meta"] or "{}").get("corrections", []) if c]
         if corrections:
             note += _CORRECTED.format(correction=" ".join(corrections))
+        from . import fingerprints as _fp
+        known: Dict[str, dict] = {}
+        try:                                         # what it may show, going by its look; never a reason not to describe it
+            known = _fp.recognise(engine, cfg, image_id)
+            note += _fp.known_note(known)
+        except Exception as exc:
+            logger.debug("holonomic: recognising named things in image %s failed: %s", image_id, exc)
         prompt = _WHOLE.format(note=note, n=int(ic["image_max_labels"]))
         data = _parse(_look_once_more(see, "image", prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
                                       int(ic["image_max_tokens"])))
@@ -703,6 +710,13 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
                        (ids[0], time.time(), json.dumps(meta), int(image_id)))
             db.executemany("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)",
                            [(int(image_id), label) for label in labels])
+        try:
+            _fp.note_recognised(engine, image_id, known, text)
+            _fp.relabel(engine, image_id)
+            if row["caption"] and _fp.names_on(cfg):
+                _fp.learn_from_caption(engine, cfg, image_id, see)
+        except Exception as exc:
+            logger.debug("holonomic: keeping names for image %s failed: %s", image_id, exc)
     except BaseException:
         with engine._lock:
             _db(engine).execute("UPDATE images SET claimed_at = NULL WHERE id = ?", (int(image_id),))
@@ -737,6 +751,12 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
     see = see or _seer(ic, report)
     source = row["file"] if ic["image_from_original"] else row["view"]
     img, _ = open_image((engine.path / source).read_bytes())
+    from . import fingerprints as _fp
+    known: Dict[str, dict] = {}
+    try:
+        known = _fp.recognise(engine, cfg, image_id)
+    except Exception as exc:
+        logger.debug("holonomic: recognising named things in image %s failed: %s", image_id, exc)
     done = 0
     for s in todo:
         if should_stop and should_stop():
@@ -745,7 +765,7 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
             continue
         try:
             jpeg = _crop(img, s["x"], s["y"], s["w"], s["h"], int(ic["image_section_max_side"]))
-            data = _parse(_look_once_more(see, "image_part", _PART.format(place=s["place"], whole=whole, said=said), jpeg, _PART_SCHEMA,
+            data = _parse(_look_once_more(see, "image_part", _PART.format(place=s["place"], whole=whole, said=said + _fp.known_note(known, s["place"])), jpeg, _PART_SCHEMA,
                                           int(ic["image_max_tokens"])))
             description = _sentence(data.get("description")) if data.get("notable") else ""
             labels = clean_labels(data.get("labels"), 6) if description else []
@@ -763,6 +783,8 @@ def describe_sections(engine, cfg: Dict[str, Any], image_id: int, *, see: Option
                            "WHERE image_id = ? AND idx = ?", (1 if mid else 0, mid, time.time(), int(image_id), s["idx"]))
                 db.executemany("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, ?)",
                                [(int(image_id), label, int(s["idx"])) for label in labels])
+            if description and known:
+                _fp.note_recognised(engine, image_id, {k: m for k, m in known.items() if s["place"] in m["places"]}, description)
             done += 1
         except BaseException:
             with engine._lock:
@@ -1008,6 +1030,11 @@ def look(engine, cfg: Dict[str, Any], image_id: int, question: str, *, section: 
 
 # -------------------------------------------------------------------- reading
 
+def _names_in(engine, image_id: int) -> List[dict]:
+    from . import fingerprints as _fp
+    return _fp.names_in(engine, image_id)
+
+
 def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict]:
     row = _row(engine, image_id)
     if row is None or row["forgotten"]:
@@ -1025,6 +1052,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "memory_id": row["memory_id"], "description": (memory or {}).get("text", ""), "labels": labels,
            "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]), "signature": signature_known(engine, row["id"]),
            "fingerprint": row["vec"] is not None,
+           "named": _names_in(engine, row["id"]),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -1395,6 +1423,8 @@ def delete_image(engine, image_id: int) -> bool:
         db.execute("DELETE FROM image_sections WHERE image_id = ?", (row["id"],))
         db.execute("UPDATE images SET forgotten = 2, memory_id = NULL, caption = '', origin = '', meta = '{}', vec = NULL, vec_model = NULL "
                    "WHERE id = ?", (row["id"],))
+    from . import fingerprints as _fp
+    _fp.unmark(engine, row["id"])
     for rel in {row["file"], row["view"]}:
         try:
             (engine.path / rel).unlink()

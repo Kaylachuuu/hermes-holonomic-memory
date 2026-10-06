@@ -75,7 +75,7 @@ TOOL_SCHEMA = {
         "- images: images you have been shown. With `label`, every image in which that thing was noticed (e.g. 'cat'); "
         "with `query`, images whose description matches; with `image_id`, one image and what is in each part of it; "
         "with none of these, the most recent. If the user tells you a description is wrong, pass `image_id` and "
-        "`correction` (what they said, in their words): the image is looked at again with that taken as true. With `image_id` and `similar`: true, the images that look like it, compared as pictures and not by their descriptions (the same cat, the same room). An image you forgot by mistake comes back with `image_id` and `restore`: true. Each result has a `file`: to show the image to the user, write "
+        "`correction` (what they said, in their words): the image is looked at again with that taken as true. With `image_id` and `similar`: true, the images that look like it, compared as pictures and not by their descriptions (the same cat, the same room). When the user names a particular animal, object or place in an image ('that is Sushi', 'this is my car'), pass `image_id`, `name` and `what` (what it is, e.g. 'a long-haired black and white cat') so you can recognise it in later images; if they say an image does NOT show something it was taken for, pass `image_id`, `name` and `wrong`: true. Do not name people this way. An image you forgot by mistake comes back with `image_id` and `restore`: true. Each result has a `file`: to show the image to the user, write "
         "MEDIA: followed by that file path on a line of its own in your reply.\n"
         "- look: look at a stored image again (`image_id`) to answer a `question` its description does not cover. "
         "Optional `section` (a part number from 'images') to look closely at one part.\n"
@@ -89,6 +89,9 @@ TOOL_SCHEMA = {
             "label": {"type": "string", "description": "A thing to find in images, e.g. 'cat' (images)."},
             "image_id": {"type": "integer", "description": "An image id as shown, e.g. image #3 (images, look)."},
             "question": {"type": "string", "description": "What you want to know about the image (look)."},
+            "name": {"type": "string", "description": "The name the user gave a particular animal, object or place in image_id (images)."},
+            "what": {"type": "string", "description": "What the named thing is, in a few words (images, with name)."},
+            "wrong": {"type": "boolean", "description": "With image_id and name: the user says that image does not show it (images)."},
             "similar": {"type": "boolean", "description": "Find images that look like image_id, by the pictures themselves (images)."},
             "restore": {"type": "boolean", "description": "Put back an image that was forgotten, as it was (images, with image_id)."},
             "correction": {"type": "string", "description": "What the user said is wrong about an image's description (images)."},
@@ -792,6 +795,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                "description": img["description"] or "(not described yet)", "things_in_it": img["labels"]}
         if img.get("caption"):
             out["said_when_shown"] = img["caption"]
+        if img.get("named"):                # particular things in it: named by the user, or recognised by their look
+            out["shows"] = [n["name"] + ("" if n["said"] else " (recognised by its look)") for n in img["named"]]
         if img.get("seen", 1) > 1:
             out["times_shown"] = img["seen"]
         if img.get("sections_waiting"):
@@ -809,6 +814,20 @@ class HolonomicMemoryProvider(MemoryProvider):
             if not img:
                 return _error(f"Image {args['image_id']} is not set aside, or its file is gone, so there is nothing to restore")
             return json.dumps(dict(self._image_json(img), note="Restored as it was. " + how))
+        if args.get("image_id") is not None and (args.get("name") or "").strip():
+            from . import fingerprints as _fp
+            if not _fp.names_on(self._cfg):
+                return _error("Named things need picture fingerprints, which are off")
+            try:
+                if args.get("wrong"):
+                    if not _fp.not_named(engine, self._cfg, int(args["image_id"]), args["name"], key_fn=extract_keys):
+                        return _error(f"Nothing is known by the name {args['name']!r}, or there is no image {args['image_id']}")
+                    return json.dumps({"image_id": int(args["image_id"]), "note": f"Noted: that image does not show {args['name']}. "
+                                       "It will not be taken for it again."})
+                done = _fp.name_thing(engine, self._cfg, int(args["image_id"]), args["name"], what=args.get("what") or "", key_fn=extract_keys)
+            except _fp.NameRefused as exc:
+                return _error(str(exc))
+            return json.dumps(dict(done, note=f"Kept. Later images in which something looks like {done['name']} will be checked for it."))
         if args.get("image_id") is not None and args.get("similar"):
             from . import fingerprints as _fp
             if not _fp.fingerprint_config(self._cfg)["image_fingerprints"]:

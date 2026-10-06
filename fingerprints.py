@@ -32,6 +32,10 @@ FINGERPRINT_DEFAULTS: Dict[str, Any] = {
     # How alike two pictures must be (1 = the same, 0 = nothing in common) to be called alike.  Set by trying
     # it on your own images: `hermes holonomic images similar ID --all` shows the figures for every image.
     "image_fingerprint_min": 0.5,
+    # Named things: an animal, object or place the user has named ("this is Sushi") is recognised in later images
+    # by its look, and the vision model is told what it may be looking at.  Needs fingerprints.
+    "image_names": True,
+    "image_name_min": 0.6,                                 # how alike a part must be to a named thing to be offered as it
 }
 
 
@@ -106,7 +110,8 @@ def status(engine, model: Optional[str] = None) -> Dict[str, Any]:
 
 
 def fingerprint(engine, cfg: Dict[str, Any], *, embed: Optional[Callable[..., Tuple[str, List[List[float]]]]] = None,
-                model: Optional[str] = None, should_stop: Optional[Callable[[], bool]] = None, redo: bool = False) -> Dict[str, Any]:
+                model: Optional[str] = None, should_stop: Optional[Callable[[], bool]] = None, redo: bool = False,
+                only: Optional[int] = None) -> Dict[str, Any]:
     """Give every kept image that lacks one a fingerprint, and each of its parts.  An image whose fingerprint
     was made by a different model than the server now runs is done again, since the two cannot be compared.
     A server that cannot be reached ends the pass; an image that cannot be read is reported and passed over."""
@@ -116,7 +121,7 @@ def fingerprint(engine, cfg: Dict[str, Any], *, embed: Optional[Callable[..., Tu
     ic = _images.image_config(cfg)
     try:
         embed = embed or make_embedder(cfg)
-        if model is None and not redo:
+        if model is None and not redo and only is None:
             try:
                 model = str(health(cfg).get("model") or "") or None
             except FingerprintError:
@@ -129,6 +134,8 @@ def fingerprint(engine, cfg: Dict[str, Any], *, embed: Optional[Callable[..., Tu
                                            "WHERE forgotten = 0 AND source != 'dream' ORDER BY id").fetchall()
     side = int(fc["image_fingerprint_side"])
     for row in rows:
+        if only is not None and int(row["id"]) != int(only):
+            continue
         if row["has"] and not redo and (model is None or row["vec_model"] == model):
             continue
         if should_stop and should_stop():
@@ -206,3 +213,319 @@ def describe_match(match: dict) -> str:
         return "the two pictures as a whole"
     side = lambda place, which: f"the whole of {which}" if place == "whole" else f"the {place} of {which}"
     return f"{side(match['this'], 'this one')} and {side(match['that'], 'that one')}"
+
+
+# ------------------------------------------------------------------------------------------- named things
+#
+# "This is Sushi."  From then on a part of a new image that looks like Sushi is offered to the vision model as
+# possibly Sushi before it describes the image, so that she can recognise a particular animal, object or place
+# and not only a kind of thing.  Two things have to agree before a name is used: the fingerprint says the part
+# looks like it, and the vision model, told what to look for, says it can see it.
+#
+# What a named thing looks like is taken from the images the user named it in: the parts of those images whose
+# descriptions mention the name, or the whole image if none does.  An image she recognised the thing in by
+# herself is never used as an example, so that one mistake cannot grow into many.
+#
+# People are left out.  A fingerprint says "this looks like that"; it cannot tell one person from another who
+# looks similar, and naming a person from it would be a guess presented as recognition.
+
+import re
+import time
+
+_NAMES_SQL = """
+CREATE TABLE IF NOT EXISTS image_names (
+    name       TEXT PRIMARY KEY,           -- lower case, the key
+    shown      TEXT NOT NULL,              -- as the user wrote it
+    what       TEXT NOT NULL DEFAULT '',   -- 'a long-haired black and white cat'
+    kind       TEXT NOT NULL DEFAULT '',   -- animal, object, place
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS image_name_marks (
+    name       TEXT NOT NULL,
+    image_id   INTEGER NOT NULL,
+    state      TEXT NOT NULL,              -- 'example': the user said so; 'recognised': she saw it herself; 'not': the user said it is not
+    alike      REAL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (name, image_id)
+) WITHOUT ROWID;
+"""
+
+KINDS = ("animal", "object", "place")
+
+
+class NameRefused(Exception):
+    pass
+
+
+def _ndb(engine):
+    from .images import _db
+    db = _db(engine)
+    if not getattr(engine, "_image_names_ready", False):
+        with engine._lock:
+            db.executescript(_NAMES_SQL)
+        engine._image_names_ready = True
+    return db
+
+
+def _key(name: str) -> str:
+    return " ".join(str(name or "").lower().split())[:60]
+
+
+def _mentions(shown: str, text: str) -> bool:
+    return bool(shown) and re.search(r"(?<!\w)" + re.escape(shown) + r"(?!\w)", text or "", re.I) is not None
+
+
+def names_on(cfg: Dict[str, Any]) -> bool:
+    fc = fingerprint_config(cfg)
+    return bool(fc["image_fingerprints"] and fc["image_names"])
+
+
+def _texts(engine, image_id: int) -> Tuple[str, Dict[str, str]]:
+    """What is written about an image: (the whole, {place: that part})."""
+    from .images import _db, _row
+    row = _row(engine, image_id)
+    whole = ((engine.get(int(row["memory_id"])) or {}).get("text", "") if row and row["memory_id"] else "")
+    with engine._lock:
+        parts = _db(engine).execute("SELECT place, memory_id FROM image_sections WHERE image_id = ? AND memory_id IS NOT NULL", (int(image_id),)).fetchall()
+    return whole, {p["place"]: (engine.get(int(p["memory_id"])) or {}).get("text", "") for p in parts}
+
+
+def _vectors(engine, image_id: int, model: str) -> List[tuple]:
+    """[(place, vector)] for one image, the whole first, every part included."""
+    from .images import _db
+    with engine._lock:
+        db = _db(engine)
+        row = db.execute("SELECT vec FROM images WHERE id = ? AND forgotten = 0 AND vec IS NOT NULL AND vec_model = ?", (int(image_id), model)).fetchone()
+        parts = db.execute("SELECT place, vec FROM image_sections WHERE image_id = ? AND vec IS NOT NULL AND vec_model = ? ORDER BY idx",
+                           (int(image_id), model)).fetchall()
+    return ([("whole", _unpack(row["vec"]))] + [(p["place"], _unpack(p["vec"])) for p in parts]) if row else []
+
+
+def _examples(engine, key: str, shown: str, model: str, exclude: int) -> list:
+    """The fingerprints that say what a named thing looks like."""
+    with engine._lock:
+        ids = [r["image_id"] for r in _ndb(engine).execute("SELECT image_id FROM image_name_marks WHERE name = ? AND state = 'example'", (key,))]
+    out = []
+    for image_id in ids:
+        if int(image_id) == int(exclude):
+            continue
+        vectors = _vectors(engine, image_id, model)
+        if not vectors:
+            continue
+        _, parts = _texts(engine, image_id)
+        told = [v for place, v in vectors[1:] if _mentions(shown, parts.get(place, ""))]
+        out += told or [vectors[0][1]]
+    return out
+
+
+def recognise(engine, cfg: Dict[str, Any], image_id: int, *, embed: Optional[Callable[..., Any]] = None) -> Dict[str, dict]:
+    """Named things this image may show, going by its look alone:
+    {key: {"shown", "what", "alike", "places": {place: alike}}}.  Makes the image's fingerprint first if it
+    has none.  Empty when names are off, the helper cannot be reached, or nothing is alike enough."""
+    import numpy as np
+    from .images import _row
+    if not names_on(cfg):
+        return {}
+    with engine._lock:
+        db = _ndb(engine)
+        known = db.execute("SELECT name, shown, what FROM image_names").fetchall()
+        told_not = {r["name"] for r in db.execute("SELECT name FROM image_name_marks WHERE image_id = ? AND state = 'not'", (int(image_id),))}
+    if not known:
+        return {}
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return {}
+    if row["vec"] is None:
+        if fingerprint(engine, cfg, embed=embed, only=int(image_id))["errors"]:
+            return {}
+        row = _row(engine, image_id)
+        if row["vec"] is None:
+            return {}
+    mine = _vectors(engine, image_id, row["vec_model"])
+    if not mine:
+        return {}
+    A, floor, out = np.stack([v for _, v in mine]), float(fingerprint_config(cfg)["image_name_min"]), {}
+    for k in known:
+        if k["name"] in told_not:
+            continue
+        examples = _examples(engine, k["name"], k["shown"], row["vec_model"], int(image_id))
+        if not examples:
+            continue
+        best = (A @ np.stack(examples).T).max(axis=1)
+        places = {mine[i][0]: round(float(b), 3) for i, b in enumerate(best) if b >= floor}
+        if places:
+            out[k["name"]] = {"shown": k["shown"], "what": k["what"], "alike": max(places.values()), "places": places}
+    return out
+
+
+def known_note(matches: Dict[str, dict], place: Optional[str] = None) -> str:
+    """What the vision model is told before it looks.  With `place`, only what was matched in that part."""
+    found = [m for m in matches.values() if place is None or place in m["places"]]
+    if not found:
+        return ""
+    listed = "; ".join(m["shown"] + (f" ({m['what']})" if m["what"] else "") for m in sorted(found, key=lambda m: -m["alike"])[:4])
+    where = "this image" if place is None else "this part"
+    return (f"\nGoing by its look alone, {where} may show something you have been shown before: {listed}. Look for it. "
+            f"If you can see it, call it by that name. If you cannot, do not mention it.")
+
+
+def note_recognised(engine, image_id: int, matches: Dict[str, dict], text: str) -> List[str]:
+    """After she has described an image or a part: the names she used, of those offered, are recorded as
+    recognised in it, and the image can be found by them.  Returns those names."""
+    used = []
+    for key, m in matches.items():
+        if not _mentions(m["shown"], text):
+            continue
+        with engine._lock:
+            db = _ndb(engine)
+            db.execute("INSERT OR IGNORE INTO image_name_marks (name, image_id, state, alike, created_at) VALUES (?, ?, 'recognised', ?, ?)",
+                       (key, int(image_id), float(m["alike"]), time.time()))
+            db.execute("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)", (int(image_id), key))
+        used.append(m["shown"])
+    return used
+
+
+def name_thing(engine, cfg: Dict[str, Any], image_id: int, name: str, *, what: str = "", kind: str = "", redo: bool = True,
+               see: Optional[Callable[..., str]] = None, key_fn: Optional[Callable[[str], List[str]]] = None) -> dict:
+    """The user says this image shows a particular thing with this name.  The image becomes an example of what
+    the thing looks like.  If what is written about the image does not use the name yet, it is looked at again
+    with that taken as true, so that the parts showing the thing say so."""
+    from . import images as _images
+    shown, key = " ".join(str(name or "").split())[:60], _key(name)
+    kind = str(kind or "").lower()
+    if len(key) < 2:
+        raise NameRefused("A name is needed.")
+    if kind == "person":
+        raise NameRefused("People are not named from fingerprints: a fingerprint cannot tell one person from another who looks similar.")
+    if _images.get_image(engine, image_id) is None:
+        raise NameRefused(f"No image with id {image_id}.")
+    what = " ".join(str(what or "").split()).strip(" .")[:120]
+    with engine._lock:
+        db = _ndb(engine)
+        had = db.execute("SELECT what, kind FROM image_names WHERE name = ?", (key,)).fetchone()
+        db.execute("INSERT INTO image_names (name, shown, what, kind, created_at) VALUES (?, ?, ?, ?, ?) "
+                   "ON CONFLICT(name) DO UPDATE SET what = excluded.what, kind = excluded.kind",
+                   (key, shown, what or (had["what"] if had else ""), kind if kind in KINDS else (had["kind"] if had else ""), time.time()))
+        db.execute("INSERT INTO image_name_marks (name, image_id, state, alike, created_at) VALUES (?, ?, 'example', NULL, ?) "
+                   "ON CONFLICT(name, image_id) DO UPDATE SET state = 'example'", (key, int(image_id), time.time()))
+        db.execute("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)", (int(image_id), key))
+        shown, what = db.execute("SELECT shown, what FROM image_names WHERE name = ?", (key,)).fetchone()
+    whole, parts = _texts(engine, image_id)
+    again = False
+    if redo and not _mentions(shown, " ".join([whole] + list(parts.values()))):
+        try:
+            again = bool(_images.redescribe(engine, cfg, image_id, correction=f"This shows {shown}" + (f", {what}" if what else "") + ".",
+                                            see=see, key_fn=key_fn))
+            with engine._lock:                      # describing it again cleared its labels
+                _ndb(engine).execute("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)", (int(image_id), key))
+        except Exception as exc:                    # no vision model to hand: the whole image stands as the example
+            logger.debug("holonomic: image %s was not looked at again after being named: %s", image_id, exc)
+    return {"name": shown, "what": what, "image_id": int(image_id), "looked_again": again}
+
+
+def not_named(engine, cfg: Dict[str, Any], image_id: int, name: str, *, redo: bool = True,
+              see: Optional[Callable[..., str]] = None, key_fn: Optional[Callable[[str], List[str]]] = None) -> bool:
+    """The user says this image does not show that thing.  It is never offered for this image again, and if
+    what is written about the image uses the name, the image is looked at again with that taken as true."""
+    from . import images as _images
+    key = _key(name)
+    with engine._lock:
+        db = _ndb(engine)
+        known = db.execute("SELECT shown FROM image_names WHERE name = ?", (key,)).fetchone()
+        if known is None or _images._row(engine, image_id) is None:
+            return False
+        db.execute("INSERT INTO image_name_marks (name, image_id, state, alike, created_at) VALUES (?, ?, 'not', NULL, ?) "
+                   "ON CONFLICT(name, image_id) DO UPDATE SET state = 'not'", (key, int(image_id), time.time()))
+        db.execute("DELETE FROM image_labels WHERE image_id = ? AND label = ?", (int(image_id), key))
+    whole, parts = _texts(engine, image_id)
+    if redo and _mentions(known["shown"], " ".join([whole] + list(parts.values()))):
+        try:
+            _images.redescribe(engine, cfg, image_id, correction=f"This does not show {known['shown']}.", see=see, key_fn=key_fn)
+        except Exception as exc:
+            logger.debug("holonomic: image %s was not looked at again after a name was taken back: %s", image_id, exc)
+    return True
+
+
+_NAMED_IN = """\
+The person who showed this image said: {caption}
+
+Do those words give a name to one particular animal, object or place that is visible in the image, such as their cat, their \
+car or their house? A kind of thing ('a cat') is not a name. Something that is not in the picture does not count.
+
+Write:
+- names: a list, empty if they named nothing in the picture. For each: name (as they gave it), what (what it is, in a few \
+words that would let someone pick it out, e.g. 'a long-haired black and white cat'), kind (animal, object, place or person)."""
+
+_NAMED_SCHEMA = {"type": "object", "properties": {"names": {"type": "array", "items": {"type": "object", "properties": {
+    "name": {"type": "string"}, "what": {"type": "string"}, "kind": {"type": "string", "enum": ["animal", "object", "place", "person"]}},
+    "required": ["name", "what", "kind"]}}}, "required": ["names"]}
+
+
+def learn_from_caption(engine, cfg: Dict[str, Any], image_id: int, see: Callable[..., str]) -> List[dict]:
+    """What the user said when showing an image may name something in it ("this is Sushi").  Those names are
+    kept, with this image as their example.  People are passed over."""
+    from . import images as _images
+    from .reflect import _parse
+    row = _images._row(engine, image_id)
+    if not names_on(cfg) or row is None or not (row["caption"] or "").strip():
+        return []
+    img, _ = _images.open_image((engine.path / (row["view"] or row["file"])).read_bytes())
+    data = _parse(see("names", _images._SYSTEM, _NAMED_IN.format(caption=row["caption"]), _images._jpeg(img, (1024, 1024)), _NAMED_SCHEMA, 200))
+    learned = []
+    for item in (data.get("names") if isinstance(data.get("names"), list) else [])[:3]:
+        if not isinstance(item, dict) or str(item.get("kind") or "").lower() not in KINDS:
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        if len(name) < 2 or not _mentions(name, row["caption"]):          # only a name that was really said
+            continue
+        try:
+            learned.append(name_thing(engine, cfg, image_id, name, what=str(item.get("what") or ""), kind=item["kind"], redo=False))
+        except NameRefused:
+            pass
+    return learned
+
+
+def relabel(engine, image_id: int) -> None:
+    """Describing an image again clears its labels; the names it is known to show are put back."""
+    with engine._lock:
+        db = _ndb(engine)
+        keys = [r["name"] for r in db.execute("SELECT name FROM image_name_marks WHERE image_id = ? AND state != 'not'", (int(image_id),))]
+        db.executemany("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)", [(int(image_id), k) for k in keys])
+
+
+def unmark(engine, image_id: int) -> None:
+    """An image deleted for good takes its part in any name with it."""
+    with engine._lock:
+        _ndb(engine).execute("DELETE FROM image_name_marks WHERE image_id = ?", (int(image_id),))
+
+
+def names(engine) -> List[dict]:
+    with engine._lock:
+        db = _ndb(engine)
+        rows = db.execute("SELECT * FROM image_names ORDER BY shown COLLATE NOCASE").fetchall()
+        marks = db.execute("SELECT m.name, m.state, m.image_id FROM image_name_marks m JOIN images i ON i.id = m.image_id "
+                           "WHERE i.forgotten = 0 ORDER BY m.image_id").fetchall()
+    return [{"name": r["shown"], "what": r["what"], "kind": r["kind"],
+             "examples": [m["image_id"] for m in marks if m["name"] == r["name"] and m["state"] == "example"],
+             "recognised": [m["image_id"] for m in marks if m["name"] == r["name"] and m["state"] == "recognised"],
+             "not": [m["image_id"] for m in marks if m["name"] == r["name"] and m["state"] == "not"]} for r in rows]
+
+
+def names_in(engine, image_id: int) -> List[dict]:
+    """The named things an image shows: [{"name", "said": True if the user said so, "alike"}]."""
+    with engine._lock:
+        rows = _ndb(engine).execute("SELECT n.shown, m.state, m.alike FROM image_name_marks m JOIN image_names n ON n.name = m.name "
+                                    "WHERE m.image_id = ? AND m.state != 'not' ORDER BY n.shown", (int(image_id),)).fetchall()
+    return [{"name": r["shown"], "said": r["state"] == "example", "alike": r["alike"]} for r in rows]
+
+
+def forget_name(engine, name: str) -> bool:
+    """Drop a name: nothing is recognised as it any more.  What was written about images stays as it is."""
+    key = _key(name)
+    with engine._lock:
+        db = _ndb(engine)
+        if db.execute("SELECT 1 FROM image_names WHERE name = ?", (key,)).fetchone() is None:
+            return False
+        db.execute("DELETE FROM image_name_marks WHERE name = ?", (key,))
+        db.execute("DELETE FROM image_names WHERE name = ?", (key,))
+    return True

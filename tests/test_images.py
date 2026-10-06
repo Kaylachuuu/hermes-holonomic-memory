@@ -1642,3 +1642,96 @@ def test_fingerprints_from_the_command_line_and_the_tool(tmp_path):
             embed.OllamaEmbedder = keep
     finally:
         server.shutdown()
+
+
+def test_a_named_thing_is_recognised_by_its_look(tmp_path):
+    """"This is Sushi."  A later image with a part that looks like Sushi is offered to the vision model as possibly
+    Sushi; if she then calls it Sushi the image is recorded as showing it.  A name is never used on the fingerprint
+    alone, a recognised image is never an example, people are passed over, and the user can say it is not."""
+    import importlib.util, threading
+    from holonomic import images, fingerprints as fp
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    server = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    cfg = dict(CFG, image_fingerprints=True, image_fingerprint_host=f"http://127.0.0.1:{server.server_port}")
+    red, green, blue = (220, 30, 30), (30, 200, 40), (30, 40, 220)
+    seen, agrees = [], [True]
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        seen.append((step, prompt))
+        offered = "may show something you have been shown before: Sushi (a red cat)" in prompt
+        denied = "does not show Sushi" in prompt
+        said = "said: This is Sushi" in prompt or "This shows" in prompt
+        if step == "names":
+            who = "Kayla" if "Kayla" in prompt else "Sushi"
+            return json.dumps({"names": [{"name": who, "what": "a red cat", "kind": "person" if who == "Kayla" else "animal"},
+                                         {"name": "Mochi", "what": "a dog", "kind": "animal"}]})      # Mochi was never said
+        if step == "image":
+            named = (said or (offered and agrees[0])) and not denied
+            return json.dumps({"description": ("A photo of Sushi, a red cat, beside something." if named else "A red shape beside something else."),
+                               "labels": ["cat"] if named else ["shape"], "text": "", "people": False})
+        place = prompt.split("the ", 1)[1].split(".", 1)[0]
+        if place in ("middle left", "middle right"):
+            named = (("which is true: This is Sushi" in prompt and place == "middle left") or (offered and agrees[0])) and not denied
+            return json.dumps({"notable": True, "description": "Sushi's red fur up close." if named else "A flat area of colour.", "labels": []})
+        return json.dumps({"notable": False, "description": "", "labels": []})
+    try:
+        m = store(tmp_path)
+        a = images.add_image(m, two_tone(red, green), CFG, caption="This is Sushi, my cat.", origin="sushi.png")["id"]
+        images.process(m, cfg, see=see)
+        assert [s for s, _ in seen].count("names") == 1 and not any("may show" in p for _, p in seen)       # nothing known yet
+        assert fp.names(m) == [{"name": "Sushi", "what": "a red cat", "kind": "animal", "examples": [a], "recognised": [], "not": []}]
+        assert images.get_image(m, a)["named"] == [{"name": "Sushi", "said": True, "alike": None}]
+        assert [i["id"] for i in images.find_by_label(m, "sushi")] == [a]
+        # a new image with the same red on its other side, and nothing said about it
+        seen.clear()
+        b = images.add_image(m, two_tone(blue, red), CFG, origin="later.png")["id"]
+        assert set(fp.recognise(m, cfg, b)["sushi"]["places"]) >= {"middle right"} and "middle left" not in fp.recognise(m, cfg, b)["sushi"]["places"]
+        images.process(m, cfg, see=see)
+        prompts = dict((p.split("the ", 1)[1].split(".", 1)[0] if s == "image_part" else s, p) for s, p in seen)
+        assert "may show something you have been shown before: Sushi (a red cat). Look for it." in prompts["image"]
+        assert "this part may show" in prompts["middle right"] and "may show" not in prompts["middle left"]       # only where it was matched
+        assert "names" not in prompts                                                                          # nothing was said, nothing to learn
+        got = images.get_image(m, b, sections=True)
+        assert "Sushi" in got["description"] and got["named"][0]["name"] == "Sushi" and got["named"][0]["said"] is False and got["named"][0]["alike"] > 0.9
+        assert sorted(i["id"] for i in images.find_by_label(m, "sushi")) == [a, b] and fp.names(m)[0]["recognised"] == [b]
+        # the fingerprint says yes but she does not see it: no name is recorded
+        agrees[0] = False
+        c = images.add_image(m, two_tone(red, blue), CFG)["id"]
+        images.process(m, cfg, see=see)
+        assert images.get_image(m, c)["named"] == [] and "Sushi" not in images.get_image(m, c)["description"]
+        agrees[0] = True
+        # nothing alike: nothing offered.  And b, only recognised, is not an example: blue is not Sushi.
+        seen.clear()
+        d = images.add_image(m, flat(blue), CFG)["id"]
+        images.process(m, cfg, see=see)
+        assert not any("may show" in p for _, p in seen) and fp.recognise(m, cfg, d) == {}
+        # the user says b is not Sushi: looked at again with that taken as true, and never offered for it again
+        seen.clear()
+        assert fp.not_named(m, cfg, b, "sushi", see=see) and not fp.not_named(m, cfg, b, "Nobody")
+        assert "does not show Sushi" in seen[0][1] and "may show" not in seen[0][1]
+        assert "Sushi" not in images.get_image(m, b)["description"] and images.get_image(m, b)["named"] == [] and fp.recognise(m, cfg, b) == {}
+        assert [i["id"] for i in images.find_by_label(m, "sushi")] == [a] and fp.names(m)[0]["not"] == [b] and fp.names(m)[0]["recognised"] == []
+        # ... and says c is: it becomes a second example, looked at again so that what is written says so
+        done = fp.name_thing(m, cfg, c, "Sushi", see=see)
+        assert done["looked_again"] and done["what"] == "a red cat" and fp.names(m)[0]["examples"] == [a, c]
+        assert "Sushi" in images.get_image(m, c)["description"] and [i["id"] for i in images.find_by_label(m, "sushi")] == [c, a]
+        assert fp.name_thing(m, cfg, a, "Sushi", see=see)["looked_again"] is False                # already says so
+        # people are not named this way, by her or by the user
+        e = images.add_image(m, flat(green), CFG, caption="This is Kayla.")["id"]
+        images.process(m, cfg, see=see)
+        assert [n["name"] for n in fp.names(m)] == ["Sushi"] and images.get_image(m, e)["named"] == []
+        for bad in (dict(name="Kayla", kind="person"), dict(name=" ")):
+            try:
+                fp.name_thing(m, cfg, e, **bad); assert False
+            except fp.NameRefused:
+                pass
+        # names off, or fingerprints off: nothing is offered or learned
+        assert fp.recognise(m, dict(cfg, image_names=False), b) == {} and fp.recognise(m, CFG, b) == {}
+        # deleting an example for good takes it out of the name; forgetting the name ends it
+        images.forget_image(m, c); images.delete_image(m, c)
+        assert fp.names(m)[0]["examples"] == [a]
+        assert fp.forget_name(m, "SUSHI") and not fp.forget_name(m, "Sushi") and fp.names(m) == [] and images.get_image(m, a)["named"] == []
+    finally:
+        server.shutdown()

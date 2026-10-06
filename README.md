@@ -444,14 +444,35 @@ scale where 1 is the same picture. It was chosen before being tried on real phot
 of an image the vision model judged to show nothing worth recording is not matched on, since two
 plain walls are alike and it says nothing about the images.
 
-This is the first of three stages. Named things (telling her "this is Sushi" and having her
-recognise Sushi elsewhere) and faces come next.
+**Named things.** When the user names a particular animal, object or place in an image ("This is
+Sushi, my cat"), the name is kept with that image as an example of what the thing looks like: the
+parts of the image whose descriptions use the name, or the whole image if none does. When a later
+image has a part that looks like it (`image_name_min`, default `0.6`), the vision model is told
+before it describes the image that it may be looking at Sushi, and to use the name only if it can
+see such a thing. The name is recorded for the image only when she then uses it, so two things have
+to agree: the fingerprint and her own look.
+
+```
+hermes holonomic images name 12 Sushi --what "a long-haired black and white cat"
+hermes holonomic images name 31 Sushi --not      # that image does not show Sushi
+hermes holonomic images names                    # what she knows by name, and where she has seen it
+hermes holonomic images names forget Sushi
+```
+
+The agent does the same through the `images` action (`image_id`, `name`, `what`; `wrong` to take a
+name back). An image she recognised a thing in by herself is never used as an example of it, so one
+mistake cannot grow into many; only images the user named are. People are not named this way: a
+fingerprint says that two things look alike, not who someone is, and a face model for that is the
+next stage. `image_name_min` was chosen from a dozen photographs and should be checked against your
+own with `images similar ID --all`.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `image_fingerprints` | `false` | Make and use picture fingerprints |
 | `image_fingerprint_host` | `http://127.0.0.1:8189` | Where `tools/fingerprint_server.py` listens |
 | `image_fingerprint_min` | `0.5` | How alike (0 to 1) two pictures must be to be called alike |
+| `image_names` | `true` | Recognise things the user has named (needs fingerprints) |
+| `image_name_min` | `0.6` | How alike a part must be to a named thing to be offered to the vision model as it |
 
 ## Inspecting the store
 
