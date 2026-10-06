@@ -214,6 +214,35 @@ def _picture(engine, row, side: int) -> bytes:
     return _images._jpeg(img, (side, side))
 
 
+def image_off(engine, image_id: int) -> bool:
+    """Whether the user has said that no face is to be looked for in this image."""
+    from .images import _row
+    row = _row(engine, image_id)
+    return bool(row) and bool(json.loads(row["meta"] or "{}").get("faces_off"))
+
+
+def set_image(engine, image_id: int, on: bool) -> bool:
+    """Turn looking for faces off (or back on) for one image.  Off drops every face kept from it, including any
+    the user had named in it, and it is passed over from then on.  A street scene full of strangers is the
+    case: with every face kept, each of theirs would be."""
+    from .images import _row
+    row = _row(engine, image_id)
+    if row is None or row["forgotten"]:
+        return False
+    meta = json.loads(row["meta"] or "{}")
+    with engine._lock:
+        db = _db(engine)
+        if on:
+            meta.pop("faces_off", None)
+            meta.pop("faces", None)                      # looked at afresh on the next pass
+        else:
+            meta["faces_off"] = True
+            meta["faces"] = {"n": 0, "at": time.time(), "off": True}
+            db.execute("DELETE FROM image_faces WHERE image_id = ?", (int(image_id),))
+        db.execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps(meta), int(image_id)))
+    return True
+
+
 def detect(engine, cfg: Dict[str, Any], image_id: int, *, find: Optional[Callable[..., Any]] = None) -> List[dict]:
     """Look for faces in a kept image and record what the user's choice of `face_learn` allows: nothing but
     the user's own face, nothing but faces of people they have named, or every face.  A face the user spoke
@@ -222,6 +251,8 @@ def detect(engine, cfg: Dict[str, Any], image_id: int, *, find: Optional[Callabl
     fc = face_config(cfg)
     row = _images._row(engine, image_id)
     if fc["face_learn"] == "none" or row is None or row["forgotten"] or row["source"] == "dream":
+        return []
+    if json.loads(row["meta"] or "{}").get("faces_off"):
         return []
     model, found = (find or make_finder(cfg))([_picture(engine, row, int(fc["face_side"]))])
     found = found[0]
@@ -301,7 +332,8 @@ def scan(engine, cfg: Dict[str, Any], *, find: Optional[Callable[..., Any]] = No
         report["errors"].append(str(exc))
         return report
     for r in rows:
-        if not again and "faces" in json.loads(r["meta"] or "{}"):
+        meta = json.loads(r["meta"] or "{}")
+        if meta.get("faces_off") or (not again and "faces" in meta):
             continue
         if should_stop and should_stop():
             return report
@@ -325,6 +357,8 @@ def look(engine, cfg: Dict[str, Any], image_id: int, *, find: Optional[Callable[
     row = _images._row(engine, image_id)
     if row is None or row["forgotten"]:
         raise FaceError(f"No image with id {image_id}.")
+    if json.loads(row["meta"] or "{}").get("faces_off"):
+        raise FaceError(f"Looking for faces is turned off for image #{image_id}. To turn it back on: hermes holonomic faces image {image_id} on")
     model, found = (find or make_finder(cfg))([_picture(engine, row, int(fc["face_side"]))])
     on_record = faces_in(engine, image_id)
     out = []
@@ -494,6 +528,9 @@ def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, find: Optiona
     from . import images as _images
     fc = face_config(cfg)
     if not faces_on(cfg):
+        return []
+    seen = _images.known(engine, data)
+    if seen and image_off(engine, seen["id"]):          # the same picture, shown again
         return []
     try:
         img, _ = _images.open_image(data)

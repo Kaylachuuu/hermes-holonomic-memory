@@ -34,6 +34,7 @@
     hermes holonomic faces learn none|me|named|often     whose faces she may learn (none until you say otherwise)
     hermes holonomic faces ask on|off             may she ask who someone is who keeps appearing (with 'often')
     hermes holonomic faces unasked on|off         is she told who is in an image without being asked
+    hermes holonomic faces image ID off|on        do not look for faces in one image (a street full of strangers)
     hermes holonomic faces show ID | name ID NAME [--face N] [--me] | not ID NAME | people | often | dream NAME yes|no | forget NAME | scan
     hermes holonomic context                      what memory gave her for the most recent message
     hermes holonomic tidy [--apply]               find stored messages that are Hermes' notes about attachments, and remove them
@@ -545,6 +546,17 @@ def _faces_cmd(engine, cfg, args) -> None:
         for g in groups:
             print(f"  in image {', '.join('#' + str(i) for i in g['images'])}" + ("   (she has asked who this is)" if g["asked"] else "")
                   + f"\n    to say who: hermes holonomic faces show {g['images'][0]}   then   hermes holonomic faces name {g['images'][0]} NAME --face N")
+    elif what == "image":
+        if len(items) < 2 or items[-1] not in ("on", "off") or not all(raw.isdigit() for raw in items[:-1]):
+            print("Usage: hermes holonomic faces image ID... off|on      (do not look for faces in these images, e.g. a street full of strangers)")
+            return
+        for raw in items[:-1]:
+            if not _f.set_image(engine, int(raw), items[-1] == "on"):
+                print(f"image #{raw}: no such image")
+            elif items[-1] == "off":
+                print(f"image #{raw}: no face is looked for in it from now on, and every face kept from it has been dropped.")
+            else:
+                print(f"image #{raw}: faces are looked for in it again, under the general rule, on the next pass (or now: hermes holonomic faces scan).")
     elif what == "scan":
         if not _f.faces_on(cfg):
             print("Learning faces is off. Turn it on first: hermes holonomic faces learn me|named|often")
@@ -599,6 +611,8 @@ def _print_image(img, width: int = 110, full: bool = False) -> None:
         for n in img.get("named") or []:
             print(f"    shows {n['name']}: " + ("you said so" if n["said"] else f"she recognised it by its look (alike {n['alike']:.2f})")
                   + f"   (wrong? hermes holonomic images name {img['id']} \"{n['name']}\" --not)")
+        if img.get("faces_off"):
+            print(f"    faces: not looked for in this image   (hermes holonomic faces image {img['id']} on)")
         signed = img.get("signature")
         print(f"    signature or watermark: {'not checked yet (checked the first time a dream draws from it)' if not signed else signed}"
               f"   (wrong? hermes holonomic images signature {img['id']} none|bottom-right|...)")
@@ -1105,7 +1119,7 @@ def register_cli(subparser) -> None:
     subs.add_parser("context", help="Show what memory gave the agent for the most recent message")
     fa = subs.add_parser("faces", help="Knowing particular people by their faces (off until you turn it on)")
     fa.add_argument("faces_action", nargs="?", default="status",
-                    choices=["status", "learn", "ask", "unasked", "people", "show", "name", "not", "dream", "forget", "often", "scan"])
+                    choices=["status", "learn", "ask", "unasked", "people", "show", "name", "not", "dream", "forget", "often", "scan", "image"])
     fa.add_argument("items", nargs="*", help="A setting, an image id, a name")
     fa.add_argument("--face", type=int, help="With 'name' and 'not': which face in the image, 1 = leftmost")
     fa.add_argument("--me", action="store_true", help="With 'name': this is you")

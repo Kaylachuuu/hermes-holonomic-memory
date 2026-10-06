@@ -1072,6 +1072,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "fingerprint": row["vec"] is not None,
            "named": _names_in(engine, row["id"]),
            "people_known": _people_in(engine, row["id"]),
+           "faces_off": bool(json.loads(row["meta"] or "{}").get("faces_off")),
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],

@@ -1997,6 +1997,22 @@ def test_faces_are_learned_only_as_far_as_the_user_allows(tmp_path):
     got = fc.recognise_picture(m, cfg, two_tone((42, 62, 228), GREY), find=find)
     assert [(g["name"], g["is_user"], g["where"]) for g in got] == [("Sam", False, "the only face")] and got[0]["alike"] > 0.9
     assert fc.recognise_picture(m, cfg, b"not a picture", find=find) == []
+    # one image set apart: no face is looked for in it, what was kept from it is dropped, and it stays that way
+    before = stored(m)
+    assert fc.set_image(m, ids["both"], False) and fc.image_off(m, ids["both"]) and not fc.set_image(m, 999, False)
+    assert stored(m) == before - 2 and fc.faces_in(m, ids["both"]) == [] and fc.face_count(m, ids["both"]) == 0
+    assert images.get_image(m, ids["both"])["faces_off"] and not images.get_image(m, ids["sam"])["faces_off"]
+    fc.scan(m, cfg, find=find, again=True)
+    assert stored(m) == before - 2 and fc.detect(m, cfg, ids["both"], find=find) == [] and fc.waiting(m) == 0
+    assert fc.recognise_picture(m, cfg, two_tone((225, 65, 45), emma), find=find) == []           # the same picture, shown again
+    for refused in (lambda: fc.look(m, cfg, ids["both"], find=find), lambda: fc.name_person(m, cfg, ids["both"], "Emma", face=2, find=find)):
+        try:
+            refused(); assert False
+        except fc.FaceError as exc:
+            assert "turned off for image" in str(exc)
+    assert fc.set_image(m, ids["both"], True) and fc.waiting(m) == 1
+    fc.scan(m, cfg, find=find)
+    assert stored(m) == before and not fc.image_off(m, ids["both"])
     # the rule is tightened: what it no longer allows is dropped the next time images are gone through
     fc.scan(m, dict(cfg, face_learn="named"), find=find, again=True)
     assert stored(m) == 2 and fc.strangers(m, cfg) == []
@@ -2221,6 +2237,9 @@ def test_faces_from_the_command_line(tmp_path):
         assert "2 person(s) she knows by face." in out and "Kayla  (you)" in out and f"she recognised them in image #{two}" in out
         assert "is never drawn from in a dream" in run("faces", "dream", "Emma", "no") and "in dreams: never" in run("faces", "people")
         assert "noted, that is not Kayla" in run("faces", "not", str(two), "Kayla") and "Nothing in image" in run("faces", "not", str(two), "Kayla")
+        assert "every face kept from it has been dropped" in run("faces", "image", str(two), "off") and "Usage:" in run("faces", "image", str(two))
+        assert "turned off for image" in run("faces", "show", str(two)) and "faces: not looked for in this image" in run("images", "show", str(two))
+        assert "faces are looked for in it again" in run("faces", "image", str(two), "on") and "no such image" in run("faces", "image", "99", "off")
         assert "only noticed when every face is kept" in run("faces", "often")
         assert "every face is kept" in run("faces", "learn", "often") and "She may ask, once" in run("faces", "ask", "on")
         assert "She is told who is in an image whenever" in run("faces", "unasked", "on")

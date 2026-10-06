@@ -510,6 +510,7 @@ hermes holonomic faces name 37 Kayla --me           # that face is you
 hermes holonomic faces name 66 Emma --face 2        # with several faces, say which
 hermes holonomic faces not 66 Emma                  # that face is not Emma
 hermes holonomic faces dream Emma no                # never in an image a dream is drawn from, nor named in one
+hermes holonomic faces image 42 off                 # look for no faces in this image (a street full of strangers)
 hermes holonomic faces people | often | scan | forget NAME | forget --all --yes
 hermes holonomic dreams images --who named --name-people me
 ```
@@ -519,7 +520,8 @@ too, within what `face_learn` allows; with several faces she needs to be told wh
 is left for `faces name`. What a person looks like is taken only from faces the user spoke for: a
 face she recognised herself is never an example. In `me` and `named` no fingerprint is kept of
 anyone else's face. Tightening `face_learn` drops what the new rule does not allow the next time
-images are gone through.
+images are gone through. `faces image ID off` sets one image apart: every face kept from it is dropped and
+none is looked for in it again, whatever the general rule.
 
 The helper server does the work and needs OpenCV for it, in the same Python:
 
