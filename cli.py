@@ -1093,8 +1093,10 @@ def _reflect(engine, cfg, args) -> None:
                       f"{', '.join('#' + str(s) for s in item['sources'])}")
             for who, text in (report.get("profiles") or {}).items():
                 print(f"  profile ({who}): {text or '(empty)'}")
+            for who, less in (report.get("profile_shortened") or {}).items():
+                print(f"  profile ({who}) came back too long and was said again {less} characters shorter.")
             for who, lost in (report.get("profile_cut") or {}).items():
-                print(f"  NOTE: the profile ({who}) came back too long and its last {lost} characters were cut. "
+                print(f"  NOTE: the profile ({who}) was still too long and its last {lost} characters were cut. "
                       f"Raise profile_max_chars if what was cut matters.")
             if not args.dry_run:
                 print(f"Stored {len(report['stored'])} new, reinforced {len(report['reinforced'])} existing, "

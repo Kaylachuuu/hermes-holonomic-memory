@@ -459,6 +459,12 @@ def test_a_name_one_letter_off_is_put_right(tmp_path):
     assert respell_names("Thep sleeps on the bed.", known, own="my friend Thep") == "Thep sleeps on the bed."   # her own word
     assert respell_names("Kaylee came to visit.", known) == "Kaylee came to visit."            # two letters off: someone else
     assert respell_names("Where does Kayla work?", "There it is. There you go. There now. Kayla") == "Where does Kayla work?"
+    # a real run: her name only ever opened a sentence, and 'They' is one letter from 'Theo'
+    facts = "Kayla works in IT. Kayla has a cat named Theo. Kayla owns a cat named Theo. Theo is a tabby. Kayla is a mother."
+    assert respell_names("Kaylar's memory system keeps everything.", facts) == "Kayla's memory system keeps everything."
+    assert respell_names("They are moving on. Then Theo slept. Them too.", facts) == "They are moving on. Then Theo slept. Them too."
+    assert respell_names("Thea came by.", facts, seen="my sister thea") == "Thea came by."
+    assert respell_names("Kaylar is here.", facts + " c:/users/kayla/documents") == "Kayla is here."      # a path does not unmake a name
     # a misspelling already among the facts does not protect itself, while the right name is far more common
     assert respell_names("Kaylar likes tea.", known + " Kayla" * 6 + " Kaylar") == "Kayla likes tea."
     m, ids = seeded(tmp_path)
@@ -492,5 +498,19 @@ def test_the_profile_is_written_from_everything_a_run_took_in(tmp_path):
     assert "(fact about the user) Kayla has a cat named Theo." in seen["profiles"]
     assert seen["profiles"].count("Kayla works in IT.") == 1 or seen["profiles"].count("(fact about the user) Kayla works in IT.") == 1
     assert {"kind": "fact", "text": "Kayla works in IT."} in report["accepted"]
+    assert "shorten" not in seen and m.profile("user") == "Kayla works in IT. She likes long walks by the lake very much."   # a repeat is said once
+    assert "profile_cut" not in report
+
+    def long(system, user, step):
+        if step == "shorten":
+            assert "it will be cut off after 171 words" in user and "walk number 59" in user
+            return json.dumps({"text": "Kayla works in IT and has two cats, Sushi and Theo."})
+        return answer(ids, user_profile="Kayla works in IT. " + " ".join(f"She likes walk number {i} by the lake." for i in range(60)))
+    report = reflect_once(m, {}, llm=long, start_after=0)
+    assert report["profile_shortened"]["user"] > 0 and m.profile("user") == "Kayla works in IT and has two cats, Sushi and Theo."
+
+    def stubborn(system, user, step):
+        return answer(ids, text="", user_profile="Kayla works in IT. " + " ".join(f"She likes walk number {i} by the lake." for i in range(60)))
+    report = reflect_once(m, {}, llm=stubborn, start_after=0)
     assert report["profile_cut"]["user"] > 0 and len(m.profile("user")) <= 1200 and m.profile("user").endswith(".")
     assert "Never leave out a person or an animal that has a name" in _PROFILES and "cut off and lost" in _PROFILES

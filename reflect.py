@@ -130,33 +130,75 @@ def _edits(a: str, b: str) -> int:
     return row[-1]
 
 
-def respell_names(text: str, known: str, own: str = "") -> str:
+# Ordinary words that open sentences with a capital.  One of them is never a name to correct towards, and never a
+# misspelling of one: "They" is one letter from "Theo".
+_ORDINARY = frozenset("""
+about above after again also although always among another anyone anything around away back because been before
+being below between both came come could does done down during each either else even ever every first from
+gave give goes gone good have having hello here hers herself himself however into itself just keep kept knew know
+last later less like look made make many maybe might mine more most much must near need never next none nothing
+once only onto other ours over perhaps said same seen shall should since some someone something soon still such
+sure take than thank thanks that their theirs them then there these they thing things this those though through
+thus told took toward under until upon very want well went were what when where whether which while whom whose
+will with within without would your yours yeah okay year years today tomorrow yesterday time times
+""".split())
+
+
+def respell_names(text: str, known: str, own: str = "", seen: str = "") -> str:
     """Put right a name that is one letter off from one that is well established.  A reflection wrote 'Kaylar'
     for 'Kayla' and repeated it through seven facts; the checker, shown the same misspelling in every statement,
     let it stand.
 
-    Only a capitalised word of four letters or more is touched, and only towards a word that occurs in `known`
-    (the user's lines, their profile, facts already held) at least three times, always with its capital.  A word
-    the user wrote themselves (`own`) is never touched, and neither is one that is itself common in `known`:
-    two names a letter apart can both be real."""
+    Only a capitalised word of four letters or more is touched, and only towards a capitalised word that occurs
+    in `known` (the user's lines, their profile, facts already held) at least three times and is not an ordinary
+    word.  A word the user wrote themselves (`own`) is never touched; neither is an ordinary word, one found
+    without its capital anywhere in what was read (`known`, `own`, `seen`), or one that is itself common in
+    `known`: two names a letter apart can both be real."""
     counts: Dict[str, int] = {}
     for w in re.findall(r"\b[A-Z][a-z]{3,}\b", known or ""):
         counts[w] = counts.get(w, 0) + 1
-    lower = set(re.findall(r"\b[a-z]+\b", known or ""))
-    # A name keeps its capital in the middle of a sentence; 'There' and 'These' have theirs only at the start.
-    inside = set(re.findall(r"(?<=[a-z,;:] )[A-Z][a-z]{3,}\b", known or ""))
-    names = [w for w, n in counts.items() if n >= 3 and w in inside and w.lower() not in lower]
+    lower: Dict[str, int] = {}
+    for w in re.findall(r"\b[a-z]+\b", " ".join([known or "", own or "", seen or ""])):
+        lower[w] = lower.get(w, 0) + 1
+    # A name is nearly always written with its capital; a path or an address in small letters does not unmake it.
+    names = [w for w, n in counts.items()
+             if n >= 3 and w.lower() not in _ORDINARY and n >= 4 * lower.get(w.lower(), 0)]
     if not names:
         return text
     mine = {w.lower() for w in re.findall(r"[A-Za-z]+", own or "")}
 
     def fix(m):
         word = m.group(0)
-        if word.lower() in mine or word.lower() in lower:
+        if word.lower() in mine or word.lower() in lower or word.lower() in _ORDINARY:
             return word
         near = [n for n in names if n != word and _edits(word, n) == 1 and counts[n] >= 4 * counts.get(word, 0)]
         return near[0] if len(near) == 1 else word
     return re.sub(r"\b[A-Z][a-z]{3,}\b", fix, text)
+
+
+def once_each(text: str) -> str:
+    """The same sentence said twice is said once.  A profile rewritten many times collects repeats."""
+    out, had = [], set()
+    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+        key = re.sub(r"[^a-z0-9]+", " ", sentence.lower()).strip()
+        if key and key in had:
+            continue
+        had.add(key)
+        out.append(sentence)
+    return " ".join(out).strip()
+
+
+_SHORTEN = """\
+This profile of {who} is too long: it will be cut off after {words} words and the rest lost. Rewrite it in at most \
+{words} words, in the same grammatical person. Keep who the person is and every person and animal that has a name. \
+Make room by saying technical detail more briefly, and by saying once what is said twice. Add nothing.
+
+PROFILE:
+{text}
+
+Reply as JSON with the one key "text"."""
+_SHORTEN_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+_WHO = {"user": "the user", "self": "an AI assistant, written by itself", "us": "an AI assistant and its user together"}
 
 
 def trim_to_sentence(text: str) -> str:
@@ -603,8 +645,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     known = " ".join([current["user"]] + [f["text"] for f in existing]
                      + [m["text"] for m in batch if m["kind"] != "said_assistant"])
     own = " ".join(m["text"] for m in batch if m["kind"] != "said_assistant")
+    seen = " ".join([m["text"] for m in batch] + list(current.values()))      # for telling a word from a name
     for item in superseded:
-        item["replacement"] = respell_names(item["replacement"], known, own)
+        item["replacement"] = respell_names(item["replacement"], known, own, seen)
     # ---- step 2: check each item against only the lines it cites
     if depth >= 3 and items:
         verdicts = _parse(call("check", _SYSTEM, build_check_prompt(items, by_id, known), _CHECK_SCHEMA, budget)).get("verdicts")
@@ -634,7 +677,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
             if fixed != item["text"]:
                 report["checked"].append({"verdict": "unquote", "kind": item["kind"], "was": item["text"], "now": fixed})
                 item = dict(item, text=fixed)
-        respelt = respell_names(item["text"], known, own)
+        respelt = respell_names(item["text"], known, own, seen)
         if respelt != item["text"]:
             report["checked"].append({"verdict": "respell", "kind": item["kind"], "was": item["text"], "now": respelt})
             item = dict(item, text=respelt)
@@ -654,7 +697,15 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
         wanted = {"user": "user_profile"} if depth <= 1 else {"user": "user_profile", "self": "self_profile",
                                                               "us": "relationship_profile"}
         for who, key in wanted.items():
-            whole = respell_names(" ".join(str(pdata.get(key) or "").split()), known, own)
+            whole = once_each(respell_names(" ".join(str(pdata.get(key) or "").split()), known, own, seen))
+            if len(whole) > limit:                   # asked to say it shorter, before anything is cut
+                words = max(40, limit // 7)
+                shorter = _parse(call("shorten", _SYSTEM, _SHORTEN.format(who=_WHO[who], words=words, text=whole),
+                                      _SHORTEN_SCHEMA, budget)).get("text")
+                shorter = once_each(respell_names(" ".join(str(shorter or "").split()), known, own, seen))
+                if 20 <= len(shorter) < len(whole):
+                    report.setdefault("profile_shortened", {})[who] = len(whole) - len(shorter)
+                    whole = shorter
             text = trim_to_sentence(whole[:limit])
             if len(whole) > limit:                   # said out loud: what was cut is not in the profile
                 report.setdefault("profile_cut", {})[who] = len(whole) - len(text)

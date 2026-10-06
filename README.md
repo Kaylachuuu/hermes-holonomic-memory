@@ -176,10 +176,11 @@ back. `--dry-run` shows what it would add.
 
 Two guards run on every reflection. A name one letter off from one that is well established (it wrote
 "Kaylar" for "Kayla" through a whole run once) is put right before the fact is stored, and the report says so;
-a word you wrote yourself is never touched. And the profiles are written from everything a run took in, not
-only its last pass. A profile is told to begin with the person's life (people and animals by name) and to
-shorten project detail to make room; if one still comes back longer than `profile_max_chars` (1200), the report
-says how much was cut.
+a word you wrote yourself is never touched, and neither is an ordinary word. And the profiles are written from
+everything a run took in, not only its last pass. A profile is told to begin with the person's life (people and
+animals by name); a sentence said twice is kept once; and one that comes back longer than `profile_max_chars`
+(1200) is sent back to be said shorter before anything is cut. If it is still too long, the report says how
+much was cut.
 
 ## Short-term and long-term memory, and sleep
 
