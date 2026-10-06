@@ -167,13 +167,52 @@ def _library_cmd(engine, cfg, args) -> None:
         lib.close_all(root)
 
 
+def _backup_cmd(args) -> None:
+    from hermes_constants import get_hermes_home
+    from . import __version__, backup as bk
+    from .provider import load_config
+    home = get_hermes_home()
+    cfg = load_config(home)
+    folder = bk.default_folder(dict(cfg, backup_dir=args.folder) if args.folder else cfg)
+    mb = lambda n: f"{n / 1_000_000:.1f} MB"
+    try:
+        if args.list:
+            have = bk.backups(folder)
+            print(f"Backups in {folder} (newest first):" if have else f"There are no backups in {folder}.")
+            for b in have:
+                print(f"  {b['name']}   {mb(b['bytes'])}")
+        elif args.holonomic_action == "backup":
+            keep = int(cfg.get("backup_keep", 10)) if args.keep is None else args.keep
+            done = bk.backup(home, folder, label=args.label or "", keep=keep, version=__version__)
+            print(f"Backup written: {done['file']}\n  {done['files']} files, {mb(done['bytes'])} (the store is {mb(done['store_bytes'])})")
+            for name in done["removed"]:
+                print(f"  removed old backup: {name}")
+            print("To put it back: hermes holonomic restore   (with Hermes closed)")
+        else:
+            file = bk.pick(folder, args.file or "")
+            info = bk.inspect(file)
+            if not args.yes:
+                print(f"This would put back: {file}\n  made {info['made_at'] or 'at an unknown time'}"
+                      + (f" by version {info['plugin_version']}" if info["plugin_version"] else "") + f", {info['files']} files"
+                      + f"\ninto: {home / 'holonomic'}\nWhat is there now would be set aside beside it, not deleted. "
+                        "Close Hermes first, then add --yes to do it.")
+                return
+            done = bk.restore(home, file)
+            print(f"Restored from {file.name} into {done['into']}")
+            if done["set_aside"]:
+                print(f"What was there before is kept at: {done['set_aside']}\nDelete that folder yourself once you are sure "
+                      "the restore is what you wanted.")
+    except bk.BackupError as exc:
+        print(exc)
+
+
 def holonomic_command(args) -> None:
     try:
         sys.stdout.reconfigure(errors="replace")       # Windows consoles choke on some characters
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
@@ -185,6 +224,9 @@ def holonomic_command(args) -> None:
         return
     if action == "reflect" and args.reflect_action in ("on", "off"):
         _reflect_toggle(args)
+        return
+    if action in ("backup", "restore"):          # before the store is opened: a restore has to be able to move it
+        _backup_cmd(args)
         return
     if action == "sleep" and args.sleep_action in ("on", "off"):
         from hermes_constants import get_hermes_home
@@ -1310,6 +1352,16 @@ def register_cli(subparser) -> None:
     lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")
     lb.add_argument("-n", type=int, default=6, help="With 'search': how many results")
     lb.add_argument("--width", type=int, default=300, help="Characters of text to show")
+    bkp = subs.add_parser("backup", help="Write the whole store (memories, images, libraries, settings) to one zip file")
+    bkp.add_argument("--to", dest="folder", help="Folder for backups (default: holonomic-backups in your Documents, or 'backup_dir')")
+    bkp.add_argument("--label", help="A word to add to the file name, e.g. before-update")
+    bkp.add_argument("--keep", type=int, help="How many backups to keep; older ones are removed (default 10; 0 keeps all)")
+    bkp.add_argument("--list", action="store_true", help="Show the backups there are")
+    rst = subs.add_parser("restore", help="Put the store back from a backup; what is there now is set aside, not deleted")
+    rst.add_argument("file", nargs="?", help="A backup's name or path (default: the newest)")
+    rst.add_argument("--from", dest="folder", help="Folder the backups are in")
+    rst.add_argument("--list", action="store_true", help="Show the backups there are")
+    rst.add_argument("--yes", action="store_true", help="Actually do it")
     td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
     td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")

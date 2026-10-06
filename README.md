@@ -635,6 +635,25 @@ hermes holonomic forget 52 --yes
 recalled memories, what was seen in an attached image, what was recognised. When she does not act on
 something, look there first to see whether she was told it.
 
+## Backing up and restoring
+
+    hermes holonomic backup                        write the whole store to one zip file
+    hermes holonomic backup --label before-update  with a word added to its name
+    hermes holonomic backup --list                 the backups there are
+    hermes holonomic restore                       show what the newest backup would put back
+    hermes holonomic restore --yes                 do it (with Hermes closed)
+    hermes holonomic restore NAME.zip --yes        a particular one
+
+A backup holds everything: memories, images, dream pictures, reference libraries and settings. It can be taken
+while Hermes is running: each database is copied through SQLite's own backup, which gives a consistent copy of
+a store that is being written to, and the copy is checked before the backup is kept. Backups go to
+`holonomic-backups` in your Documents (`--to FOLDER`, or the `backup_dir` setting); the ten newest are kept
+(`--keep N`, or `backup_keep`; 0 keeps them all).
+
+A restore needs Hermes closed. It does not delete what is there: the present store is set aside beside it as
+`holonomic.before-restore_<date>`, so a restore can itself be undone. Delete that folder yourself once you are
+sure. A file that is not one of these backups, or whose store is damaged, is refused and nothing is changed.
+
 ## Testing
 
 ```
