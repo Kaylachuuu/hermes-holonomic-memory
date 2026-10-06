@@ -46,8 +46,10 @@ _SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "ve
 _BINARY = {".exe", ".com", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj", ".lib", ".a", ".class", ".jar", ".pyc",
            ".zip", ".7z", ".rar", ".gz", ".tar", ".xz", ".bz2", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic",
            ".ico", ".tif", ".tiff", ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".avi", ".mov", ".ttf", ".otf",
-           ".woff", ".woff2", ".db", ".sqlite", ".npy", ".npz", ".pth", ".safetensors", ".onnx", ".doc", ".xls", ".ppt",
-           ".xlsx", ".pptx", ".epub", ".chm", ".lnk", ".ovl", ".ovr", ".dsk", ".ima", ".vhd", ".rom", ".tpu", ".scr", ".msi", ".cab"}
+           ".woff", ".woff2", ".db", ".sqlite", ".npy", ".npz", ".pth", ".safetensors", ".onnx", ".xls", ".ppt",
+           ".xlsx", ".pptx", ".epub", ".chm", ".lnk", ".ovl", ".ovr", ".dsk", ".ima", ".vhd", ".rom", ".tpu", ".msi", ".cab"}
+# Not on that list, on purpose: .doc and .scr.  A .DOC from the DOS years is plain text as often as not, and a .SCR
+# may be a script.  Their contents decide (a Word document or a screen saver is caught by what is in it).
 _MARKUP = {".html", ".htm", ".xhtml"}
 _HEADED = {".md", ".markdown", ".txt", ".rst", ".text", ""}
 
@@ -408,7 +410,7 @@ def pieces_of(text: str, name: str, size: int = 1100) -> List[Tuple[str, str]]:
         for routine, body in _routines(text, kind):
             out += [(routine, piece) for piece in _pack(body, max(200, size))]
         return out
-    headed = ext in _HEADED | _MARKUP | {".pdf", ".docx"}
+    headed = ext in _HEADED | _MARKUP | {".pdf", ".docx", ".doc"}
     for heading, body in _sections(text, headed):
         out += [(heading, piece) for piece in _pack(body, max(200, size))]
     return out

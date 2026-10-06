@@ -386,6 +386,9 @@ def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
     assert lib.looks_binary(bytes(rnd.choice(range(128, 256)) for _ in range(900)))           # one long run of bytes with no lines
     src = tmp_path / "os"; src.mkdir()
     (src / "COPYRIGH.T").write_bytes(box)
+    (src / "SPECS.DOC").write_text("V2OS memory proposal\r\n\r\nThe kernel keeps a bitmap of free pages.\r\n")       # a DOS .DOC is a text file
+    (src / "BOOT.SCR").write_text("load system16\r\nrun shell\r\n")                                             # and this .SCR a script
+    (src / "REPORT.DOC").write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(600))                             # a Word document is not
     (src / "PADDED.TXT").write_bytes(b"Notes on the loader.\r\nIt reads the kernel from the disk.\r\n\x1a" + bytes(90) + b"\xff\x00junk")
     (src / "BLOB.DAT").write_bytes(b"\x1a" + bytes(range(1, 255)) * 3)
     (src / "boot.asm").write_text("; boot sector\nstart:\n    mov si, msg\n    call print\n    jmp $\n")
@@ -396,10 +399,11 @@ def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):
     lib.create(root, "my-os", str(src))
     try:
         report = lib.build(root, "my-os", HashEmbedder(), CFG)
-        assert report["added"] == 4 and {s["file"]: s["why"] for s in report["skipped"]} == {"BLOB.DAT": "not a text file", "CHOICE.COM": "not a text file", "SHELL.EXE": "not a text file"}
-        assert sorted(lib.info(root, "my-os")["files"]) == ["CONFIG.SYS", "COPYRIGH.T", "PADDED.TXT", "boot.asm"]
+        assert report["added"] == 6 and {s["file"]: s["why"] for s in report["skipped"]} == {
+            "BLOB.DAT": "not a text file", "CHOICE.COM": "not a text file", "REPORT.DOC": "not a text file", "SHELL.EXE": "not a text file"}
+        assert sorted(lib.info(root, "my-os")["files"]) == ["BOOT.SCR", "CONFIG.SYS", "COPYRIGH.T", "PADDED.TXT", "SPECS.DOC", "boot.asm"]
         assert "junk" not in lib.read_file(src / "PADDED.TXT", 10**7) and lib.read_file(src / "PADDED.TXT", 10**7).endswith("disk.\r\n")
-        assert [g["file"] for g in lib.info(root, "my-os")["left_out"]] == ["BLOB.DAT", "CHOICE.COM", "SHELL.EXE"]       # kept for looking at later
+        assert [g["file"] for g in lib.info(root, "my-os")["left_out"]] == ["BLOB.DAT", "CHOICE.COM", "REPORT.DOC", "SHELL.EXE"]       # kept for looking at later
         assert "\u2551  VERSA  Copyright" in lib.search(root, ["my-os"], "VERSA copyright Kayla", HashEmbedder(), CFG, floor=0.05)[0]["text"]
     finally:
         lib.close_all(root)
