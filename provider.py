@@ -543,7 +543,8 @@ class HolonomicMemoryProvider(MemoryProvider):
         trace: List[str] = []
         about_image = [b for b in (self._seen_before_block(engine, query, seen, faces), self._may_show_block(engine, query, seen, faces),
                                    self._unseen_block(engine, query, sid, seen, faces)) if b]
-        known = self._known_block(engine, seen, trace)
+        known = self._known_block(engine, seen, trace) or self._unknown_block(engine, faces, trace)
+        stated = bool(seen) and bool(known)
         who = self._people_block(engine, faces, words, trace)
         if who:
             known = "\n\n".join(b for b in (known, who) if b)
@@ -552,7 +553,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         trace.insert(0, "recognised in the attached image: " + (", ".join(
             f"{n['name']} ({'seen' if n['sure'] else 'a likeness'}{'; matched by look but not recorded with the image' if n.get('unrecorded') else ''})"
             for n in seen.values()) or "nothing"))
-        trace.insert(1, "a statement that she recognises it was " + ("given" if known else "NOT given"))
+        trace.insert(1, "a statement that she recognises it was " + ("given" if stated else "NOT given" if seen else "not called for"))
         if seen:
             named = " ".join(f"{n['name']} {n['what']}".strip() for n in seen.values())
             words = named if is_trivial_prompt(words) else f"{words} {named}"
@@ -636,6 +637,29 @@ class HolonomicMemoryProvider(MemoryProvider):
             logger.debug("holonomic: checking for a known image failed: %s", exc)
         return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
                 + "\n".join(out)) if out else ""
+
+    def _unknown_block(self, engine, faces: dict, trace: List[str]) -> str:
+        """A new image in which nothing she knows by name was recognised.  Said outright, because otherwise what
+        she remembers fills the gap: shown the user holding one cat, and remembering that the user has a cat
+        called Sushi, she called the cat Sushi.  It was the other one."""
+        if not faces.get("new"):
+            return ""
+        from . import fingerprints as _fp
+        try:
+            if not _fp.names_on(self._cfg):
+                return ""
+            every = _fp.names(engine)
+        except Exception:
+            return ""
+        if not every:
+            return ""
+        listed = "; ".join(k["name"] + (f" ({k['what']})" if k["what"] else "") for k in every[:8])
+        trace.append("she was told that nothing in the image was recognised as something she knows by name")
+        return ("## Nothing in the attached image was recognised as something you know by name\n"
+                f"You know these by name: {listed}. None of them was recognised in this image by its look. Do not take an animal or "
+                "thing in it for one of them because you remember that one. If what you see plainly fits one of those descriptions "
+                "and not the others, you may say it looks like that one, as a guess you would be glad to have corrected. Otherwise "
+                "say what you see, and ask which it is if you want to know.")
 
     def _note_people(self, engine, faces: Optional[dict], *, image_id: Optional[int] = None, data: Optional[bytes] = None) -> None:
         """Note, for this message, whose faces are in the attached image: a kept image by its id, one that has
@@ -726,9 +750,9 @@ class HolonomicMemoryProvider(MemoryProvider):
             if not k:
                 continue
             n["what"] = k["what"]
-            seen = len(k["examples"]) + len(k["recognised"])
+            times = len(k["examples"]) + len(k["recognised"])
             (sure if n["sure"] else likely).append(
-                f"{k['name']}" + (f", {k['what']}" if k["what"] else "") + f" (you have been shown {k['name']} in {seen} image(s) before)")
+                f"{k['name']}" + (f", {k['what']}" if k["what"] else "") + f" (you have been shown {k['name']} in {times} image(s) before)")
         if not sure and not likely:
             return ""
         # The name leads, as a plain statement.  Given a description of the thing with its name in brackets and
@@ -764,6 +788,8 @@ class HolonomicMemoryProvider(MemoryProvider):
             for data, where in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
                 if where in as_files or _images.known(engine, data):     # looked at for her below, or one she has seen
                     continue
+                if faces is not None:
+                    faces["new"] = True
                 self._note_people(engine, faces, data=data)
                 for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
                     self._note_names(seen, [{"name": m["shown"]}], sure=False)
@@ -789,6 +815,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                     continue                             # the seen-before block covers it
                 img = _images.add_image(engine, data, self._cfg, origin=path, caption=caption, session=sid)
                 self._looked_at.add(img["id"])
+                if faces is not None:
+                    faces["new"] = True
                 try:
                     img = _images.describe(engine, self._cfg, img["id"], key_fn=extract_keys) or img
                 except Exception as exc:

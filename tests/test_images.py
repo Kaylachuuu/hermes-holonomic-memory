@@ -1795,12 +1795,18 @@ def test_she_is_told_what_an_arriving_image_may_show_before_she_answers(tmp_path
         said = p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {shot}]", session_id="s1")
         assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in said and "## The attached image looks like Sushi" in said
         assert "Sushi is Kayla's cat" not in p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {other}]", session_id="s1")
-        assert "looks like" not in p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")    # nothing like it
+        said = p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")                    # nothing like it
+        assert "## The attached image" not in said and "## Nothing in the attached image was recognised as something you know by name" in said
+        assert "You know these by name: Sushi (a red cat). None of them was recognised" in said and "Do not take an animal or thing" in said
+        kept = (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
+        assert "recognised in the attached image: nothing\na statement that she recognises it was not called for" in kept
+        assert "she was told that nothing in the image was recognised" in kept
         again = p.prefetch(f"[1 image] this one again\n\n[Image attached at: {same}]", session_id="s1")                # the very image she has
-        assert "An image you have seen before" in again and "looks like" not in again
+        assert "An image you have seen before" in again and "looks like" not in again and "Nothing in the attached image" not in again
         assert "## The attached image shows Sushi" in again and "This is Sushi: you recognise it by sight." in again and "Sushi is Kayla's cat" in again
         p._cfg["image_names"] = False
-        assert "looks like" not in p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
+        off = p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
+        assert "looks like" not in off and "Nothing in the attached image" not in off                # names off: nothing is said either way
     finally:
         p.shutdown(); server.shutdown()
 
