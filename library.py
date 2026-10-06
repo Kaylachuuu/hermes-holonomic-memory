@@ -360,19 +360,53 @@ _COMMENT = {"asm": ";", "pascal": "{", "basic": "'", "python": "#", "c": "/"}
 _BANNER = re.compile(r"^\s*[;'#/*{(]+\s*[-=*_~]{2,}\s*(?:PROCEDURE|PROC|FUNCTION|ROUTINE|CMD|SUB|MACRO)?\s*([A-Za-z_][\w ]{1,40}?)\s*[-=*_~]{2,}", re.IGNORECASE)
 
 
+_DEAD = "commented-out code"
+
+
 def _routines(text: str, kind: str, least: int = 350) -> List[Tuple[str, str]]:
     """(routine name, its lines) for a source file.  A routine starts at its name; comments standing just above the
     name go with it.  A run of short routines or data labels is kept together until it is `least` characters long,
-    so that a table of one-line labels does not become a hundred pieces."""
+    so that a table of one-line labels does not become a hundred pieces.
+
+    Two things that follow a routine are not part of it and are named for what they are: a Pascal program's own
+    'begin' at the margin, and a stretch of assembly that has been commented out."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     start, mark = _ROUTINE[kind], _COMMENT[kind]
     out: List[Tuple[str, List[str]]] = [("", [])]
+    dead = 0                                            # how many lines in a row are code that has been commented out
     for i, line in enumerate(lines):
+        if kind == "asm":
+            stripped = line.lstrip()
+            if stripped.startswith(";") and _MNEMONIC.match(stripped.lstrip("; \t")):
+                dead += 1
+            elif stripped and not stripped.startswith(";"):
+                dead = 0
+            if dead == 6 and out[-1][0] != _DEAD:
+                body = out[-1][1]
+                run: List[str] = []
+                seen = 0
+                while body and seen < 5 and (not body[-1].strip() or body[-1].lstrip().startswith(";")):
+                    seen += 1 if _MNEMONIC.match(body[-1].lstrip().lstrip("; \t")) else 0
+                    run.insert(0, body.pop())
+                while body and body[-1].lstrip().startswith(";"):          # the comment that introduces the stretch
+                    run.insert(0, body.pop())
+                if "".join(body).strip():
+                    out.append((_DEAD, run + [line]))
+                    continue
+                body.extend(run)
+        if kind == "pascal" and re.match(r"^begin\b", line, re.IGNORECASE) and out[-1][0] and "".join(out[-1][1]).strip():
+            closing = next((ln for ln in lines[i + 1:] if re.match(r"^end\b", ln, re.IGNORECASE)), "")
+            if re.match(r"^end\s*\.", closing, re.IGNORECASE):          # 'end.' closes the program itself, 'end;' a routine
+                out.append(("main program", [line]))
+                continue
         m = start.match(line) if not (kind == "c" and line.lstrip().startswith(("if", "for", "while", "switch", "else", "return"))) else None
-        if m and sum(len(x) + 1 for x in out[-1][1]) >= least:
+        if m and (sum(len(x) + 1 for x in out[-1][1]) >= least or out[-1][0] == _DEAD):
+            dead = 0
             body = out[-1][1]
             carried: List[str] = []
             while body and (not body[-1].strip() or body[-1].lstrip().startswith(mark)):      # the comments above it are its own
+                if kind == "asm" and out[-1][0] == _DEAD and _MNEMONIC.match(body[-1].lstrip().lstrip("; \t")):
+                    break                                 # but not code that was commented out before it
                 carried.insert(0, body.pop())
             if not "".join(body).strip():                 # nothing but those comments came before: no cut after all
                 body.extend(carried)

@@ -104,9 +104,10 @@ def _library_cmd(engine, cfg, args) -> None:
                 return
             for n in have:
                 s = lib.summary(root, n)
-                print(f"{n}: {s['pieces']} pieces from {s['files']} files, built {s['built']}\n    from {s['folder']}"
-                      + (f"\n    {s['about']}" if s["about"] else ""))
-            print("A library is used only in a conversation where it has been opened: ask her to open it.")
+                print(f"{n}: {s['pieces']} piece{'s' if s['pieces'] != 1 else ''} from {s['files']} file{'s' if s['files'] != 1 else ''}, "
+                      f"built {s['built']}\n    from {s['folder']}" + (f"\n    {s['about']}" if s["about"] else ""))
+            print("A library feeds a conversation only once you have asked her to open it there. Without that, she may "
+                  "still look a single answer up in one.")
         elif what == "create":
             if len(items) != 2:
                 print('Usage: hermes holonomic library create NAME "FOLDER" [--about "what it is for"]')

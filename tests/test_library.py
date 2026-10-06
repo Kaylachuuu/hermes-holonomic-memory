@@ -468,6 +468,20 @@ def test_source_is_cut_at_its_routines_and_named_for_them(tmp_path):
     c = "#include <stdio.h>\n" + "int x;\n" * 60 + "\nint main(int argc, char **argv)\n{\n" + "    if (x) {\n        x++;\n    }\n" * 12 + "}\n\nstatic void load_boot(void)\n{\n" + "    x--;\n" * 60 + "}\n"
     assert [h for h, _ in lib.pieces_of(c, "BOOTMGR.C")] == ["", "main", "load_boot"]
     assert lib.pieces_of("; just a comment\n", "X.INC") == [("", "; just a comment")]
+    # What follows a routine is not always part of it: a stretch of commented-out code, a Pascal program's own body.
+    dead = ASM.replace(";----PROCEDURE ReadSectors", ";Read root directory into memory (7C00:0200)\n"
+                       + "".join(f";        Mov   BX, 0x020{i}          ;old way {i}\n;        Call  ReadSectors\n" for i in range(8))
+                       + "\n;----PROCEDURE ReadSectors")
+    cut = lib.pieces_of(dead, "VERSALDR.ASM", 1100)
+    assert [h for h, _ in cut] == ["Start", "Load_FAT", "DisplayMessage", "commented-out code", "ReadSectors"]
+    by = dict(cut)
+    assert by["commented-out code"].startswith(";Read root directory into memory") and "old way 7" in by["commented-out code"]
+    assert "old way" not in by["DisplayMessage"] and by["ReadSectors"].startswith(";----PROCEDURE ReadSectors")
+    assert "commented-out code" not in [h for h, _ in lib.pieces_of(ASM, "BOOT.ASM")]             # an ordinary comment is not dead code
+    prog = "program boothdd;\n" + "var a: integer;\n" * 30 + "function upstr(s: string): string;\nbegin\n" + "  upstr := s;\n" * 30 + "end;\n\nbegin\n" + "  writeln('Reading original boot sector...');\n" * 12 + "end.\n"
+    cut = lib.pieces_of(prog, "BOOTHDD.PAS")
+    assert [h for h, _ in cut] == ["", "upstr", "main program"] and "Reading original boot sector" in dict(cut)["main program"]
+    assert "Reading original" not in dict(cut)["upstr"]
     # in a library: found by the routine's name, and cited by it
     src = tmp_path / "os"; (src / "OLD").mkdir(parents=True)
     (src / "BOOT.ASM").write_text(ASM)
