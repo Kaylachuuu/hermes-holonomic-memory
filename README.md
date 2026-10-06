@@ -459,6 +459,12 @@ hermes holonomic images names                    # what she knows by name, and w
 hermes holonomic images names forget Sushi
 ```
 
+An image that has only just arrived with a message is checked the same way before she answers, and
+she is told what it may show. Otherwise she has only the conversation to go by: shown Theo and then a
+second cat, she called the second one Theo. An example with a person in it is left out whenever the
+thing has an example without one, because a photo of a cat lying on its owner is mostly a picture of
+the owner.
+
 The agent does the same through the `images` action (`image_id`, `name`, `what`; `wrong` to take a
 name back). An image she recognised a thing in by herself is never used as an example of it, so one
 mistake cannot grow into many; only images the user named are. People are not named this way: a

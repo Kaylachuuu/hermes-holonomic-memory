@@ -301,11 +301,29 @@ def _vectors(engine, image_id: int, model: str) -> List[tuple]:
     return ([("whole", _unpack(row["vec"]))] + [(p["place"], _unpack(p["vec"])) for p in parts]) if row else []
 
 
+_PERSON_RE = None
+
+
+def _has_person(text: str) -> bool:
+    """Whether what is written about a part speaks of a person in it."""
+    global _PERSON_RE
+    if _PERSON_RE is None:
+        from .images import _PEOPLE_WORDS
+        words = sorted(set(_PEOPLE_WORDS) | {"hair", "face", "glasses", "hand", "hands", "arm", "arms", "shirt", "necklace", "she", "he", "her", "his"})
+        _PERSON_RE = re.compile(r"(?<!\w)(" + "|".join(re.escape(w) for w in words) + r")(?!\w)", re.I)
+    return _PERSON_RE.search(text or "") is not None
+
+
 def _examples(engine, key: str, shown: str, model: str, exclude: int) -> list:
-    """The fingerprints that say what a named thing looks like."""
+    """The fingerprints that say what a named thing looks like.
+
+    An example with a person in it is left out whenever there is one without.  A photo of a cat lying on its
+    owner is mostly a picture of the owner: used as an example of the cat, it matched a later photo of the
+    same woman holding a different cat almost well enough to offer the wrong cat's name."""
+    from .images import has_people
     with engine._lock:
         ids = [r["image_id"] for r in _ndb(engine).execute("SELECT image_id FROM image_name_marks WHERE name = ? AND state = 'example'", (key,))]
-    out = []
+    clean, mixed = [], []
     for image_id in ids:
         if int(image_id) == int(exclude):
             continue
@@ -313,8 +331,32 @@ def _examples(engine, key: str, shown: str, model: str, exclude: int) -> list:
         if not vectors:
             continue
         _, parts = _texts(engine, image_id)
-        told = [v for place, v in vectors[1:] if _mentions(shown, parts.get(place, ""))]
-        out += told or [vectors[0][1]]
+        told = [(v, parts[place]) for place, v in vectors[1:] if _mentions(shown, parts.get(place, ""))]
+        if told:
+            for v, text in told:
+                (mixed if _has_person(text.replace(shown, " ")) else clean).append(v)
+        else:
+            (mixed if has_people(engine, image_id) else clean).append(vectors[0][1])
+    return clean or mixed
+
+
+def _match(engine, cfg: Dict[str, Any], mine: List[tuple], model: str, exclude: int, told_not: set) -> Dict[str, dict]:
+    import numpy as np
+    with engine._lock:
+        known = _ndb(engine).execute("SELECT name, shown, what FROM image_names").fetchall()
+    if not known or not mine:
+        return {}
+    A, floor, out = np.stack([v for _, v in mine]), float(fingerprint_config(cfg)["image_name_min"]), {}
+    for k in known:
+        if k["name"] in told_not:
+            continue
+        examples = _examples(engine, k["name"], k["shown"], model, exclude)
+        if not examples:
+            continue
+        best = (A @ np.stack(examples).T).max(axis=1)
+        places = {mine[i][0]: round(float(b), 3) for i, b in enumerate(best) if b >= floor}
+        if places:
+            out[k["name"]] = {"shown": k["shown"], "what": k["what"], "alike": max(places.values()), "places": places}
     return out
 
 
@@ -322,16 +364,14 @@ def recognise(engine, cfg: Dict[str, Any], image_id: int, *, embed: Optional[Cal
     """Named things this image may show, going by its look alone:
     {key: {"shown", "what", "alike", "places": {place: alike}}}.  Makes the image's fingerprint first if it
     has none.  Empty when names are off, the helper cannot be reached, or nothing is alike enough."""
-    import numpy as np
     from .images import _row
     if not names_on(cfg):
         return {}
     with engine._lock:
         db = _ndb(engine)
-        known = db.execute("SELECT name, shown, what FROM image_names").fetchall()
+        if db.execute("SELECT 1 FROM image_names LIMIT 1").fetchone() is None:
+            return {}
         told_not = {r["name"] for r in db.execute("SELECT name FROM image_name_marks WHERE image_id = ? AND state = 'not'", (int(image_id),))}
-    if not known:
-        return {}
     row = _row(engine, image_id)
     if row is None or row["forgotten"]:
         return {}
@@ -341,21 +381,32 @@ def recognise(engine, cfg: Dict[str, Any], image_id: int, *, embed: Optional[Cal
         row = _row(engine, image_id)
         if row["vec"] is None:
             return {}
-    mine = _vectors(engine, image_id, row["vec_model"])
-    if not mine:
+    return _match(engine, cfg, _vectors(engine, image_id, row["vec_model"]), row["vec_model"], int(image_id), told_not)
+
+
+def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, embed: Optional[Callable[..., Any]] = None,
+                      timeout: float = 10.0) -> Dict[str, dict]:
+    """The same for a picture she has not been given to keep yet: one that has just arrived with a message, so
+    that she can know what it may show before she answers.  Nothing is stored.  The wait for the helper is
+    kept short, since a reply is being held up; any failure gives nothing."""
+    import numpy as np
+    from . import images as _images
+    if not names_on(cfg):
         return {}
-    A, floor, out = np.stack([v for _, v in mine]), float(fingerprint_config(cfg)["image_name_min"]), {}
-    for k in known:
-        if k["name"] in told_not:
-            continue
-        examples = _examples(engine, k["name"], k["shown"], row["vec_model"], int(image_id))
-        if not examples:
-            continue
-        best = (A @ np.stack(examples).T).max(axis=1)
-        places = {mine[i][0]: round(float(b), 3) for i, b in enumerate(best) if b >= floor}
-        if places:
-            out[k["name"]] = {"shown": k["shown"], "what": k["what"], "alike": max(places.values()), "places": places}
-    return out
+    with engine._lock:
+        if _ndb(engine).execute("SELECT 1 FROM image_names LIMIT 1").fetchone() is None:
+            return {}
+    try:
+        ic, side = _images.image_config(cfg), int(fingerprint_config(cfg)["image_fingerprint_side"])
+        img, _ = _images.open_image(data)
+        grid = _images.section_grid(ic["image_grid"]) if ic["image_sections"] and max(img.size) >= int(ic["image_section_min_side"]) else []
+        pictures = [_images._jpeg(img, (side, side))] + [_images._crop(img, x, y, w, h, side) for _, x, y, w, h, _ in grid]
+        model, vectors = (embed or make_embedder(dict(cfg, image_fingerprint_timeout=timeout)))(pictures)
+    except Exception as exc:
+        logger.debug("holonomic: an arriving picture was not checked for named things: %s", exc)
+        return {}
+    mine = [(place, _unpack(_pack(v))) for place, v in zip(["whole"] + [g[5] for g in grid], vectors)]
+    return _match(engine, cfg, mine, model, -1, set())
 
 
 def known_note(matches: Dict[str, dict], place: Optional[str] = None) -> str:

@@ -545,7 +545,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             lines.append(line)
             shown += [hit.id] + [p.id for p in parts]
             used += len(line) + 1
-        extra = [b for b in (self._seen_before_block(engine, query), self._unseen_block(engine, query, sid),
+        extra = [b for b in (self._seen_before_block(engine, query), self._may_show_block(engine, query), self._unseen_block(engine, query, sid),
                              self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
         if not lines:
             return "\n\n".join(extra)
@@ -591,6 +591,30 @@ class HolonomicMemoryProvider(MemoryProvider):
             logger.debug("holonomic: checking for a known image failed: %s", exc)
         return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
                 + "\n".join(out)) if out else ""
+
+    def _may_show_block(self, engine, query: str) -> str:
+        """A new image has arrived.  If part of it looks like something she knows by name, tell her before she
+        answers: otherwise she can only go by the conversation, and after one photo of Theo the next cat is Theo."""
+        if not self._cfg.get("image_enabled"):
+            return ""
+        from . import fingerprints as _fp
+        if not _fp.names_on(self._cfg):
+            return ""
+        out = []
+        try:
+            for data, _ in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
+                if _images.known(engine, data):          # one she has seen: what it shows is already in front of her
+                    continue
+                for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
+                    line = f"- {m['shown']}" + (f" ({m['what']})" if m["what"] else "")
+                    if line not in out:
+                        out.append(line)
+        except Exception as exc:
+            logger.debug("holonomic: checking an arriving image for named things failed: %s", exc)
+        return ("## What the attached image may show (going by its look alone)\n"
+                "Part of it looks like something you have been shown before and know by name. Check this against what you "
+                "see: if it fits, you recognise it and can say so; if it does not fit, say nothing of it. Do not take a name "
+                "from earlier in the conversation in its place.\n" + "\n".join(out)) if out else ""
 
     def _unseen_block(self, engine, query: str, sid: str) -> str:
         """A picture attached as a plain file (the desktop app does this with a phone's HEIC photos) is never

@@ -1735,3 +1735,59 @@ def test_a_named_thing_is_recognised_by_its_look(tmp_path):
         assert fp.forget_name(m, "SUSHI") and not fp.forget_name(m, "Sushi") and fp.names(m) == [] and images.get_image(m, a)["named"] == []
     finally:
         server.shutdown()
+
+
+def test_an_example_with_a_person_in_it_is_left_out_when_there_is_one_without(tmp_path):
+    """Theo lying on his owner is mostly a picture of his owner.  With a photo of Theo alone to go by, that one is
+    not used, so a later photo of the same owner with another cat is not taken for Theo."""
+    from holonomic import images, fingerprints as fp
+    assert fp._has_person("The woman's blonde hair and glasses.") and fp._has_person("A hand resting on the cat.")
+    assert not fp._has_person("A tabby cat in a harness on a rug.") and not fp._has_person("The cathedral's arch.")
+    m = store(tmp_path)
+    cfg = dict(CFG, image_fingerprints=True)
+    yellow, purple, blue = (230, 210, 30), (150, 30, 200), (30, 40, 220)
+    alone = images.add_image(m, flat(yellow), CFG, origin="theo-alone.png")["id"]
+    held = images.add_image(m, flat(purple), CFG, origin="theo-on-kayla.png")["id"]
+    later = images.add_image(m, flat((160, 40, 190)), CFG, origin="kayla-with-another-cat.png")["id"]
+    images.set_people(m, held, True)
+    fp.fingerprint(m, cfg, embed=colour_prints)
+    fp.name_thing(m, cfg, held, "Theo", what="a yellow cat", redo=False)
+    assert "theo" in fp.recognise(m, cfg, later)                      # the only example is the one with her in it: it has to serve
+    fp.name_thing(m, cfg, alone, "Theo", redo=False)
+    assert fp.recognise(m, cfg, later) == {} and fp.names(m)[0]["examples"] == [alone, held]
+    # a picture that has only just arrived, not kept: checked the same way, and nothing is stored
+    before = images.count_images(m)
+    got = fp.recognise_picture(m, cfg, two_tone(blue, yellow), embed=colour_prints)
+    assert got["theo"]["shown"] == "Theo" and "middle right" in got["theo"]["places"] and "middle left" not in got["theo"]["places"]
+    assert fp.recognise_picture(m, cfg, flat(blue), embed=colour_prints) == {} and images.count_images(m) == before
+    assert fp.recognise_picture(m, cfg, b"not a picture", embed=colour_prints) == {}
+    assert fp.recognise_picture(m, dict(cfg, image_fingerprint_host="http://127.0.0.1:9"), flat(yellow), timeout=1) == {}       # helper not running
+
+
+def test_she_is_told_what_an_arriving_image_may_show_before_she_answers(tmp_path):
+    if not HAVE_HERMES: return
+    import importlib.util, threading
+    from holonomic import images, fingerprints as fp
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    server = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    p = make(tmp_path)
+    p._cfg.update(CFG, image_fingerprints=True, image_fingerprint_host=f"http://127.0.0.1:{server.server_port}")
+    e = p._engine
+    try:
+        sushi = images.add_image(e, flat((220, 30, 30)), CFG, origin="sushi.png")["id"]
+        fp.fingerprint(e, p._cfg)
+        fp.name_thing(e, p._cfg, sushi, "Sushi", what="a red cat", redo=False)
+        shot, other, same = tmp_path / "new.png", tmp_path / "other.png", tmp_path / "same.png"
+        shot.write_bytes(two_tone((30, 40, 220), (215, 35, 30))); other.write_bytes(flat((30, 200, 40))); same.write_bytes(flat((220, 30, 30)))
+        said = p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
+        assert "## What the attached image may show (going by its look alone)" in said and "- Sushi (a red cat)" in said
+        assert "Do not take a name from earlier in the conversation in its place." in said
+        assert "may show" not in p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")      # nothing like it
+        again = p.prefetch(f"[1 image] this one again\n\n[Image attached at: {same}]", session_id="s1")                # the very image she has
+        assert "An image you have seen before" in again and "may show" not in again
+        p._cfg["image_names"] = False
+        assert "may show" not in p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
+    finally:
+        p.shutdown(); server.shutdown()
