@@ -436,7 +436,7 @@ def note_recognised(engine, image_id: int, matches: Dict[str, dict], text: str) 
     return used
 
 
-def name_thing(engine, cfg: Dict[str, Any], image_id: int, name: str, *, what: str = "", kind: str = "", redo: bool = True,
+def name_thing(engine, cfg: Dict[str, Any], image_id: int, name: str, *, what: str = "", kind: str = "", redo: bool = True, keep_what: bool = False,
                see: Optional[Callable[..., str]] = None, key_fn: Optional[Callable[[str], List[str]]] = None) -> dict:
     """The user says this image shows a particular thing with this name.  The image becomes an example of what
     the thing looks like.  If what is written about the image does not use the name yet, it is looked at again
@@ -456,7 +456,8 @@ def name_thing(engine, cfg: Dict[str, Any], image_id: int, name: str, *, what: s
         had = db.execute("SELECT what, kind FROM image_names WHERE name = ?", (key,)).fetchone()
         db.execute("INSERT INTO image_names (name, shown, what, kind, created_at) VALUES (?, ?, ?, ?, ?) "
                    "ON CONFLICT(name) DO UPDATE SET what = excluded.what, kind = excluded.kind",
-                   (key, shown, what or (had["what"] if had else ""), kind if kind in KINDS else (had["kind"] if had else ""), time.time()))
+                   (key, shown, (had["what"] if had and had["what"] and (keep_what or not what) else what),
+                    kind if kind in KINDS else (had["kind"] if had else ""), time.time()))
         db.execute("INSERT INTO image_name_marks (name, image_id, state, alike, created_at) VALUES (?, ?, 'example', NULL, ?) "
                    "ON CONFLICT(name, image_id) DO UPDATE SET state = 'example'", (key, int(image_id), time.time()))
         db.execute("INSERT OR IGNORE INTO image_labels (image_id, label, section) VALUES (?, ?, -1)", (int(image_id), key))
@@ -530,7 +531,8 @@ def learn_from_caption(engine, cfg: Dict[str, Any], image_id: int, see: Callable
         if len(name) < 2 or not _mentions(name, row["caption"]):          # only a name that was really said
             continue
         try:
-            learned.append(name_thing(engine, cfg, image_id, name, what=str(item.get("what") or ""), kind=item["kind"], redo=False))
+            learned.append(name_thing(engine, cfg, image_id, name, what=str(item.get("what") or ""), kind=item["kind"], redo=False,
+                                      keep_what=True))      # her own wording never replaces what the user said the thing is
         except NameRefused:
             pass
     return learned

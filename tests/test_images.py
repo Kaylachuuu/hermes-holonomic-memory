@@ -1718,6 +1718,10 @@ def test_a_named_thing_is_recognised_by_its_look(tmp_path):
         assert done["looked_again"] and done["what"] == "a red cat" and fp.names(m)[0]["examples"] == [a, c]
         assert "Sushi" in images.get_image(m, c)["description"] and [i["id"] for i in images.find_by_label(m, "sushi")] == [c, a]
         assert fp.name_thing(m, cfg, a, "Sushi", see=see)["looked_again"] is False                # already says so
+        # what the user says a thing is replaces the earlier wording; what she works out for herself later does not
+        assert fp.name_thing(m, cfg, a, "Sushi", what="a tuxedo cat", see=see)["what"] == "a tuxedo cat"
+        assert fp.name_thing(m, cfg, a, "Sushi", what="a red cat", keep_what=True, see=see)["what"] == "a tuxedo cat"
+        assert fp.name_thing(m, cfg, a, "Sushi", what="a red cat", see=see)["what"] == "a red cat"
         # people are not named this way, by her or by the user
         e = images.add_image(m, flat(green), CFG, caption="This is Kayla.")["id"]
         images.process(m, cfg, see=see)
