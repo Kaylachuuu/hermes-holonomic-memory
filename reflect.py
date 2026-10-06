@@ -488,8 +488,12 @@ def _wrap_test_llm(llm: Callable[..., str]) -> Callable[[str, str, str, dict, in
 
 def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None,
                  dry_run: bool = False, key_fn: Optional[Callable[[str], List[str]]] = None,
-                 foundation: str = "") -> Dict[str, Any]:
-    """One reflection pass.  Returns a report; stores nothing when dry_run is set."""
+                 foundation: str = "", start_after: Optional[int] = None) -> Dict[str, Any]:
+    """One reflection pass.  Returns a report; stores nothing when dry_run is set.
+
+    Normally it reads what is new since the last pass.  `start_after` makes it read from just after that memory
+    instead, to go over conversation it has read before: a pass can miss something (it wrote down one of two
+    cats).  Going over old ground never moves the mark for what is new backwards."""
     rc = reflect_config(cfg)
     depth = rc["reflect_depth"]
     report: Dict[str, Any] = {"read": 0, "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run,
@@ -501,11 +505,13 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     else:
         call = _wrap_test_llm(llm)
     budget = int(rc["reflect_max_tokens"])
-    last = int(engine.kv_get(WATERMARK, "0") or 0)
+    mark = int(engine.kv_get(WATERMARK, "0") or 0)
+    last = mark if start_after is None else int(start_after)
     batch = engine.memories_after(last, int(rc["reflect_batch"]), exclude_kinds=DERIVED_KINDS + IMAGE_KINDS)
     report["read"] = len(batch)
     if not batch:
         return report
+    report["last_id"] = batch[-1]["id"]
     by_id = {m["id"]: m for m in batch}
     valid = set(by_id)
     current = {who: engine.profile(who) for who in SUBJECTS}
@@ -619,7 +625,7 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
         if text != current[who]:
             engine.set_profile(who, text)
             report["profiles_updated"].append(who)
-    engine.kv_set(WATERMARK, str(batch[-1]["id"]))
+    engine.kv_set(WATERMARK, str(max(mark, batch[-1]["id"])))
     engine.kv_set("reflect:last_run", str(time.time()))
     return report
 

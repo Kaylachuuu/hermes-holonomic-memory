@@ -169,6 +169,11 @@ hermes holonomic profile --set user "Kayla is ..."     # write a starting profil
 Background reflection only runs while a Hermes process is alive (the desktop app or gateway). A
 terminal session that exits straight away never goes quiet for long enough; use `reflect now` there.
 
+A pass reads what is new since the last one, and can miss something (it once wrote down one of two
+cats). `hermes holonomic reflect now --again 3` goes over the last three days of conversation again.
+Facts she already has are reinforced, not stored twice, and the mark for what is new does not move
+back. `--dry-run` shows what it would add.
+
 ## Short-term and long-term memory, and sleep
 
 Conversation as it happened is short-term memory. Facts, notes, profiles and accounts of past

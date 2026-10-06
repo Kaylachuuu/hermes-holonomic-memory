@@ -1049,47 +1049,71 @@ def _reflect(engine, cfg, args) -> None:
             cfg = dict(cfg, reflect_think=bool(args.think))
         if args.depth:
             cfg = dict(cfg, reflect_depth=args.depth)
-        try:
-            t0 = time.perf_counter()
-            from hermes_constants import get_hermes_home
-            from .reflect import read_foundation
-            report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
-                                  foundation=read_foundation(get_hermes_home()))
-        except ReflectionError as exc:
-            from .reflect import LAST_CALL
-            print(f"Reflection failed: {exc}")
-            if LAST_CALL:
-                print(f"  last model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
-                      f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
+        def one(start_after=None):
+            try:
+                t0 = time.perf_counter()
+                from hermes_constants import get_hermes_home
+                from .reflect import read_foundation
+                report = reflect_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
+                                      foundation=read_foundation(get_hermes_home()), start_after=start_after)
+            except ReflectionError as exc:
+                from .reflect import LAST_CALL
+                print(f"Reflection failed: {exc}")
+                if LAST_CALL:
+                    print(f"  last model call: {LAST_CALL['seconds']:.0f} s, prompt {LAST_CALL['prompt_tokens']} tokens, "
+                          f"reply {LAST_CALL['reply_tokens']} tokens, finished: {LAST_CALL['done_reason']}")
+                return None
+            print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s at depth {report['depth']}"
+                  + (" (dry run: nothing stored)" if args.dry_run else ""))
+            for c in report["calls"]:
+                print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
+                      f"reply {c.get('reply_tokens')} tokens, thinking {'on' if c.get('think') else 'off'}, "
+                      f"finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+            for c in report.get("checked") or []:
+                if c["verdict"] == "drop":
+                    print(f"  CHECK dropped ({c['kind']}): {c['was']}")
+                elif c["verdict"] == "unquote":
+                    print(f"  UNQUOTED ({c['kind']}), not the user's own words: {c['was']}\n             ->  {c['now']}")
+                else:
+                    print(f"  CHECK rewrote ({c['kind']}): {c['was']}\n             ->  {c['now']}")
+            for kind, items in (report.get("proposed") or {}).items():
+                for item in items:
+                    print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
+            for text in report.get("cut_off") or []:
+                print(f"  cut off   {text}   (stopped mid-sentence; not stored)")
+            for text in report.get("dropped_assistant_only") or []:
+                print(f"  dropped   {text}   (rested only on the assistant's own words)")
+            for item in report.get("superseded") or []:
+                print(f"  REPLACES  [#{item['fact']}] {item['was']}\n        ->  {item['replacement']}   <- "
+                      f"{', '.join('#' + str(s) for s in item['sources'])}")
+            for who, text in (report.get("profiles") or {}).items():
+                print(f"  profile ({who}): {text or '(empty)'}")
+            if not args.dry_run:
+                print(f"Stored {len(report['stored'])} new, reinforced {len(report['reinforced'])} existing, "
+                      f"profiles updated: {', '.join(report['profiles_updated']) or 'none'}")
+            return report
+
+        if args.again is None:
+            one()
             return
-        print(f"Read {report['read']} memories in {time.perf_counter() - t0:.0f} s at depth {report['depth']}"
-              + (" (dry run: nothing stored)" if args.dry_run else ""))
-        for c in report["calls"]:
-            print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
-                  f"reply {c.get('reply_tokens')} tokens, thinking {'on' if c.get('think') else 'off'}, "
-                  f"finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
-        for c in report.get("checked") or []:
-            if c["verdict"] == "drop":
-                print(f"  CHECK dropped ({c['kind']}): {c['was']}")
-            elif c["verdict"] == "unquote":
-                print(f"  UNQUOTED ({c['kind']}), not the user's own words: {c['was']}\n             ->  {c['now']}")
-            else:
-                print(f"  CHECK rewrote ({c['kind']}): {c['was']}\n             ->  {c['now']}")
-        for kind, items in (report.get("proposed") or {}).items():
-            for item in items:
-                print(f"  {kind:<9} {item['text']}   <- {', '.join('#' + str(s) for s in item['sources'])}")
-        for text in report.get("cut_off") or []:
-            print(f"  cut off   {text}   (stopped mid-sentence; not stored)")
-        for text in report.get("dropped_assistant_only") or []:
-            print(f"  dropped   {text}   (rested only on the assistant's own words)")
-        for item in report.get("superseded") or []:
-            print(f"  REPLACES  [#{item['fact']}] {item['was']}\n        ->  {item['replacement']}   <- "
-                  f"{', '.join('#' + str(s) for s in item['sources'])}")
-        for who, text in (report.get("profiles") or {}).items():
-            print(f"  profile ({who}): {text or '(empty)'}")
-        if not args.dry_run:
-            print(f"Stored {len(report['stored'])} new, reinforced {len(report['reinforced'])} existing, "
-                  f"profiles updated: {', '.join(report['profiles_updated']) or 'none'}")
+        # Going over conversation that was read before: a pass can miss something.
+        from .reflect import WATERMARK
+        first = engine.first_id_since(time.time() - float(args.again) * 86400.0)
+        mark = int(engine.kv_get(WATERMARK, "0") or 0)
+        if first is None:
+            print(f"Nothing was said in the last {args.again:g} day(s).")
+            return
+        print(f"Going over the last {args.again:g} day(s) again, from memory #{first}"
+              + (" (dry run: nothing stored)." if args.dry_run else ". Facts she already has are reinforced, not stored twice."))
+        at, passes = first - 1, 0
+        while at < mark and passes < 25:
+            report = one(at)
+            passes += 1
+            if not report or not report.get("read") or report.get("last_id", at) <= at:
+                break
+            at = report["last_id"]
+        if at < mark and passes >= 25:
+            print(f"Stopped after {passes} passes, at memory #{at}. Run it again with fewer days to go over the rest.")
         return
     last_run = engine.kv_get("reflect:last_run")
     print(f"  enabled: {rc['reflect_enabled']}")
@@ -1180,6 +1204,8 @@ def register_cli(subparser) -> None:
     ref.add_argument("--depth", type=int, choices=[1, 2, 3],
                      help="1 facts and user profile only; 2 everything, unchecked; 3 everything, each item checked (default)")
     ref.add_argument("--dry-run", action="store_true", help="With 'now': show what would be stored, store nothing")
+    ref.add_argument("--again", nargs="?", type=float, const=3.0, default=None, metavar="DAYS",
+                     help="With 'now': go over the last DAYS days of conversation again (default 3), for something a pass missed")
     ref.add_argument("--think", action="store_true", help="With 'now': let the model reason first (slow; can run away on small models)")
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")

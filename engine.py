@@ -823,6 +823,13 @@ class HolonomicMemory:
         with self._lock:
             return [dict(r) for r in self._db.execute(sql + " ORDER BY id LIMIT ?", params + [limit])]
 
+    def first_id_since(self, when: float, *, realm: str = "waking") -> int | None:
+        """The id of the oldest memory made at or after a time; None if there is none."""
+        with self._lock:
+            r = self._db.execute("SELECT MIN(id) AS m FROM memories WHERE forgotten = 0 AND realm = ? AND created_at >= ?",
+                                 (realm, float(when))).fetchone()
+        return int(r["m"]) if r and r["m"] is not None else None
+
     def count_after(self, after_id: int, *, realm: str = "waking", exclude_kinds: tuple[str, ...] | list[str] = ()) -> int:
         sql = "SELECT COUNT(*) AS n FROM memories WHERE forgotten = 0 AND realm = ? AND id > ?"
         params: list = [realm, after_id]

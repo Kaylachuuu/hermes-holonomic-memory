@@ -163,6 +163,9 @@ def test_cli_toggle_status_and_profile(tmp_path):
         shown = run("profile", "--history")
         assert "About the two of you:" in shown and "getting started on an operating system" in shown
         assert "Reflection failed" in run("reflect", "now")                    # no Ollama server here
+        out = run("reflect", "now", "--again")
+        assert "Going over the last 3 day(s) again, from memory #" in out and "reinforced, not stored twice" in out and "Reflection failed" in out
+        assert "Going over the last 0.5 day(s) again" in run("reflect", "now", "--again", "0.5", "--dry-run")
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
@@ -417,3 +420,29 @@ def test_checker_is_told_which_names_the_cited_lines_never_mention(tmp_path):
                                  {"kind": SELF_NOTE, "text": "I suggested Zig and Rust to her.", "sources": [41]}], by_id, "Kayla")
     first, second = prompt.split("STATEMENT 2")
     assert "appear nowhere in its lines: Zig, Rust" in first and "note:" not in second
+
+
+def test_reflection_can_go_over_old_ground_without_losing_its_place(tmp_path):
+    """A pass can miss something.  Reading from an earlier point goes over conversation it has read before, stores
+    nothing twice, and never moves the mark for what is new backwards."""
+    from holonomic.reflect import reflect_once, pending, WATERMARK
+    m, ids = seeded(tmp_path)
+    llm = lambda system, user, step: answer(ids)
+    first = reflect_once(m, {}, llm=llm)
+    assert len(first["stored"]) == 3 and pending(m) == 0 and first["last_id"] == max(ids.values())
+    mark, count = int(m.kv_get(WATERMARK)), m.stats()["memories"]
+    seen = {}
+
+    def again(system, user, step):
+        seen[step] = user
+        return answer(ids)
+    report = reflect_once(m, {}, llm=again, start_after=min(ids.values()) - 1)
+    assert report["read"] >= 4 and f"[{ids['name']}] USER: Hello! My name is Kayla" in seen["propose"]     # the old conversation is read again
+    assert report["stored"] == [] and len(report["reinforced"]) == 3 and m.stats()["memories"] == count    # and nothing is stored twice
+    assert int(m.kv_get(WATERMARK)) >= mark and pending(m) == 0
+    # starting from the middle leaves the mark where it was
+    m.remember("I also have a cat called Theo.", kind="said_user", session="s2")
+    assert pending(m) == 1
+    reflect_once(m, {}, llm=llm, start_after=min(ids.values()), dry_run=True)
+    assert pending(m) == 1
+    assert m.first_id_since(0) == min(r["id"] for r in m.recent(50)) and m.first_id_since(time.time() + 60) is None
