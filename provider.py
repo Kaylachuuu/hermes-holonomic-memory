@@ -527,6 +527,16 @@ class HolonomicMemoryProvider(MemoryProvider):
         sid = session_id or self._session_id
         self._touch()
         words = _images.strip_image_markers(query)       # recall on what was said, not on Hermes' note about a file
+        # The attached image is looked into first.  Something in it that she knows by name is part of what the
+        # message is about, though the words may be no more than "look at this": recognising her friend's cat
+        # should bring back what she knows about the cat, as seeing him would.
+        self._turn_names = {}
+        about_image = [b for b in (self._seen_before_block(engine, query), self._may_show_block(engine, query),
+                                   self._unseen_block(engine, query, sid)) if b]
+        known = self._known_block(engine)
+        if self._turn_names:
+            named = " ".join(f"{n['name']} {n['what']}".strip() for n in self._turn_names.values())
+            words = named if is_trivial_prompt(words) else f"{words} {named}"
         k = int(self._cfg["recall_k"])
         hits = []
         try:
@@ -545,8 +555,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             lines.append(line)
             shown += [hit.id] + [p.id for p in parts]
             used += len(line) + 1
-        extra = [b for b in (self._seen_before_block(engine, query), self._may_show_block(engine, query), self._unseen_block(engine, query, sid),
-                             self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
+        extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
         if not lines:
             return "\n\n".join(extra)
         try:                                             # what gets used stays strong; what is never recalled fades
@@ -584,6 +593,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if img and img["realm"] == "dream":
                     out.append(f"- this is a picture from one of your own dreams (not a photograph of anything real): {img['caption']}")
                 elif img:
+                    self._note_names(img.get("named"), sure=True)
                     when = time.strftime("%Y-%m-%d", time.localtime(img["created_at"]))
                     out.append(f"- image #{img['id']}, first shown {when}, seen {img['seen']} time(s) before now"
                                + (f": {' '.join(img['description'].split())}" if img["description"] else ""))
@@ -591,6 +601,40 @@ class HolonomicMemoryProvider(MemoryProvider):
             logger.debug("holonomic: checking for a known image failed: %s", exc)
         return ("## An image you have seen before (the attached file is identical to one already in your memory)\n"
                 + "\n".join(out)) if out else ""
+
+    def _note_names(self, named, *, sure: bool) -> None:
+        """Remember, for this turn, a named thing found in the attached image."""
+        if getattr(self, "_turn_names", None) is None:
+            self._turn_names = {}
+        for n in named or []:
+            entry = self._turn_names.setdefault(n["name"].lower(), {"name": n["name"], "what": "", "sure": False})
+            entry["sure"] = entry["sure"] or sure
+
+    def _known_block(self, engine) -> str:
+        """Who or what she recognises in the attached image, in words she can act on.  The description of the
+        image may mention a name in passing; told only that, she admired "a little tuxedo cat" and asked whose
+        it was."""
+        if not getattr(self, "_turn_names", None):
+            return ""
+        from . import fingerprints as _fp
+        try:
+            every = {k["name"].lower(): k for k in _fp.names(engine)}
+        except Exception:
+            return ""
+        lines = []
+        for key, n in self._turn_names.items():
+            k = every.get(key)
+            if not k:
+                continue
+            n["what"] = k["what"]
+            seen = len(k["examples"]) + len(k["recognised"])
+            lines.append(f"- {k['name']}" + (f", {k['what']}" if k["what"] else "") + f". You have been shown {k['name']} in {seen} image(s) before"
+                         + ("." if n["sure"] else "; here it is only a likeness, so check it against what you see."))
+        if not lines:
+            return ""
+        return ("## You recognise what is in the attached image\n"
+                "You know this by name; it is not new to you. Speak of it by its name, as someone you know, and do not ask "
+                "what or whose it is. What you remember about it is among your recalled memories.\n" + "\n".join(lines))
 
     def _may_show_block(self, engine, query: str) -> str:
         """A new image has arrived.  If part of it looks like something she knows by name, tell her before she
@@ -602,10 +646,12 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         out = []
         try:
-            for data, _ in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
-                if _images.known(engine, data):          # one she has seen: what it shows is already in front of her
+            as_files = set(_images.attached_as_files(query)) if self._writes_enabled else set()
+            for data, where in _images.images_in_turn(query, None, int(self._cfg.get("image_max_bytes", 30_000_000)))[:2]:
+                if where in as_files or _images.known(engine, data):     # looked at for her below, or one she has seen
                     continue
                 for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
+                    self._note_names([{"name": m["shown"]}], sure=False)
                     line = f"- {m['shown']}" + (f" ({m['what']})" if m["what"] else "")
                     if line not in out:
                         out.append(line)
@@ -638,6 +684,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                     img = _images.describe(engine, self._cfg, img["id"], key_fn=extract_keys) or img
                 except Exception as exc:
                     logger.warning("holonomic: image #%s kept; describing it failed and will be retried (%s)", img["id"], exc)
+                self._note_names((_images.get_image(engine, img["id"]) or {}).get("named"), sure=True)
                 out.append(f"- image #{img['id']} ({p.name}; file: {img['file']}): "
                            + (" ".join(img["description"].split()) if img.get("description")
                               else "it could not be looked at just now. Say so; do not describe it from the user's words."))

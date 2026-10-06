@@ -461,7 +461,11 @@ hermes holonomic images names forget Sushi
 
 An image that has only just arrived with a message is checked the same way before she answers, and
 she is told what it may show. Otherwise she has only the conversation to go by: shown Theo and then a
-second cat, she called the second one Theo. An example with a person in it is left out whenever the
+second cat, she called the second one Theo. What she recognises is then stated to her outright (that she knows it, by what name, and not to ask
+whose it is) and its name is added to what her memory is searched for, so recognising the cat brings
+back what she knows about the cat even when the message says only "look at this". A name mentioned
+in passing in the image's description was not enough: she admired "a little tuxedo cat" and asked
+whether it was the user's. An example with a person in it is left out whenever the
 thing has an example without one, because a photo of a cat lying on its owner is mostly a picture of
 the owner.
 

@@ -1784,10 +1784,62 @@ def test_she_is_told_what_an_arriving_image_may_show_before_she_answers(tmp_path
         said = p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
         assert "## What the attached image may show (going by its look alone)" in said and "- Sushi (a red cat)" in said
         assert "Do not take a name from earlier in the conversation in its place." in said
+        assert "## You recognise what is in the attached image" in said and "do not ask what or whose it is" in said
+        assert "- Sushi, a red cat. You have been shown Sushi in 1 image(s) before; here it is only a likeness" in said
+        # recognising him brings back what she knows about him, though the words were only "look at this"
+        e.remember("Sushi is Kayla's cat and sleeps on the pine-green couch.", kind="said_user", session="s0")
+        said = p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {shot}]", session_id="s1")
+        assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in said and "## You recognise what is in the attached image" in said
+        assert "Sushi is Kayla's cat" not in p.prefetch(f"[1 image] Look at this!\n\n[Image attached at: {other}]", session_id="s1")
         assert "may show" not in p.prefetch(f"[1 image] and this\n\n[Image attached at: {other}]", session_id="s1")      # nothing like it
         again = p.prefetch(f"[1 image] this one again\n\n[Image attached at: {same}]", session_id="s1")                # the very image she has
         assert "An image you have seen before" in again and "may show" not in again
+        assert "- Sushi, a red cat. You have been shown Sushi in 1 image(s) before." in again and "Sushi is Kayla's cat" in again
         p._cfg["image_names"] = False
         assert "may show" not in p.prefetch(f"[1 image] look at this\n\n[Image attached at: {shot}]", session_id="s1")
     finally:
+        p.shutdown(); server.shutdown()
+
+
+def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
+    """The way a phone's photos arrive in the desktop app: as a file she is not shown.  It is looked at for her,
+    the named thing in it is recognised by its look, and she is told plainly that she knows it."""
+    if not HAVE_HERMES: return
+    import importlib.util, threading
+    from holonomic import images, fingerprints as fp
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    calls = []
+    server = helper.make_server(lambda ps: calls.append(len(ps)) or colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    p = make(tmp_path)
+    p._cfg.update(CFG, image_fingerprints=True, image_fingerprint_host=f"http://127.0.0.1:{server.server_port}")
+    e = p._engine
+    keep = images._seer
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        if step == "image":
+            knows = "may show something you have been shown before: Sushi" in prompt
+            return json.dumps({"description": "A close-up photo shows a red cat" + (", Sushi," if knows else "") + " sitting in a paper bag on a carpet.",
+                               "labels": ["cat", "paper bag"], "text": "", "people": False})
+        return json.dumps({"names": [], "notable": False, "description": "", "labels": []})
+    images._seer = lambda ic, report: see
+    try:
+        sushi = images.add_image(e, flat((220, 30, 30)), CFG, origin="sushi.png")["id"]
+        fp.fingerprint(e, p._cfg)
+        fp.name_thing(e, p._cfg, sushi, "Sushi", what="a red cat", redo=False)
+        e.remember("Sushi is Kayla's cat and sleeps on the pine-green couch.", kind="said_user", session="s0")
+        photo = tmp_path / "IMG_7733.HEIC"
+        photo.write_bytes(two_tone((120, 90, 60), (215, 35, 30)))
+        calls.clear()
+        block = p.prefetch(file_message(photo, "Look at this!"), session_id="s1")
+        assert "## The picture attached to this message (you were not shown it directly" in block and "a red cat, Sushi, sitting in a paper bag" in block
+        assert "## You recognise what is in the attached image" in block and "do not ask what or whose it is" in block
+        assert "- Sushi, a red cat. You have been shown Sushi in 2 image(s) before." in block and "only a likeness" not in block
+        assert "Sushi is Kayla's cat and sleeps on the pine-green couch." in block             # what she knows about him came back
+        assert "may show" not in block and calls == [10]                                    # looked at once, not twice
+        new = images.list_images(e)[0]
+        assert new["named"] == [{"name": "Sushi", "said": False, "alike": new["named"][0]["alike"]}] and new["named"][0]["alike"] > 0.9
+    finally:
+        images._seer = keep
         p.shutdown(); server.shutdown()
