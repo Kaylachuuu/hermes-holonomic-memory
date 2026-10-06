@@ -709,11 +709,16 @@ class IdleReflector:
         if not idle() or time.time() < self._images_retry_at:
             return None
         waiting = _images.pending(self.engine)
-        if not (waiting["images"] or (ic["image_sections"] and waiting["sections"])) or not self._busy.acquire(blocking=False):
+        from . import fingerprints as _fp
+        prints = _fp.fingerprint_config(cfg)["image_fingerprints"] and _fp.status(self.engine)["waiting"]
+        if not (waiting["images"] or (ic["image_sections"] and waiting["sections"]) or prints) or not self._busy.acquire(blocking=False):
             return None
         try:
             report = _images.process(self.engine, cfg, key_fn=self.key_fn, should_stop=lambda: self._stop.is_set() or not idle())
             self.last_image_error = "; ".join(report["errors"])
+            if (report.get("fingerprints") or {}).get("errors"):       # the helper is probably not running: not every few seconds
+                self._images_retry_at = time.time() + 300.0
+                logger.info("holonomic: fingerprints not made: %s", "; ".join(report["fingerprints"]["errors"]))
             if report["errors"]:                       # the vision server is probably off: try again in a few minutes
                 self._images_retry_at = time.time() + 300.0
                 logger.warning("holonomic: describing images failed: %s", self.last_image_error)

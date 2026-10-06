@@ -19,6 +19,8 @@
     hermes holonomic images process               describe everything that is waiting
     hermes holonomic images people ID yes|no      say whether an image has real people in it (dreams draw from those only if allowed)
     hermes holonomic images signature ID none|bottom-right|...   say where an image is signed or watermarked (kept out of dream pictures)
+    hermes holonomic images fingerprints [on|off|redo] [--host URL]   recognise pictures from the pictures themselves (needs the helper server)
+    hermes holonomic images similar ID [--all]    images that look like this one
     hermes holonomic images dream ID... yes|no|default     allow or forbid dream pictures drawn from particular images
     hermes holonomic images redo ID [--fix "That is a couch, not a lap"] [--say "new words for when it was shown"]
     hermes holonomic images look ID "what colour is the car?" [--section N]
@@ -443,6 +445,10 @@ def _images_cmd(engine, cfg, args) -> None:
         aside = len(_img.removed_images(engine))
         if aside:
             print(f"  set aside (forgotten, not deleted): {aside}   (hermes holonomic images removed)")
+        from . import fingerprints as _fp
+        if _fp.fingerprint_config(cfg)["image_fingerprints"]:
+            st = _fp.status(engine)
+            print(f"  fingerprints: on, {st['fingerprinted']} of {st['images']} image(s) have one   (hermes holonomic images fingerprints)")
         print(f"  files are in: {engine.path / 'images'}")
         if not ic["image_enabled"]:
             print("  Turn on with: hermes holonomic images on --model NAME [--host URL]")
@@ -511,6 +517,11 @@ def _images_cmd(engine, cfg, args) -> None:
             print(f"  {report['unclear']} piece(s) of writing were reported by only one look and are now marked as not read for certain.")
         for err in report["errors"]:
             print(f"  stopped: {err}")
+        prints = report.get("fingerprints") or {}
+        if prints.get("done"):
+            print(f"  made fingerprints for {len(prints['done'])} image(s).")
+        for err in prints.get("errors", []):
+            print(f"  fingerprints not made: {err}")
         left = _img.pending(engine)
         if left["images"] or left["sections"]:
             print(f"  still waiting: {left['images']} image(s), {left['sections']} part(s)")
@@ -525,6 +536,59 @@ def _images_cmd(engine, cfg, args) -> None:
             print(f"image #{raw}: " + {"yes": "dream pictures may be drawn from it, whatever the general rule about people.",
                                        "no": "dream pictures are never drawn from it. What she saw in it can still appear in a dream's words.",
                                        "default": "back to the general rule (an image with people in it is used only if those are allowed)."}[items[-1]])
+    elif what == "fingerprints":
+        from hermes_constants import get_hermes_home
+        from . import fingerprints as _fp
+        from .provider import load_config, write_config
+        sub = items[0] if items else "status"
+        if sub not in ("status", "on", "off", "redo"):
+            print("Usage: hermes holonomic images fingerprints [status|on|off|redo] [--host URL]")
+            return
+        if sub in ("on", "off") or args.host:
+            write_config(get_hermes_home(), dict({"image_fingerprints": sub == "on"} if sub in ("on", "off") else {},
+                                                 **({"image_fingerprint_host": args.host.rstrip("/")} if args.host else {})))
+            cfg = dict(cfg, **load_config(get_hermes_home()))
+        fc = _fp.fingerprint_config(cfg)
+        print(f"Picture fingerprints are {'ON' if fc['image_fingerprints'] else 'OFF'}.  Helper server: {fc['image_fingerprint_host']}")
+        try:
+            about = _fp.health(cfg)
+            print(f"  the helper is running: {about.get('model')}, {about.get('dim')} numbers per picture, on {about.get('device')}")
+        except _fp.FingerprintError as exc:
+            about = None
+            print(f"  the helper is NOT answering: {exc}")
+            print("  start it with a Python that has torch and transformers, for example ComfyUI's:")
+            print(f"    <ComfyUI>\\.venv\\Scripts\\python.exe \"{Path(__file__).parent / 'tools' / 'fingerprint_server.py'}\"")
+        st = _fp.status(engine, (about or {}).get("model"))
+        print(f"  {st['fingerprinted']} of {st['images']} image(s) have a fingerprint" + (f" from {', '.join(st['models'])}" if st["models"] else ""))
+        if fc["image_fingerprints"] and about and (st["waiting"] or sub == "redo"):
+            t0 = time.time()
+            done = _fp.fingerprint(engine, cfg, redo=sub == "redo")
+            print(f"  made fingerprints for {len(done['done'])} image(s) and their parts in {time.time() - t0:.0f} s")
+            for err in done["errors"]:
+                print(f"  stopped: {err}")
+        if not fc["image_fingerprints"]:
+            print("  Turn on with: hermes holonomic images fingerprints on [--host URL]")
+    elif what == "similar":
+        from . import fingerprints as _fp
+        if not items or not items[0].isdigit():
+            print("Usage: hermes holonomic images similar ID [-n N] [--all]      (images that look like this one; --all shows every figure)")
+            return
+        img = _img.get_image(engine, int(items[0]))
+        if not img:
+            print(f"image #{items[0]}: no such image")
+            return
+        if not img.get("fingerprint"):
+            print(f"image #{img['id']} has no fingerprint yet. Run: hermes holonomic images fingerprints")
+            return
+        floor = _fp.fingerprint_config(cfg)["image_fingerprint_min"]
+        found = _fp.similar(engine, cfg, img["id"], n=args.n if not args.all else 10_000, minimum=-1.0 if args.all else None)
+        print(f"image #{img['id']}  {img['origin'] or ''}  {_clip(img['description'], args.width)}")
+        print(f"{len(found)} image(s) " + ("compared" if args.all else f"look like it (alike {floor:g} or more; 1 = the same picture)") + ":"
+              if found else f"Nothing she has been shown looks like it (alike {floor:g} or more). --all shows the figures for every image.")
+        for f in found:
+            other = _img.get_image(engine, f["id"]) or {}
+            print(f"  {f['alike']:.2f}  image #{f['id']}  {other.get('origin') or ''}   alike: {_fp.describe_match(f)}   (whole pictures {f['whole']:.2f})")
+            print(f"        {_clip(other.get('description') or '(not described yet)', args.width)}")
     elif what == "signature":
         place = " ".join(items[1:]).lower().replace("-", " ") if len(items) > 1 else ""
         if not items or not items[0].isdigit() or place not in _img.SIGNATURE_PLACES:
@@ -862,7 +926,7 @@ def register_cli(subparser) -> None:
     ref.add_argument("--no-think", action="store_true", help="With 'now': answer without reasoning first (the default)")
     im = subs.add_parser("images", help="Image memory: what she has been shown")
     im.add_argument("images_action", nargs="?", default="status",
-                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream", "removed", "restore", "delete"])
+                    choices=["status", "on", "off", "list", "show", "find", "labels", "add", "process", "look", "forget", "redo", "people", "signature", "dream", "removed", "restore", "delete", "fingerprints", "similar"])
     im.add_argument("items", nargs="*", help="Image ids, files to add, a label to find, or an id and a question")
     im.add_argument("--model", help="Ollama model that can see (with 'on'); default: the reflection model")
     im.add_argument("--host", help="Ollama server for that model, if it is not the reflection server (with 'on')")
@@ -873,6 +937,7 @@ def register_cli(subparser) -> None:
     im.add_argument("--section", type=int, help="With 'look': a part number, to look closely at one part")
     im.add_argument("-n", type=int, default=20, help="With 'list': how many (default 20)")
     im.add_argument("--width", type=int, default=110, help="Characters of text to show")
+    im.add_argument("--all", action="store_true", help="With 'similar': list every image with its figures, not only those alike enough")
     im.add_argument("--yes", action="store_true", help="With 'forget': actually remove")
     im.add_argument("--keep-files", action="store_true", help="With 'forget': leave the image files on disk")
     prof = subs.add_parser("profile", help="Show the profiles written by reflection")

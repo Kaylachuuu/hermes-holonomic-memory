@@ -1,3 +1,4 @@
+from pathlib import Path
 import base64, io, json, sys, time, types
 
 import pytest
@@ -1475,3 +1476,169 @@ def test_writing_is_kept_only_when_two_looks_agree(tmp_path):
     assert "tiger sign" not in final["labels"] and "doorway" in final["labels"]
     again = {s["place"]: s["description"] for s in images.get_image(m, img["id"], sections=True)["sections"] if s["description"]}
     assert "marked 'POLICE'" in again["bottom centre"] and images.UNCLEAR in again["centre"] and report["unclear"] == 3
+
+
+# ---------------------------------------------------------------------------------------------- fingerprints
+
+def colour_prints(pictures):
+    """A stand-in for the fingerprint model: a picture's fingerprint is its average colour, centred so that
+    different colours point in different directions."""
+    from PIL import Image
+    out = []
+    for p in pictures:
+        img = Image.open(io.BytesIO(p)).convert("RGB").resize((8, 8))
+        px = list(img.getdata())
+        out.append([sum(c[i] for c in px) / len(px) - 110.0 for i in range(3)])
+    return "colours-1", out
+
+
+def flat(colour, width=1600, height=1200):
+    """One colour all over.  (`picture` has the same pale background in every image, and parts of two images
+    that show the same background are, rightly, found to be alike.)"""
+    return two_tone(colour, colour, width, height)
+
+
+def two_tone(left, right, width=1600, height=1200):
+    from PIL import Image
+    img = Image.new("RGB", (width, height), left)
+    img.paste(right, (width // 2, 0, width, height))
+    out = io.BytesIO(); img.save(out, "PNG")
+    return out.getvalue()
+
+
+def test_fingerprints_find_images_that_look_alike(tmp_path):
+    """Every image gets a fingerprint and so does each part.  Images are then found by what they look like:
+    as whole pictures, or because a part of one looks like a part of another."""
+    from holonomic import images, fingerprints as fp
+    m = store(tmp_path)
+    cfg = dict(CFG, image_fingerprints=True)
+    red, green, blue = (220, 30, 30), (30, 200, 40), (30, 40, 220)
+    a = images.add_image(m, flat(red), CFG, origin="red.png")["id"]
+    b = images.add_image(m, flat((205, 45, 40)), CFG, origin="nearly-red.png")["id"]
+    c = images.add_image(m, flat(blue), CFG, origin="blue.png")["id"]
+    d = images.add_image(m, two_tone(green, red), CFG, origin="green-and-red.png")["id"]
+    small = images.add_image(m, flat(green, 320, 240), CFG, origin="small.png")["id"]      # too small to be cut into parts
+    assert fp.status(m) == {"images": 5, "fingerprinted": 0, "waiting": 5, "models": []} and fp.similar(m, cfg, a) == []
+    assert not images.get_image(m, a)["fingerprint"]
+    sent = []
+    report = fp.fingerprint(m, cfg, embed=lambda ps: sent.append(len(ps)) or colour_prints(ps))
+    assert report["done"] == [a, b, c, d, small] and report["errors"] == [] and report["model"] == "colours-1"
+    assert sent == [10, 10, 10, 10, 1]                                         # the whole image and its nine parts, in one request
+    assert fp.status(m, "colours-1")["waiting"] == 0 and fp.status(m, "another-model")["waiting"] == 5 and images.get_image(m, a)["fingerprint"]
+    assert fp.fingerprint(m, cfg, embed=colour_prints, model="colours-1")["done"] == []          # nothing is done twice
+    alike = fp.similar(m, cfg, a)
+    assert [x["id"] for x in alike][:2] == [b, d] and c not in [x["id"] for x in alike]
+    assert alike[0]["alike"] > 0.98 and (alike[0]["this"], alike[0]["that"]) == ("whole", "whole")
+    half = next(x for x in alike if x["id"] == d)                              # the red half of that one, not the picture as a whole
+    assert half["alike"] > 0.98 and half["whole"] < 0.8 and half["that"] in ("top right", "middle right", "bottom right")
+    assert "the whole of this one and the" in fp.describe_match(half) and fp.describe_match(alike[0]) == "the two pictures as a whole"
+    assert [x["id"] for x in fp.similar(m, cfg, small)] == [d]                 # found through the green half
+    assert len(fp.similar(m, cfg, a, minimum=-1)) == 4 and len(fp.similar(m, cfg, a, n=1)) == 1
+    # a part known to show nothing worth recording is not matched on
+    with m._lock:
+        images._db(m).execute("UPDATE image_sections SET notable = 0 WHERE image_id = ?", (d,))
+    left = next(x for x in fp.similar(m, cfg, a, minimum=-1) if x["id"] == d)
+    assert left["alike"] < 0.8 and (left["this"], left["that"]) == ("whole", "whole")       # only the pictures as wholes are compared
+    # set aside: not found; shown again after that: fingerprinted afresh
+    images.forget_image(m, b)
+    assert b not in [x["id"] for x in fp.similar(m, cfg, a, minimum=-1)] and fp.status(m)["images"] == 4
+    images.restore_image(m, CFG, b)
+    assert fp.similar(m, cfg, a)[0]["id"] == b
+    # fingerprints from another model are made again and never compared with the old ones
+    other = lambda ps: ("colours-2", colour_prints(ps)[1])
+    assert fp.fingerprint(m, cfg, embed=other, model="colours-2", should_stop=lambda: len(fp.status(m, "colours-2")["models"]) > 1)["done"] == [a]
+    assert fp.status(m)["models"] == ["colours-1", "colours-2"] and fp.similar(m, cfg, a) == []
+    assert fp.fingerprint(m, cfg, embed=other, model="colours-2")["done"] == [b, c, d, small] and fp.similar(m, cfg, a)[0]["id"] == b
+    # the helper not running: reported, nothing lost
+    down = fp.fingerprint(m, dict(cfg, image_fingerprint_host="http://127.0.0.1:9"), redo=True)
+    assert down["done"] == [] and "Could not reach the fingerprint server" in down["errors"][0] and fp.status(m)["waiting"] == 0
+
+
+def test_the_fingerprint_helper_and_the_plugin_talk_to_each_other(tmp_path):
+    """The helper's web side with a stand-in for the model, and the plugin against it: status, a pass made as part
+    of describing images, and what the command line and the agent's tool say."""
+    import importlib.util, threading
+    from holonomic import images, fingerprints as fp
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    server = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{server.server_port}"
+    cfg = dict(CFG, image_fingerprints=True, image_fingerprint_host=host + "/")
+    try:
+        assert fp.health(cfg) == {"model": "colours-1", "dim": 3, "device": "cpu"}
+        assert fp.make_embedder(cfg)([picture(colour=(250, 0, 0))])[0] == "colours-1"
+        for bad in ({"images": []}, {"images": ["not a picture"]}, {}):
+            try:
+                fp._call(host + "/embed", bad, 5); assert False
+            except fp.FingerprintError as exc:
+                assert "answered 4" in str(exc)
+        m = store(tmp_path)
+        a = images.add_image(m, flat((220, 30, 30)), CFG)["id"]
+        b = images.add_image(m, flat((210, 40, 35)), CFG)["id"]
+        report = images.process(m, cfg, see=eyes())                            # describing images makes the fingerprints too
+        assert report["fingerprints"]["done"] == [a, b] and report["fingerprints"]["model"] == "colours-1"
+        assert "fingerprints" not in images.process(m, CFG, see=eyes())        # switched off: not attempted
+        assert fp.similar(m, cfg, a)[0]["id"] == b
+    finally:
+        server.shutdown()
+
+
+def test_fingerprints_from_the_command_line_and_the_tool(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, importlib.util, threading
+    from holonomic import images, fingerprints as fp
+    spec = importlib.util.spec_from_file_location("fingerprint_server", Path(images.__file__).parent / "tools" / "fingerprint_server.py")
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    server = helper.make_server(lambda ps: colour_prints(ps)[1], model="colours-1", dim=3, device="cpu", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = f"http://127.0.0.1:{server.server_port}"
+    p = make(tmp_path)
+    p._cfg.update(CFG)
+    home = tmp_path / "home"
+    (home / "holonomic.json").write_text(json.dumps(dict({"embedder": "hash", "min_score": 0.3}, **CFG)))
+    e = p._engine
+    a = images.add_image(e, flat((220, 30, 30)), CFG, origin="red.png")["id"]
+    b = images.add_image(e, flat((210, 40, 35)), CFG, origin="nearly-red.png")["id"]
+    c = images.add_image(e, flat((30, 40, 220)), CFG, origin="blue.png")["id"]
+    try:
+        assert "fingerprints are off" in tool(p, action="images", image_id=a, similar=True)["error"]
+        p._cfg.update(image_fingerprints=True, image_fingerprint_host=host)
+        assert "no fingerprint yet" in tool(p, action="images", image_id=a, similar=True)["note"]
+        fp.fingerprint(e, p._cfg)
+        found = tool(p, action="images", image_id=a, similar=True)
+        assert [i["image_id"] for i in found["images"]] == [b] and found["images"][0]["alike"] > 0.98
+        assert found["images"][0]["what_is_alike"] == "the two pictures as a whole" and "nothing was compared in words" in found["note"]
+        assert "Nothing she has been shown looks like it" in tool(p, action="images", image_id=c, similar=True)["note"]
+        with e._lock:                                   # the command line starts with none made
+            images._db(e).execute("UPDATE images SET vec = NULL, vec_model = NULL")
+            images._db(e).execute("UPDATE image_sections SET vec = NULL, vec_model = NULL")
+        p.shutdown()
+        sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        try:
+            out = run("images", "fingerprints")
+            assert "Picture fingerprints are OFF" in out and "the helper is NOT answering" in out and "fingerprint_server.py" in out
+            out = run("images", "fingerprints", "on", "--host", host + "/")
+            assert "Picture fingerprints are ON" in out and "the helper is running: colours-1, 3 numbers per picture, on cpu" in out
+            assert "made fingerprints for 3 image(s)" in out and json.loads((home / "holonomic.json").read_text())["image_fingerprint_host"] == host
+            assert "3 of 3 image(s) have a fingerprint from colours-1" in run("images", "fingerprints") and "fingerprints: on, 3 of 3" in run("images")
+            out = run("images", "similar", str(a))
+            assert "1 image(s) look like it" in out and f"image #{b}  nearly-red.png" in out and "blue.png" not in out
+            assert "2 image(s) compared" in run("images", "similar", str(a), "--all") and "blue.png" in run("images", "similar", str(a), "--all")
+            assert "Nothing she has been shown looks like it" in run("images", "similar", str(c)) and "Usage:" in run("images", "similar")
+            assert "made fingerprints for 3 image(s)" in run("images", "fingerprints", "redo")
+            assert "Picture fingerprints are OFF" in run("images", "fingerprints", "off")
+        finally:
+            embed.OllamaEmbedder = keep
+    finally:
+        server.shutdown()

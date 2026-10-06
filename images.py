@@ -394,7 +394,7 @@ def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", cap
                 db.execute("DELETE FROM image_sections WHERE image_id = ?", (row["id"],))
                 db.execute("UPDATE images SET file=?, view=?, width=?, height=?, bytes=?, format=?, realm=?, source=?, session=?, "
                            "origin=?, caption=?, created_at=?, last_seen=?, meta=?, seen=1, memory_id=NULL, described_at=NULL, "
-                           "sections_at=NULL, claimed_at=NULL, forgotten=0 WHERE id=?", values + (row["id"],))
+                           "sections_at=NULL, claimed_at=NULL, forgotten=0, vec=NULL, vec_model=NULL WHERE id=?", values + (row["id"],))
                 image_id = int(row["id"])
             else:
                 image_id = int(db.execute(
@@ -977,6 +977,9 @@ def process(engine, cfg: Dict[str, Any], *, see: Optional[Callable[..., str]] = 
             "SELECT id FROM images WHERE forgotten = 0 AND source != 'dream' AND sections_at IS NOT NULL AND meta NOT LIKE '%writing_settled%'")]
     for image_id in finished:
         report["unclear"] = report.get("unclear", 0) + len(settle_writing(engine, image_id))
+    from . import fingerprints as _fp                    # needs no vision model: a failure here is its own matter
+    if _fp.fingerprint_config(cfg)["image_fingerprints"] and not (should_stop and should_stop()):
+        report["fingerprints"] = _fp.fingerprint(engine, cfg, should_stop=should_stop)
     return report
 
 
@@ -1021,6 +1024,7 @@ def get_image(engine, image_id: int, *, sections: bool = False) -> Optional[dict
            "caption": row["caption"], "created_at": row["created_at"], "seen": row["seen"], "last_seen": row["last_seen"],
            "memory_id": row["memory_id"], "description": (memory or {}).get("text", ""), "labels": labels,
            "people": has_people(engine, row["id"]), "dream_from": dream_use(engine, row["id"]), "signature": signature_known(engine, row["id"]),
+           "fingerprint": row["vec"] is not None,
            "sections_total": len(parts), "sections_waiting": sum(1 for p in parts if p["notable"] is None)}
     if sections:
         out["sections"] = [{"section": p["idx"], "place": p["place"], "memory_id": p["memory_id"],
@@ -1389,7 +1393,8 @@ def delete_image(engine, image_id: int) -> bool:
         db = _db(engine)
         db.execute("DELETE FROM image_labels WHERE image_id = ?", (row["id"],))
         db.execute("DELETE FROM image_sections WHERE image_id = ?", (row["id"],))
-        db.execute("UPDATE images SET forgotten = 2, memory_id = NULL, caption = '', origin = '', meta = '{}' WHERE id = ?", (row["id"],))
+        db.execute("UPDATE images SET forgotten = 2, memory_id = NULL, caption = '', origin = '', meta = '{}', vec = NULL, vec_model = NULL "
+                   "WHERE id = ?", (row["id"],))
     for rel in {row["file"], row["view"]}:
         try:
             (engine.path / rel).unlink()

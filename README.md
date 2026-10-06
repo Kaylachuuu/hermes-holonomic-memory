@@ -413,6 +413,46 @@ images are only read. If the image generator cannot be reached the dream is kept
 | `dream_image_use_people` | `false` | `from_images`: may images with real people be drawn from |
 | `dream_image_describe_source` | `true` | `from_images`: add her description of the source image to the scene, so its details are asked for |
 
+### Picture fingerprints
+
+A description records what the vision model thought to mention. A fingerprint is a list of numbers
+worked out from the picture itself by a model made for that, so two pictures of the same thing come
+out close together whether or not anyone would describe them alike. Each kept image gets one for the
+whole picture and one for each of its parts, so a thing in the corner of one image can be matched
+with the same thing filling another.
+
+Ollama cannot make these, so a small helper server does. It is not loaded by Hermes; run it with any
+Python that has `torch` and `transformers` (ComfyUI's will do), and it downloads its model, DINOv2
+base, about 350 MB, on first start:
+
+```
+C:\Users\you\ComfyUI\.venv\Scripts\python.exe "%LOCALAPPDATA%\hermes\plugins\holonomic\tools\fingerprint_server.py"
+hermes holonomic images fingerprints on           # [--host URL] if the helper is on another machine
+hermes holonomic images similar 12                # images that look like image #12
+hermes holonomic images similar 12 --all          # every image with its figures, to judge the threshold
+```
+
+The helper runs on the processor by default (`--device cpu`), which is quick enough and leaves the
+graphics card to the models that need it. Fingerprints are made when images are described and when
+the conversation is quiet. The agent finds look-alikes with the `images` action, `image_id` and
+`similar`. Fingerprints from different models cannot be compared: if the helper's model changes, they
+are made again.
+
+`image_fingerprint_min` (default `0.5`) is how alike two pictures must be to be called alike, on a
+scale where 1 is the same picture. It was chosen before being tried on real photographs; run
+`similar --all` on your own images and set it where related and unrelated pictures separate. A part
+of an image the vision model judged to show nothing worth recording is not matched on, since two
+plain walls are alike and it says nothing about the images.
+
+This is the first of three stages. Named things (telling her "this is Sushi" and having her
+recognise Sushi elsewhere) and faces come next.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `image_fingerprints` | `false` | Make and use picture fingerprints |
+| `image_fingerprint_host` | `http://127.0.0.1:8189` | Where `tools/fingerprint_server.py` listens |
+| `image_fingerprint_min` | `0.5` | How alike (0 to 1) two pictures must be to be called alike |
+
 ## Inspecting the store
 
 ```
