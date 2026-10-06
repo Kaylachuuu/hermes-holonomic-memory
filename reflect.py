@@ -381,8 +381,10 @@ def ollama_chat(host: str, model: str, system: str, user: str, *, timeout: float
                       "reply_chars": len(content), "think": think,
                       "thinking": " ".join(str((data.get("message") or {}).get("thinking") or "").split())})
     if data.get("done_reason") == "length":
-        raise ReflectionError(f"The model hit the {max_tokens}-token reply limit without finishing. "
-                              f"Its reply began: {content[:300]!r}")
+        error = ReflectionError(f"The model hit the {max_tokens}-token reply limit without finishing. "
+                                f"Its reply began: {content[:300]!r}")
+        error.partial = content                 # what it did write may still be worth having
+        raise error
     return content
 
 
@@ -414,6 +416,32 @@ def ollama_unload(host: str, name: str, timeout: float = 60.0) -> None:
 def ollama_load(host: str, name: str, forever: bool = False, timeout: float = 600.0) -> None:
     """Load a model and wait until it is ready.  With no prompt Ollama loads the model and returns."""
     _ollama(host, "/api/generate", dict({"model": name}, **({"keep_alive": -1} if forever else {})), timeout)
+
+
+def salvage(raw: str) -> Dict[str, Any]:
+    """What can be kept of a reply that was cut off: every item that was written out in full, each once.  A model
+    that runs to its limit has usually begun to repeat itself, and what came before the repeating is sound."""
+    out: Dict[str, Any] = {}
+    decoder = json.JSONDecoder()
+    for key in ("user_facts", "self_notes", "relationship_notes", "insights"):
+        m = re.search(r'"%s"\s*:\s*\[' % key, raw or "")
+        items, had, at = [], set(), m.end() if m else -1
+        while m:
+            while at < len(raw) and raw[at] in " \t\r\n,":
+                at += 1
+            if at >= len(raw) or raw[at] != "{":
+                break
+            try:
+                item, at = decoder.raw_decode(raw, at)
+            except ValueError:
+                break
+            text = " ".join(str(item.get("text") or "").split()).lower() if isinstance(item, dict) else ""
+            if text and text not in had:
+                had.add(text)
+                items.append(item)
+        out[key] = items
+    out["superseded"] = []
+    return out
 
 
 def _parse(raw: str) -> Dict[str, Any]:
@@ -618,8 +646,14 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     existing = engine.related_of_kind(sorted(user_said), FACT)
 
     # ---- step 1: propose
-    data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth),
-                       _PROPOSE_BASIC_SCHEMA if depth <= 1 else _PROPOSE_SCHEMA, budget))
+    try:
+        data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth),
+                           _PROPOSE_BASIC_SCHEMA if depth <= 1 else _PROPOSE_SCHEMA, budget))
+    except ReflectionError as exc:
+        data = salvage(getattr(exc, "partial", ""))
+        if not any(data[k] for k in data):
+            raise
+        report["cut_short"] = sum(len(data[k]) for k in data)     # the reply ran to its limit; what was whole is kept
     # A stored fact is retired only by something the user said, and only if it was actually shown.
     shown = {f["id"]: f["text"] for f in existing}
     superseded = []

@@ -538,3 +538,30 @@ def test_a_profile_with_nothing_new_is_left_as_it_is(tmp_path):
     assert m.profile("us") == "We talk about her work in networking." and m.profile("self") == "I like a tidy answer."
     report = reflect_once(m, {}, llm=lambda system, user, step: answer(ids, **drift), start_after=0)      # a self note this time
     assert m.profile("self") == "I like an untidy answer." and m.profile("us") == "We talk about her work in networking."
+
+
+def test_a_reply_cut_off_at_the_limit_keeps_what_was_whole(tmp_path):
+    """A pass that had worked four times failed outright when the model ran to its limit, repeating itself."""
+    from holonomic.reflect import reflect_once, salvage, ReflectionError
+    m, ids = seeded(tmp_path)
+    whole = ('{"user_facts": [\n {"text": "Kayla works in IT.", "sources": [%d]},\n {"text": "Kayla works in IT.", "sources": [%d]},'
+             '\n {"text": "Kayla is writing an operating system in x86 assembly.", "sources": [%d]},\n {"text": "Kayla is wri'
+             % (ids["name"], ids["name"], ids["os"]))
+    got = salvage(whole)
+    assert [i["text"] for i in got["user_facts"]] == ["Kayla works in IT.", "Kayla is writing an operating system in x86 assembly."]
+    assert got["self_notes"] == [] and salvage("") ["user_facts"] == [] and salvage('{"user_facts": [')["user_facts"] == []
+
+    def llm(system, user, step):
+        if step == "propose":
+            error = ReflectionError("The model hit the 2000-token reply limit without finishing.")
+            error.partial = whole
+            raise error
+        return answer(ids)
+    report = reflect_once(m, {}, llm=llm)
+    assert report["cut_short"] == 2 and len(report["stored"]) == 2
+
+    def nothing(system, user, step):
+        raise ReflectionError("The model hit the 2000-token reply limit without finishing.")
+    m.remember("One more thing to think about, I like tea.", kind="said_user", session="s9")
+    with pytest.raises(ReflectionError):
+        reflect_once(m, {}, llm=nothing)

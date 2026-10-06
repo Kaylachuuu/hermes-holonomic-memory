@@ -184,6 +184,46 @@ profile is told to begin with the person's life (people and animals by name); a 
 once; and one that comes back longer than `profile_max_chars` (1200) is sent back, twice at most, to be said
 shorter before anything is cut. If it is still too long, the report says how much was cut.
 
+
+## Reference libraries
+
+A library is material to work from (manuals, notes, file format descriptions, source code), built from a
+folder of files. It has its own plates, beside the memory store and never mixed into it: what is in a
+library does not fade, is not reflected on, is not dreamt about, and is nobody's memory.
+
+Nothing from a library reaches a conversation unless it is open in that conversation, and a new conversation
+starts with none open. Working on a project in the evening does not put its details into the next morning's
+talk. She still remembers, as ordinary memory, that the two of you worked on it.
+
+In conversation:
+
+- "Make a library called x86 from C:\Users\you\Documents\x86-reference." She makes it and reads the folder
+  in the background; ask her how it is getting on.
+- "Use the x86 and fat-filesystems libraries for this." They are open until the conversation ends. From the
+  next message on she is given what they have on each message, with the file each piece came from, and she
+  can look things up in them herself.
+- A new conversation is told which libraries the last one used, so she can ask whether to pick the work up
+  again. She does not open one unasked.
+
+From the command line:
+
+    hermes holonomic library                               what there is
+    hermes holonomic library create NAME "FOLDER" [--about "what it is for"]
+    hermes holonomic library update NAME                   read the folder again: new and changed files in, missing ones out
+    hermes holonomic library show NAME                     its files, and how many pieces each became
+    hermes holonomic library search NAME "words"           what she would be given
+    hermes holonomic library delete NAME --yes             remove the library (the folder of material is not touched)
+
+What is read: text of any kind (Markdown, plain text, source code, HTML with its markup removed), `.docx`,
+and `.pdf` if `pypdf` is installed in Hermes' Python (a scanned PDF is pictures and has no text to read).
+Files are cut into pieces at headings and paragraphs, and the pieces of one section are bound together, so
+finding one brings its neighbour. Exact words count for more here than in memory (`library_lexical_weight`),
+because a question about `INT 13h` wants the passage that says `INT 13h`. A build can be stopped and run
+again; only what is new or changed is read. `hermes holonomic context` shows what the libraries gave her.
+
+Settings: `library_k` (4 pieces per message), `library_min_score` (0.3), `library_context_chars` (3600),
+`library_piece_chars` (1100), `library_max_file_mb` (40), `library_max_files` (5000).
+
 ## Short-term and long-term memory, and sleep
 
 Conversation as it happened is short-term memory. Facts, notes, profiles and accounts of past

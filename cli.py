@@ -75,13 +75,105 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width - 3] + "..."
 
 
+def _library_cmd(engine, cfg, args) -> None:
+    from . import library as lib
+    root, what, items = lib.root_of(engine), args.library_action, list(args.items or [])
+
+    def show_report(r: dict) -> None:
+        print(f"Library '{r['name']}': {r['added']} file(s) added, {r['changed']} changed, {r['removed']} removed, "
+              f"{r['unchanged']} unchanged; {r['pieces']} new piece(s). It now holds {r['in_library']['pieces']} piece(s) "
+              f"from {r['in_library']['files']} file(s).")
+        for skipped in r["skipped"][:40]:
+            print(f"  left out: {skipped['file']}  ({skipped['why']})")
+        if len(r["skipped"]) > 40:
+            print(f"  ... and {len(r['skipped']) - 40} more left out")
+
+    def building(name: str) -> None:
+        started, last = time.time(), [0.0]
+
+        def progress(r: dict) -> None:
+            if time.time() - last[0] >= 2.0:
+                last[0] = time.time()
+                print(f"  {r['done']}/{r['total']} files, {r['pieces']} pieces, {time.time() - started:.0f} s", flush=True)
+        show_report(lib.build(root, name, engine.embedder, cfg, progress=progress))
+    try:
+        if what == "list":
+            have = lib.names(root)
+            if not have:
+                print('No libraries yet. Make one:  hermes holonomic library create NAME "C:\\path\\to\\folder"')
+                return
+            for n in have:
+                s = lib.summary(root, n)
+                print(f"{n}: {s['pieces']} pieces from {s['files']} files, built {s['built']}\n    from {s['folder']}"
+                      + (f"\n    {s['about']}" if s["about"] else ""))
+            print("A library is used only in a conversation where it has been opened: ask her to open it.")
+        elif what == "create":
+            if len(items) != 2:
+                print('Usage: hermes holonomic library create NAME "FOLDER" [--about "what it is for"]')
+                return
+            made = lib.create(root, items[0], items[1], args.about or "")
+            print(f"Made library '{made['name']}' from {made['folder']}. Reading the files in ...")
+            building(made["name"])
+        elif what == "update":
+            if len(items) != 1:
+                print("Usage: hermes holonomic library update NAME")
+                return
+            building(lib.clean_name(items[0]))
+        elif what == "show":
+            if len(items) != 1:
+                print("Usage: hermes holonomic library show NAME")
+                return
+            name = lib.clean_name(items[0])
+            data = lib.info(root, name)
+            if data is None:
+                print(f"There is no library called '{name}'.")
+                return
+            s = lib.summary(root, name)
+            print(f"{name}: {s['pieces']} pieces from {s['files']} files, built {s['built']}\n  from {s['folder']}"
+                  + (f"\n  {s['about']}" if s["about"] else ""))
+            for rel, f in sorted((data.get("files") or {}).items()):
+                print(f"  {len(f.get('ids') or []):5d}  {rel}")
+        elif what == "search":
+            if len(items) < 2:
+                print('Usage: hermes holonomic library search NAME "what to look up"')
+                return
+            name = lib.clean_name(items[0])
+            if lib.info(root, name) is None:
+                print(f"There is no library called '{name}'.")
+                return
+            found = lib.search(root, [name], " ".join(items[1:]), engine.embedder, cfg, k=args.n, floor=0.15)
+            if not found:
+                print("Nothing matched.")
+            for f in found:
+                print(f"[{f['score']:.2f}{' linked' if f['linked'] else ''}] {f['source']}\n    {_clip(f['text'], args.width)}")
+        elif what == "delete":
+            if len(items) != 1:
+                print("Usage: hermes holonomic library delete NAME --yes")
+                return
+            name = lib.clean_name(items[0])
+            data = lib.info(root, name)
+            if data is None:
+                print(f"There is no library called '{name}'.")
+            elif not args.yes:
+                s = lib.summary(root, name)
+                print(f"This would remove library '{name}' ({s['pieces']} pieces from {s['files']} files). The folder it was "
+                      f"built from, {s['folder']}, is not touched. Add --yes to do it.")
+            else:
+                lib.delete(root, name)
+                print(f"Removed library '{name}'. Its folder of material is untouched.")
+    except lib.LibraryError as exc:
+        print(exc)
+    finally:
+        lib.close_all(root)
+
+
 def holonomic_command(args) -> None:
     try:
         sys.stdout.reconfigure(errors="replace")       # Windows consoles choke on some characters
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
@@ -114,6 +206,8 @@ def holonomic_command(args) -> None:
             _images_cmd(engine, cfg, args)
         elif action == "faces":
             _faces_cmd(engine, cfg, args)
+        elif action == "library":
+            _library_cmd(engine, cfg, args)
         elif action == "context":
             try:
                 print((engine.path / "last_context.txt").read_text(encoding="utf-8").rstrip())
@@ -1072,6 +1166,9 @@ def _reflect(engine, cfg, args) -> None:
                 print(f"  step {c['step']}: {c.get('seconds', 0):.0f} s, prompt {c.get('prompt_tokens')} tokens, "
                       f"reply {c.get('reply_tokens')} tokens, thinking {'on' if c.get('think') else 'off'}, "
                       f"finished: {c.get('done_reason')}" + (f"  [{c['failed']}]" if c.get("failed") else ""))
+            if report.get("cut_short"):
+                print(f"  NOTE: the model's reply ran to its limit and was cut off. The {report['cut_short']} items it had "
+                      f"written out in full were kept; anything after them was lost.")
             for c in report.get("checked") or []:
                 if c["verdict"] == "drop":
                     print(f"  CHECK dropped ({c['kind']}): {c['was']}")
@@ -1158,6 +1255,13 @@ def register_cli(subparser) -> None:
     fa.add_argument("--all", action="store_true", help="With 'forget': every face and every person")
     fa.add_argument("--yes", action="store_true", help="With 'forget --all': actually do it")
     fa.add_argument("--width", type=int, default=110, help="Characters of text to show")
+    lb = subs.add_parser("library", help="Reference libraries: material to work from, kept apart from memory")
+    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "show", "search", "delete"])
+    lb.add_argument("items", nargs="*", help="A library name; for 'create' the folder too; for 'search' the words")
+    lb.add_argument("--about", help="With 'create': one line saying what the library is for")
+    lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")
+    lb.add_argument("-n", type=int, default=6, help="With 'search': how many results")
+    lb.add_argument("--width", type=int, default=300, help="Characters of text to show")
     td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
     td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")

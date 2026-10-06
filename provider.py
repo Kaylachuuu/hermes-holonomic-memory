@@ -25,6 +25,8 @@ from . import images as _images
 from .images import IMAGE_DEFAULTS
 from .fingerprints import FINGERPRINT_DEFAULTS
 from .faces import FACE_DEFAULTS
+from . import library as _library
+from .library import LIBRARY_DEFAULTS, LibraryError
 from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, IMAGE, IMAGE_KINDS, IMAGE_PART, REFLECT_DEFAULTS,
                       SUBJECTS, IdleReflector, read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
@@ -54,6 +56,7 @@ DEFAULTS.update(SLEEP_DEFAULTS)
 DEFAULTS.update(IMAGE_DEFAULTS)
 DEFAULTS.update(FINGERPRINT_DEFAULTS)
 DEFAULTS.update(FACE_DEFAULTS)
+DEFAULTS.update(LIBRARY_DEFAULTS)
 
 _DREAM_WORD_RE = re.compile(r"\bdream(?:s|t|ed|ing)?\b", re.IGNORECASE)
 
@@ -284,6 +287,42 @@ def mark_dream_talk(engine, memory_id: int, text: str, kind: str, cfg: Dict[str,
     return new
 
 
+LIBRARY_TOOL = {
+    "name": "holonomic_library",
+    "description": (
+        "Reference libraries: material to work from (manuals, notes, source code), kept apart from your memory. A "
+        "library is built from a folder of files on the user's computer. Nothing from a library reaches you unless it "
+        "is open in this conversation, and a new conversation starts with none open.\n"
+        "ACTIONS:\n"
+        "- list: the libraries that exist, and which are open in this conversation.\n"
+        "- create: make a library called `name` from the files in `folder` (a full path the user gave you), with an "
+        "optional `about` (one line saying what it is for). Only when the user asks. Building runs in the background and "
+        "can take minutes for a large folder; use 'status' to see how far it has got.\n"
+        "- update: read the folder of library `name` again, taking in files that are new or changed and dropping "
+        "ones that are gone.\n"
+        "- status: how library `name` stands: its files and pieces, whether it is still being built, files left out and why.\n"
+        "- open: open `names` (one or more libraries) for this conversation. Only when the user asks to work with "
+        "them. They stay open until the conversation ends or they are closed.\n"
+        "- close: close `names`, or every open library if none is given.\n"
+        "- search: look up `query` in the open libraries (or only in `names`, which must be open). Use it for exact "
+        "details: a file format, an instruction, a number. Results name the file they came from."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "create", "update", "status", "open", "close", "search"]},
+            "name": {"type": "string", "description": "A library's name: letters, digits, - or _ (create, update, status)."},
+            "names": {"type": "array", "items": {"type": "string"}, "description": "Library names (open, close, search)."},
+            "folder": {"type": "string", "description": "Full path of the folder holding the material (create)."},
+            "about": {"type": "string", "description": "One line saying what the library is for (create)."},
+            "query": {"type": "string", "description": "What to look up (search)."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Max results for search (default 6)."},
+        },
+        "required": ["action"],
+    },
+}
+
+
 def _error(message: str) -> str:
     return json.dumps({"error": str(message)[:500]})
 
@@ -356,6 +395,7 @@ def _release_engine(engine) -> None:
                     del _ENGINES[key]
                     entry[2].stop()
                     try:
+                        _library.close_all(_library.root_of(engine))
                         engine.close()
                     except Exception as exc:
                         logger.debug("holonomic: close failed: %s", exc)
@@ -428,6 +468,11 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False,
                           rewound: bool = False, **kwargs) -> None:
+        if self._engine is not None and not reset:      # the same conversation under a new id keeps its libraries
+            try:
+                _library.carry_over(_library.root_of(self._engine), new_session_id or "", parent_session_id or self._session_id)
+            except Exception as exc:
+                logger.debug("holonomic: libraries not carried over: %s", exc)
         self._session_id = new_session_id or ""
 
     # --------------------------------------------------------- system prompt
@@ -447,7 +492,26 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "are associated with something that was. Recalled memories can be incomplete or out of date: weigh them, "
                 "don't recite them. Use the holonomic_memory tool to search deeper, to store something important "
                 "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'."
-                + self._images_block(engine) + self._profile_block(engine) + self._latest_dream_block(engine))
+                + self._images_block(engine) + self._profile_block(engine) + self._latest_dream_block(engine)
+                + self._library_block(engine))
+
+    def _library_block(self, engine) -> str:
+        try:
+            return _library.prompt_block(_library.root_of(engine), self._session_id, self._cfg)
+        except Exception as exc:
+            logger.debug("holonomic: library block failed: %s", exc)
+            return ""
+
+    def _reference_block(self, engine, words: str, sid: str, trace: List[str]) -> str:
+        """What the libraries open in this conversation have on the message.  Nothing when none is open."""
+        try:
+            block, notes = _library.context_block(_library.root_of(engine), sid, words, engine.embedder, self._cfg)
+            trace.extend(notes)
+            return block
+        except Exception as exc:
+            logger.warning("holonomic: reference libraries failed: %s", exc)
+            trace.append(f"reference libraries failed: {exc}")
+            return ""
 
     def _images_block(self, engine) -> str:
         if not self._cfg.get("image_enabled"):
@@ -575,7 +639,8 @@ class HolonomicMemoryProvider(MemoryProvider):
             lines.append(line)
             shown += [hit.id] + [p.id for p in parts]
             used += len(line) + 1
-        extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "") if b]
+        extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "",
+                                           self._reference_block(engine, _images.strip_image_markers(query), sid, trace)) if b]
         if not lines:
             return self._keep_context(engine, query, "\n\n".join(extra), trace)
         try:                                             # what gets used stays strong; what is never recalled fades
@@ -992,7 +1057,73 @@ class HolonomicMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------ tool
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [TOOL_SCHEMA]
+        return [TOOL_SCHEMA, LIBRARY_TOOL]
+
+    def _library_action(self, engine, args: Dict[str, Any], sid: str) -> str:
+        root = _library.root_of(engine)
+        action = args.get("action")
+        wanted = [str(n) for n in (args.get("names") or ([args["name"]] if args.get("name") else []))]
+        try:
+            if action == "list":
+                return json.dumps({"libraries": [_library.summary(root, n) for n in _library.names(root)],
+                                   "open_in_this_conversation": _library.opened(root, sid)})
+            if action in ("create", "update"):
+                if not args.get("name"):
+                    return _error(f"{action} needs 'name'")
+                if action == "create":
+                    if not (args.get("folder") or "").strip():
+                        return _error("create needs 'folder': the full path of the folder that holds the material")
+                    made = _library.create(root, args["name"], args["folder"], args.get("about") or "")
+                    name = made["name"]
+                else:
+                    name = _library.clean_name(args["name"])
+                state = _library.build_in_background(root, name, engine.embedder, self._cfg,
+                                                     spawn=lambda target, label: spawn_context_thread(target, name=label))
+                return json.dumps({"library": name, "building": True, "already_running": bool(state.get("already")),
+                                   "note": "Reading the folder in the background. Use action 'status' to see how far it has got. "
+                                           "It is not open in this conversation until you open it."})
+            if action == "status":
+                if not args.get("name"):
+                    return _error("status needs 'name'")
+                name = _library.clean_name(args["name"])
+                if _library.info(root, name) is None:
+                    return _error(f"There is no library called '{name}'. There are: {', '.join(_library.names(root)) or 'none'}")
+                out = _library.summary(root, name)
+                report = (out.get("building") or {}).pop("report", None)
+                if report:
+                    out["last_build"] = {k: report[k] for k in ("added", "changed", "removed", "unchanged", "pieces")}
+                    out["left_out"] = report["skipped"][:20]
+                    out["left_out_count"] = len(report["skipped"])
+                out["open_in_this_conversation"] = name in _library.opened(root, sid)
+                return json.dumps(out)
+            if action == "open":
+                if not wanted:
+                    return _error("open needs 'names': which libraries to open")
+                now = _library.open_for(root, sid, wanted)
+                return json.dumps({"open_in_this_conversation": now, "libraries": [_library.summary(root, n) for n in now],
+                                   "note": "From the next message on, what these have on each message is given to you. "
+                                           "Use action 'search' to look something up now."})
+            if action == "close":
+                return json.dumps({"open_in_this_conversation": _library.close_for(root, sid, wanted or None)})
+            if action == "search":
+                query = (args.get("query") or "").strip()
+                if not query:
+                    return _error("search needs 'query'")
+                now = _library.opened(root, sid)
+                if not now:
+                    return _error("No library is open in this conversation. Open one first (action 'open'), and only if the "
+                                  "user has asked to work with it.")
+                which = [_library.clean_name(n) for n in wanted] or now
+                closed = [n for n in which if n not in now]
+                if closed:
+                    return _error(f"Not open in this conversation: {', '.join(closed)}. Open: {', '.join(now)}.")
+                found = _library.search(root, which, query, engine.embedder, self._cfg,
+                                        k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
+                return json.dumps({"searched": which, "count": len(found), "results": [
+                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"]} for f in found]})
+            return _error(f"Unknown action: {action}")
+        except LibraryError as exc:
+            return _error(exc)
 
     def _hit_json(self, hit) -> Dict[str, Any]:
         out = {"id": hit.id, "text": hit.text, "kind": hit.kind,
@@ -1117,11 +1248,17 @@ class HolonomicMemoryProvider(MemoryProvider):
                            "images": [self._image_json(i) for i in found]})
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        if tool_name != TOOL_SCHEMA["name"]:
+        if tool_name not in (TOOL_SCHEMA["name"], LIBRARY_TOOL["name"]):
             return _error(f"Unknown tool: {tool_name}")
         engine = self._ensure_engine()
         if engine is None:
             return _error(f"Memory is unavailable: {self._last_error or 'embedding server not reachable'}")
+        if tool_name == LIBRARY_TOOL["name"]:
+            try:
+                return self._library_action(engine, args or {}, str(kwargs.get("session_id") or self._session_id or ""))
+            except Exception as exc:
+                logger.warning("holonomic: library tool call failed: %s", exc)
+                return _error(exc)
         action = (args or {}).get("action")
         limit = max(1, min(int(args.get("limit") or 8), 25))
         try:
