@@ -333,6 +333,18 @@ def holonomic_command(args) -> None:
                     mark_dream_talk(engine, m["id"], m["text"], m["kind"], cfg, force=bool(m.get("force")))
             if found:
                 print("Labelled as dream talk." if args.apply else "Nothing changed. Run again with --apply to label them.")
+        elif action == "dreams" and args.dreams_action == "sort":
+            from . import images as _img
+            done = _img.sort_dream_files(engine)
+            where = engine.path / _img.DREAM_FOLDER
+            if done["moved"]:
+                print(f"Moved {done['moved']} dream picture(s) into {len(done['folders'])} folder(s) under {where}:")
+                for folder in sorted(done["folders"]):
+                    print(f"  {folder}")
+            else:
+                print(f"Dream pictures are already in their own folders, under {where}.")
+            if done["missing"]:
+                print(f"  {done['missing']} file(s) on record were not found on disk.")
         elif action == "dreams" and args.dreams_action == "images":
             _dream_images(cfg, args)
         elif action == "dreams":
@@ -808,7 +820,7 @@ def _images_cmd(engine, cfg, args) -> None:
         if _fp.fingerprint_config(cfg)["image_fingerprints"]:
             st = _fp.status(engine)
             print(f"  fingerprints: on, {st['fingerprinted']} of {st['images']} image(s) have one   (hermes holonomic images fingerprints)")
-        print(f"  files are in: {engine.path / 'images'}")
+        print(f"  files are in: {engine.path / 'images'}\n  dream pictures are in: {engine.path / _img.DREAM_FOLDER}, a folder for each sleep")
         if not ic["image_enabled"]:
             print("  Turn on with: hermes holonomic images on --model NAME [--host URL]")
     elif what == "list":
@@ -1397,7 +1409,7 @@ def register_cli(subparser) -> None:
     dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
     dt.add_argument("--width", type=int, default=110, help="Characters of text to show")
     drm = subs.add_parser("dreams", help="Show recent dreams, or set what images do in dreams")
-    drm.add_argument("dreams_action", nargs="?", choices=["show", "images"], default="show")
+    drm.add_argument("dreams_action", nargs="?", choices=["show", "images", "sort"], default="show")
     drm.add_argument("mode", nargs="?", help="With 'images': off, words, pictures or from_images")
     drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
     drm.add_argument("--api", choices=["comfyui", "a1111", "openai"], help="With 'images': which interface the image generator speaks")

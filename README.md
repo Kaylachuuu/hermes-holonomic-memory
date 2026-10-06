@@ -650,6 +650,17 @@ hermes holonomic forget 52 --yes
 recalled memories, what was seen in an attached image, what was recognised. When she does not act on
 something, look there first to see whether she was told it.
 
+## Where the files are
+
+    <Hermes home>/holonomic/holonomic.db                 memories, plates, profiles
+    <Hermes home>/holonomic/images/                      images she has been shown
+    <Hermes home>/holonomic/dream-images/2026-10-05_2035/   pictures she dreamt, a folder for each sleep
+    <Hermes home>/holonomic/libraries/NAME/              a reference library's own store
+
+A sleep can have several dreams; their pictures share the sleep's folder, each file named for its dream
+(`dream123_...`). Dream pictures made before these folders existed are moved into them at the next sleep, or
+at once with `hermes holonomic dreams sort`. Only the files move; nothing about the pictures changes.
+
 ## Backing up and restoring
 
     hermes holonomic backup                        write the whole store to one zip file

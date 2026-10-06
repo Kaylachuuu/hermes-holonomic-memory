@@ -792,6 +792,12 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
     if "fade" in wanted and sc["fade_enabled"]:
         fade(engine, cfg, report, dry_run=dry_run, now=now)
     if "dream" in wanted and sc["dream_enabled"]:
+        if not dry_run:
+            try:                                         # pictures from before dreams had folders of their own
+                from . import images as _dream_files
+                _dream_files.sort_dream_files(engine)
+            except Exception as exc:
+                report["errors"].append(f"sorting dream pictures: {exc}")
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True)
         fresh = next((r["profiles"]["user"] for r in reversed(report["reflections"]) if (r.get("profiles") or {}).get("user")), "")
         dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh, paint=paint)

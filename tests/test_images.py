@@ -754,6 +754,8 @@ def test_dream_pictures_reach_the_agent_and_the_terminal(tmp_path):
                 args = parser.parse_args(list(argv)); args.func(args)
             return out.getvalue()
         assert f"Picture: A black cat asleep on a green couch" in run("dreams") and file in run("dreams")
+        assert "dream-images" in file and "already in their own folders" in run("dreams", "sort")
+        assert "dream pictures are in:" in run("images")
         out = run("dreams", "images")
         assert "Images in dreams: words" in out and "Image memory is off" in out and "Restart Hermes" not in out
         out = run("dreams", "images", "pictures")
@@ -2317,3 +2319,47 @@ def test_a_person_in_the_picture_does_not_decide_which_cat_it_is(tmp_path):
     assert set(got) == {"theo"} and not any(place.endswith("left") or place == "whole" for place in got["theo"]["places"])
     # without the faces being known, what is written about a part is gone by instead: the same answer here
     assert set(fp.recognise(m, dict(cfg, face_learn="none"), again_theo)) == {"theo"}
+
+
+def test_dream_pictures_have_folders_of_their_own_by_sleep(tmp_path):
+    """Everything was in one folder: photographs she had been shown and pictures she had dreamt alike."""
+    from holonomic import images as im
+    m = store(tmp_path)
+    night1, night2 = time.time() - 30 * 3600, time.time() - 2 * 3600
+    d1 = m.remember("A dream of a lake at dusk with a cat on the shore.", kind="dream", realm="dream", session="dream", whole=True, created_at=night1)[0]
+    d2 = m.remember("A dream of a mountain under fireworks.", kind="dream", realm="dream", session="dream", whole=True, created_at=night1 + 1800)[0]
+    d3 = m.remember("A dream of a city seen from above.", kind="dream", realm="dream", session="dream", whole=True, created_at=night2)[0]
+    stamp = lambda t: time.strftime("%Y-%m-%d_%H%M", time.localtime(t))
+    # two dreams of one sleep share its folder; a later sleep has another
+    assert im.dream_folder(m, d1) == im.dream_folder(m, d2) == f"dream-images/{stamp(night1)}" and im.dream_folder(m, d3) == f"dream-images/{stamp(night2)}"
+    shown = im.add_image(m, picture(colour=(10, 120, 200)), {}, origin="lake.png")
+    a = im.add_dream_image(m, picture(colour=(200, 30, 30)), {}, dream_id=d1, scene="a lake at dusk", sources=[])
+    b = im.add_dream_image(m, picture(colour=(30, 200, 30)), {}, dream_id=d2, scene="fireworks", sources=[])
+    c = im.add_dream_image(m, picture(colour=(30, 30, 200)), {}, dream_id=d3, scene="a city", sources=[])
+    rel = lambda img: Path(img["original"]).relative_to(m.path).as_posix()
+    assert rel(shown).startswith("images/") and rel(a).startswith(f"dream-images/{stamp(night1)}/dream{d1}_")
+    assert rel(b).startswith(f"dream-images/{stamp(night1)}/dream{d2}_") and rel(c).startswith(f"dream-images/{stamp(night2)}/dream{d3}_")
+    assert Path(a["file"]).exists() and Path(a["original"]).exists() and "dream-images" in a["file"]
+    assert [x.name for x in (m.path / "images").iterdir() if "dream" in x.name] == []
+    assert im.dream_pictures(m, d1)[0]["file"] == a["file"] and im.sort_dream_files(m) == {"moved": 0, "folders": [], "missing": 0}
+    # pictures from before there were folders are moved, and everything still finds them
+    db = im._db(m)
+    old = {}
+    for img in (a, c):
+        row = db.execute("SELECT file, view FROM images WHERE id = ?", (img["id"],)).fetchone()
+        back = {col: "images/" + Path(row[col]).name.split("_", 1)[1] for col in ("file", "view")}
+        for col in ("file", "view"):
+            if (m.path / row[col]).exists():
+                (m.path / row[col]).rename(m.path / back[col])
+        db.execute("UPDATE images SET file = ?, view = ? WHERE id = ?", (back["file"], back["view"], img["id"]))
+        old[img["id"]] = back
+    assert Path(im.get_image(m, a["id"])["original"]).parent.name == "images"
+    done = im.sort_dream_files(m)
+    assert done["moved"] == 2 and sorted(done["folders"]) == sorted({f"dream-images/{stamp(night1)}", f"dream-images/{stamp(night2)}"}) and done["missing"] == 0
+    again = im.get_image(m, a["id"])
+    assert rel(again).startswith(f"dream-images/{stamp(night1)}/dream{d1}_") and Path(again["original"]).exists() and Path(again["file"]).exists()
+    assert not (m.path / old[a["id"]]["file"]).exists() and im.dream_pictures(m, d3)[0]["file"].replace("\\", "/").find(f"dream-images/{stamp(night2)}/") > 0
+    assert im.sort_dream_files(m)["moved"] == 0 and Path(im.get_image(m, shown["id"])["original"]).parent.name == "images"
+    # a picture whose dream has since been forgotten still gets a folder, by its own date
+    m.forget(d3)
+    assert im.dream_folder(m, d3, fallback=night2) == f"dream-images/{stamp(night2)}"

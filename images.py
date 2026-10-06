@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -355,7 +356,8 @@ def known(engine, data: bytes) -> Optional[dict]:
 
 
 def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", caption: str = "", session: str = "",
-              source: str = "user", realm: str = "waking", links: Tuple[int, ...] | List[int] = (), count: bool = True) -> dict:
+              source: str = "user", realm: str = "waking", links: Tuple[int, ...] | List[int] = (), count: bool = True,
+              folder: str = "images", stem: str = "") -> dict:
     """Keep an image.  Showing the same file again does not store it twice: it counts as seen again.
     Returns the image with 'new' saying which happened.  Nothing is described here."""
     ic = image_config(cfg)
@@ -373,16 +375,16 @@ def add_image(engine, data: bytes, cfg: Dict[str, Any], *, origin: str = "", cap
             return dict(get_image(engine, row["id"]), new=False)
     img, fmt = open_image(data)
     width, height = img.size
-    folder = engine.path / "images"
-    folder.mkdir(parents=True, exist_ok=True)
-    name = sha[:24]
-    file = f"images/{name}{_EXT.get(fmt, '.img')}"
+    folder = folder.strip("/") or "images"            # relative to the store; dream pictures have folders of their own
+    (engine.path / folder).mkdir(parents=True, exist_ok=True)
+    name = f"{stem}_{sha[:12]}" if stem else sha[:24]
+    file = f"{folder}/{name}{_EXT.get(fmt, '.img')}"
     (engine.path / file).write_bytes(data)
     box = view_box(width, height, ic)
     if fmt in _SHOWN_AS_IS and width <= box[0] and height <= box[1]:
         view = file
     else:
-        view = f"images/{name}.view.jpg"
+        view = f"{folder}/{name}.view.jpg"
         (engine.path / view).write_bytes(_jpeg(img, box))
     meta = json.dumps({"links": [int(i) for i in links if i]})
     caption = " ".join(strip_image_markers(caption).split())[:600]
@@ -1269,11 +1271,72 @@ def blend(engine, image_ids: List[int], size: Tuple[int, int], hide: Optional[Di
     return out.getvalue()
 
 
+DREAM_FOLDER = "dream-images"
+_CYCLE_GAP = 3 * 3600.0          # dreams further apart than this belong to different nights
+
+
+def dream_folder(engine, dream_id: int, fallback: Optional[float] = None) -> str:
+    """Where a dream's pictures are kept: apart from the images she has been shown, in a folder for the sleep the
+    dream came from (dream-images/2026-10-05_2035).  One sleep can have several dreams; they share its folder,
+    which is named for when the first of them was dreamt."""
+    from .sleep import DREAM, DREAM_REALM
+    dreams = sorted(engine.recent(100000, realm=DREAM_REALM, kind=DREAM), key=lambda d: (d["created_at"], d["id"]))
+    first, previous, mine = None, None, None
+    for d in dreams:
+        if previous is None or d["created_at"] - previous > _CYCLE_GAP:
+            first = d["created_at"]
+        previous = d["created_at"]
+        if int(d["id"]) == int(dream_id):
+            mine = first
+            break
+    when = mine if mine is not None else fallback if fallback is not None else time.time()      # a dream since forgotten
+    return f"{DREAM_FOLDER}/{time.strftime('%Y-%m-%d_%H%M', time.localtime(when))}"
+
+
+def sort_dream_files(engine) -> dict:
+    """Move dream pictures that are still among the images she was shown into the dream folders.  Only files are
+    moved and their places noted; nothing about the pictures changes.  Safe to run again."""
+    db = _db(engine)
+    with engine._lock:
+        rows = db.execute("SELECT id, file, view, session, meta, created_at FROM images WHERE source = 'dream' "
+                          "AND file LIKE 'images/%'").fetchall()
+    report = {"moved": 0, "folders": [], "missing": 0}
+    for row in rows:
+        try:
+            dream_id = int(json.loads(row["meta"] or "{}").get("dream_id") or str(row["session"] or "").split(":")[-1])
+        except (ValueError, TypeError):
+            dream_id = 0
+        folder = dream_folder(engine, dream_id, fallback=float(row["created_at"] or time.time()))
+        (engine.path / folder).mkdir(parents=True, exist_ok=True)
+        moved = {}
+        for column in ("file", "view"):
+            rel = row[column]
+            if not rel or rel in moved:
+                continue
+            target = f"{folder}/dream{dream_id}_{Path(rel).name}" if dream_id else f"{folder}/{Path(rel).name}"
+            source = engine.path / rel
+            if source.exists():
+                os.replace(source, engine.path / target)
+                moved[rel] = target
+            elif (engine.path / target).exists():      # moved by an earlier run that was cut short
+                moved[rel] = target
+            else:
+                report["missing"] += 1
+        if moved:
+            with engine._lock:
+                db.execute("UPDATE images SET file = ?, view = ? WHERE id = ?",
+                           (moved.get(row["file"], row["file"]), moved.get(row["view"], row["view"]), int(row["id"])))
+            report["moved"] += 1
+            if folder not in report["folders"]:
+                report["folders"].append(folder)
+    return report
+
+
 def add_dream_image(engine, data: bytes, cfg: Dict[str, Any], *, dream_id: int, scene: str, sources: List[int]) -> dict:
     """Keep a picture from a dream.  It lives in the dream realm: it is never listed among images she was
     shown, never described as one, and is found only through the dream it belongs to."""
     img = add_image(engine, data, dict(cfg, image_sections=False), caption=scene, session=f"dream:{int(dream_id)}",
-                    source="dream", realm="dream")
+                    source="dream", realm="dream", folder=dream_folder(engine, int(dream_id)), stem=f"dream{int(dream_id)}")
     with engine._lock:
         _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?",
                             (json.dumps({"dream_id": int(dream_id), "from": [int(i) for i in sources]}), img["id"]))
