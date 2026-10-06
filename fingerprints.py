@@ -314,15 +314,62 @@ def _has_person(text: str) -> bool:
     return _PERSON_RE.search(text or "") is not None
 
 
-def _examples(engine, key: str, shown: str, model: str, exclude: int) -> list:
-    """The fingerprints that say what a named thing looks like.
+def _face_in(part: tuple, boxes: List[tuple]) -> bool:
+    """Whether most of some face lies inside a part of an image (both as x, y, w, h fractions of it)."""
+    px, py, pw, ph = part
+    for fx, fy, fw, fh in boxes:
+        ix = max(0.0, min(px + pw, fx + fw) - max(px, fx))
+        iy = max(0.0, min(py + ph, fy + fh) - max(py, fy))
+        if fw * fh > 0 and ix * iy / (fw * fh) >= 0.5:
+            return True
+    return False
 
-    An example with a person in it is left out whenever there is one without.  A photo of a cat lying on its
-    owner is mostly a picture of the owner: used as an example of the cat, it matched a later photo of the
-    same woman holding a different cat almost well enough to offer the wrong cat's name."""
+
+def _kind_word(what: str) -> str:
+    """'a long-haired tuxedo cat, black with a white chest' -> 'cat': the word a description would use for it."""
+    words = re.findall(r"[a-z][a-z\-]+", (what or "").split(",")[0].lower())
+    return words[-1] if words and len(words[-1]) >= 3 else ""
+
+
+def _geometry(engine, image_id: int) -> Dict[str, tuple]:
+    from .images import _db
+    with engine._lock:
+        rows = _db(engine).execute("SELECT place, x, y, w, h FROM image_sections WHERE image_id = ?", (int(image_id),)).fetchall()
+    return {r["place"]: (r["x"], r["y"], r["w"], r["h"]) for r in rows}
+
+
+def _without_people(engine, image_id: int, vectors: List[tuple], texts: Optional[Dict[str, str]] = None) -> Tuple[List[tuple], List[tuple]]:
+    """Split the fingerprints of an image into those with no person in them and those with one.
+
+    Where a face has been looked for, that is gone by: a part with most of a face in it has a person in it, and
+    so does the image as a whole if it has any face.  The same woman in two photographs made their parts as
+    alike (0.61 to 0.67) as the same cat made them (0.61), so a part with a face in it says nothing about the
+    cat.  Where faces have not been looked for, what was written about the part is gone by."""
+    from . import faces as _faces
     from .images import has_people
+    boxes = _faces.face_boxes(engine, image_id)
+    where = _geometry(engine, image_id) if boxes is not None else {}
+    clear, peopled = [], []
+    for place, v in vectors:
+        if place == "whole":
+            with_person = bool(boxes) if boxes is not None else has_people(engine, image_id)
+        elif boxes is not None:
+            with_person = place in where and _face_in(where[place], boxes)
+        else:
+            with_person = _has_person((texts or {}).get(place, ""))
+        (peopled if with_person else clear).append((place, v))
+    return clear, peopled
+
+
+def _examples(engine, key: str, shown: str, model: str, exclude: int, what: str = "") -> list:
+    """The fingerprints that say what a named thing looks like: from the images the user named it in, the parts
+    whose descriptions speak of it, by its name or by the word for what it is ('cat').  A part can show the cat
+    without the name having been written down for it.  If no part speaks of it, the whole image.
+
+    One with a person in it is left out whenever there is one without (see _without_people)."""
     with engine._lock:
         ids = [r["image_id"] for r in _ndb(engine).execute("SELECT image_id FROM image_name_marks WHERE name = ? AND state = 'example'", (key,))]
+    kind = _kind_word(what)
     clean, mixed = [], []
     for image_id in ids:
         if int(image_id) == int(exclude):
@@ -331,12 +378,14 @@ def _examples(engine, key: str, shown: str, model: str, exclude: int) -> list:
         if not vectors:
             continue
         _, parts = _texts(engine, image_id)
-        told = [(v, parts[place]) for place, v in vectors[1:] if _mentions(shown, parts.get(place, ""))]
-        if told:
-            for v, text in told:
-                (mixed if _has_person(text.replace(shown, " ")) else clean).append(v)
-        else:
-            (mixed if has_people(engine, image_id) else clean).append(vectors[0][1])
+        named = {shown: " "}
+        told = [(place, v) for place, v in vectors[1:]
+                if _mentions(shown, parts.get(place, "")) or (kind and _mentions(kind, parts.get(place, "")))
+                or (kind and _mentions(kind + "s", parts.get(place, "")))]
+        texts = {place: parts.get(place, "").replace(shown, " ") for place, _ in told}
+        clear, peopled = _without_people(engine, image_id, told or vectors[:1], texts)
+        clean += [v for _, v in clear]
+        mixed += [v for _, v in peopled]
     return clean or mixed
 
 
@@ -350,7 +399,7 @@ def _match(engine, cfg: Dict[str, Any], mine: List[tuple], model: str, exclude: 
     for k in known:
         if k["name"] in told_not:
             continue
-        examples = _examples(engine, k["name"], k["shown"], model, exclude)
+        examples = _examples(engine, k["name"], k["shown"], model, exclude, k["what"])
         if not examples:
             continue
         best = (A @ np.stack(examples).T).max(axis=1)
@@ -381,11 +430,13 @@ def recognise(engine, cfg: Dict[str, Any], image_id: int, *, embed: Optional[Cal
         row = _row(engine, image_id)
         if row["vec"] is None:
             return {}
-    return _match(engine, cfg, _vectors(engine, image_id, row["vec_model"]), row["vec_model"], int(image_id), told_not)
+    # Only what has no person in it is compared: see _without_people.
+    mine, _ = _without_people(engine, image_id, _vectors(engine, image_id, row["vec_model"]), _texts(engine, image_id)[1])
+    return _match(engine, cfg, mine, row["vec_model"], int(image_id), told_not)
 
 
 def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, embed: Optional[Callable[..., Any]] = None,
-                      timeout: float = 10.0) -> Dict[str, dict]:
+                      timeout: float = 10.0, faces: Optional[List[tuple]] = None) -> Dict[str, dict]:
     """The same for a picture she has not been given to keep yet: one that has just arrived with a message, so
     that she can know what it may show before she answers.  Nothing is stored.  The wait for the helper is
     kept short, since a reply is being held up; any failure gives nothing."""
@@ -406,6 +457,9 @@ def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, embed: Option
         logger.debug("holonomic: an arriving picture was not checked for named things: %s", exc)
         return {}
     mine = [(place, _unpack(_pack(v))) for place, v in zip(["whole"] + [g[5] for g in grid], vectors)]
+    if faces:                                            # where the faces in it are: those parts are left out
+        where = {g[5]: (g[1], g[2], g[3], g[4]) for g in grid}
+        mine = [(place, v) for place, v in mine if place != "whole" and not _face_in(where[place], faces)]
     return _match(engine, cfg, mine, model, -1, set())
 
 

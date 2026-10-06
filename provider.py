@@ -674,7 +674,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                 faces["images"].append(int(image_id))
                 faces["people"] += _faces.people_in(engine, image_id)
             elif data is not None:
-                faces["people"] += _faces.recognise_picture(engine, self._cfg, data, unknown=faces["unknown"])
+                faces["boxes"] = []
+                faces["people"] += _faces.recognise_picture(engine, self._cfg, data, unknown=faces["unknown"], boxes=faces["boxes"])
         except Exception as exc:
             logger.debug("holonomic: checking the attached image for faces failed: %s", exc)
 
@@ -791,7 +792,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if faces is not None:
                     faces["new"] = True
                 self._note_people(engine, faces, data=data)
-                for m in sorted(_fp.recognise_picture(engine, self._cfg, data).values(), key=lambda m: -m["alike"])[:3]:
+                for m in sorted(_fp.recognise_picture(engine, self._cfg, data, faces=(faces or {}).get("boxes")).values(),
+                                key=lambda m: -m["alike"])[:3]:
                     self._note_names(seen, [{"name": m["shown"]}], sure=False)
         except Exception as exc:
             logger.debug("holonomic: checking an arriving image for named things failed: %s", exc)

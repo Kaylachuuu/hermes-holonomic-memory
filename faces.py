@@ -278,7 +278,10 @@ def detect(engine, cfg: Dict[str, Any], image_id: int, *, find: Optional[Callabl
                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                        (int(image_id), *box, float(f.get("score") or 0), _pack(f["vector"]), model, who, "seen" if who else None,
                         alike if who else None, time.time()))
-        meta = dict(json.loads(_images._row(engine, image_id)["meta"] or "{}"), faces={"n": len(found), "at": time.time(), "model": model})
+        # Where each face was is kept for every face, whoever's it is: a place in the picture says nothing about
+        # who someone is, and it lets the rest of the image be told apart from the people in it.
+        meta = dict(json.loads(_images._row(engine, image_id)["meta"] or "{}"),
+                    faces={"n": len(found), "at": time.time(), "model": model, "boxes": [[round(float(v), 4) for v in f["box"]] for f in found]})
         db.execute("UPDATE images SET meta = ? WHERE id = ?", (json.dumps(meta), int(image_id)))
     return faces_in(engine, image_id)
 
@@ -305,6 +308,16 @@ def face_count(engine, image_id: int) -> Optional[int]:
     row = _row(engine, image_id)
     seen = json.loads(row["meta"] or "{}").get("faces") if row else None
     return int(seen["n"]) if isinstance(seen, dict) and "n" in seen else None
+
+
+def face_boxes(engine, image_id: int) -> Optional[List[tuple]]:
+    """Where the faces are in an image, as fractions of it; None if it has not been looked at for faces."""
+    from .images import _row
+    row = _row(engine, image_id)
+    seen = json.loads(row["meta"] or "{}").get("faces") if row else None
+    if not isinstance(seen, dict) or seen.get("off") or "boxes" not in seen:
+        return None
+    return [tuple(float(v) for v in b) for b in seen["boxes"]]
 
 
 def waiting(engine) -> int:
@@ -521,7 +534,7 @@ def stranger_in(engine, cfg: Dict[str, Any], image_id: int) -> Optional[dict]:
 # ------------------------------------------------------------------------- a picture that has just arrived
 
 def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, find: Optional[Callable[..., Any]] = None,
-                      timeout: float = 10.0, unknown: Optional[list] = None) -> List[dict]:
+                      timeout: float = 10.0, unknown: Optional[list] = None, boxes: Optional[list] = None) -> List[dict]:
     """The known people in a picture that has only just arrived: [{"name", "is_user", "where", "alike"}].
     Nothing is stored.  Any failure gives nothing: a reply is waiting on this.  `unknown`, if given, is filled
     with the fingerprints of the faces that are nobody she knows."""
@@ -542,6 +555,8 @@ def recognise_picture(engine, cfg: Dict[str, Any], data: bytes, *, find: Optiona
     with engine._lock:
         known = {r["name"]: r for r in _db(engine).execute("SELECT * FROM people")}
     out = []
+    if boxes is not None:
+        boxes.extend(tuple(float(v) for v in f["box"]) for f in found[0])
     for f in found[0]:
         who, alike = _who(_unpack(_pack(f["vector"])), examples, float(fc["face_min"]))
         if who and who in known and (fc["face_learn"] != "me" or known[who]["is_user"]):

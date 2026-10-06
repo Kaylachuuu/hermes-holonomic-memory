@@ -1891,7 +1891,7 @@ def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
 GREY = (128, 128, 128)
 
 
-def face_finder(calls=None):
+def face_finder(calls=None, not_faces=()):
     """A stand-in for the face model.  A picture's left and right halves each hold one 'face' unless that half is
     grey; the face's fingerprint is the half's colour.  One colour all over is a single face in the middle."""
     from PIL import Image
@@ -1907,13 +1907,14 @@ def face_finder(calls=None):
             near = lambda a, b: all(abs(a[i] - b[i]) < 25 for i in range(3))
             vec = lambda c: [c[i] - 110.0 for i in range(3)]
             faces = []
+            face = lambda c: not near(c, GREY) and not any(near(c, n) for n in not_faces)
             if near(left, right):
-                if not near(left, GREY):
+                if face(left):
                     faces.append({"box": [0.4, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(left)})
             else:
-                if not near(left, GREY):
+                if face(left):
                     faces.append({"box": [0.1, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(left)})
-                if not near(right, GREY):
+                if face(right):
                     faces.append({"box": [0.7, 0.3, 0.2, 0.3], "score": 0.95, "vector": vec(right)})
             out.append(faces)
         return "faces-1", out
@@ -2260,3 +2261,59 @@ def test_faces_from_the_command_line(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         server.shutdown()
+
+
+def test_a_person_in_the_picture_does_not_decide_which_cat_it_is(tmp_path):
+    """Kayla holding Theo, Kayla holding Sushi.  The parts of an image with her face in them are left out on both
+    sides of the comparison, so the cat is matched by the cat.  And a part of an example that speaks of 'a cat'
+    counts as showing the named cat, though the name was not written down for that part."""
+    from holonomic import images, faces as fc, fingerprints as fp
+    kayla, theo, sushi = (230, 60, 40), (230, 220, 30), (30, 180, 190)
+    find = face_finder(not_faces=[theo, sushi])
+    cfg = dict(CFG, image_fingerprints=True, face_learn="named", face_min=0.9, image_name_min=0.9)    # the stand-in's colours blend
+    assert fp._kind_word("a long-haired tuxedo cat, black with a white chest and paws") == "cat" and fp._kind_word("") == ""
+    assert fp._face_in((0.0, 0.25, 0.5, 0.5), [(0.1, 0.3, 0.2, 0.3)]) and not fp._face_in((0.5, 0.25, 0.5, 0.5), [(0.1, 0.3, 0.2, 0.3)])
+    m = store(tmp_path)
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        if step == "image":
+            return json.dumps({"description": "A woman holding an animal against her shoulder.", "labels": ["woman"], "text": "", "people": True})
+        place = prompt.split("the ", 1)[1].split(".", 1)[0] if step == "image_part" else ""
+        if place.endswith("right"):
+            return json.dumps({"notable": True, "description": "A cat's striped fur, seen from behind.", "labels": ["cat"]})
+        if place.endswith("left"):
+            return json.dumps({"notable": True, "description": "A woman's face, with glasses.", "labels": ["woman"]})
+        return json.dumps({"notable": False, "description": "", "labels": [], "names": [], "people": []})
+
+    def add(left, right, origin):
+        i = images.add_image(m, two_tone(left, right), CFG, origin=origin)["id"]
+        fc.detect(m, cfg, i, find=find)
+        fp.fingerprint(m, cfg, embed=colour_prints, only=i)
+        return i
+    # the only picture of Theo has her in it, and so does the only picture of Sushi
+    with_theo = add(kayla, theo, "kayla-and-theo.png")
+    with_sushi = add((226, 64, 44), sushi, "kayla-and-sushi.png")
+    images.process(m, CFG, see=see)
+    assert fc.face_boxes(m, with_theo) == [(0.1, 0.3, 0.2, 0.3)] and fc.face_count(m, with_theo) == 1
+    fp.name_thing(m, cfg, with_theo, "Theo", what="a brown tabby cat", redo=False)
+    fp.name_thing(m, cfg, with_sushi, "Sushi", what="a tuxedo cat", redo=False)
+    # what Theo looks like: the parts that speak of a cat and have no face in them, not the ones with her in them
+    clear, peopled = fp._without_people(m, with_theo, fp._vectors(m, with_theo, "colours-1"))
+    assert {p for p, _ in peopled} == {"whole", "top left", "middle left"} and "middle right" in {p for p, _ in clear}       # most of her face
+    assert len(fp._examples(m, "theo", "Theo", "colours-1", -1, "a brown tabby cat")) == 3              # the three parts on the right
+    # a new picture of her with each cat: the cat decides, although her face is alike in all of them
+    again_theo = add((228, 62, 42), (226, 224, 34), "kayla-and-theo-again.png")
+    again_sushi = add((224, 66, 46), (34, 176, 186), "kayla-and-sushi-again.png")
+    assert set(fp.recognise(m, cfg, again_theo)) == {"theo"} and set(fp.recognise(m, cfg, again_sushi)) == {"sushi"}
+    assert not any(place.endswith("left") or place == "whole" for place in fp.recognise(m, cfg, again_theo)["theo"]["places"])
+    # her alone: no cat
+    alone = add((229, 61, 41), GREY, "kayla.png")
+    assert fp.recognise(m, cfg, alone) == {}
+    # a picture that has only just arrived, with where its faces are handed over
+    boxes = []
+    fc.recognise_picture(m, cfg, two_tone((227, 63, 43), (228, 222, 32)), find=find, boxes=boxes)
+    assert boxes == [(0.1, 0.3, 0.2, 0.3)]
+    got = fp.recognise_picture(m, cfg, two_tone((227, 63, 43), (228, 222, 32)), embed=colour_prints, faces=boxes)
+    assert set(got) == {"theo"} and not any(place.endswith("left") or place == "whole" for place in got["theo"]["places"])
+    # without the faces being known, what is written about a part is gone by instead: the same answer here
+    assert set(fp.recognise(m, dict(cfg, face_learn="none"), again_theo)) == {"theo"}

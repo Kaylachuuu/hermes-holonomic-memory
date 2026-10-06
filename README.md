@@ -465,9 +465,13 @@ second cat, she called the second one Theo. What she recognises is then stated t
 whose it is) and its name is added to what her memory is searched for, so recognising the cat brings
 back what she knows about the cat even when the message says only "look at this". A name mentioned
 in passing in the image's description was not enough: she admired "a little tuxedo cat" and asked
-whether it was the user's. An example with a person in it is left out whenever the
-thing has an example without one, because a photo of a cat lying on its owner is mostly a picture of
-the owner.
+whether it was the user's. A person in the picture must not decide which cat it is: the same woman in two photographs made
+their parts as alike (0.61 to 0.67) as the same cat made them (0.61). Where faces have been looked
+for, a part of an image with most of a face in it is left out of the comparison on both sides, as is
+the whole of any image with a face in it; where they have not, what is written about a part is gone
+by. Within an image the user named something in, the parts that count as showing it are those whose
+descriptions speak of it by name or by the word for what it is ("cat"). An example with a person in
+it is used only if the thing has none without.
 
 The agent does the same through the `images` action (`image_id`, `name`, `what`; `wrong` to take a
 name back). An image she recognised a thing in by herself is never used as an example of it, so one

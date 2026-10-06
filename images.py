@@ -680,21 +680,21 @@ def describe(engine, cfg: Dict[str, Any], image_id: int, *, see: Optional[Callab
         corrections = [c for c in json.loads(row["meta"] or "{}").get("corrections", []) if c]
         if corrections:
             note += _CORRECTED.format(correction=" ".join(corrections))
+        from . import faces as _faces
         from . import fingerprints as _fp
+        try:                                         # who is in it, by face, where the user has allowed that
+            if _faces.faces_on(cfg):                 # (first: where the faces are tells the people from the rest of the image)
+                _faces.detect(engine, cfg, image_id)
+                if _faces.face_config(cfg)["face_name_unasked"]:
+                    note += _faces.people_note(_faces.people_in(engine, image_id))
+        except Exception as exc:
+            logger.debug("holonomic: looking for faces in image %s failed: %s", image_id, exc)
         known: Dict[str, dict] = {}
         try:                                         # what it may show, going by its look; never a reason not to describe it
             known = _fp.recognise(engine, cfg, image_id)
             note += _fp.known_note(known)
         except Exception as exc:
             logger.debug("holonomic: recognising named things in image %s failed: %s", image_id, exc)
-        from . import faces as _faces
-        try:                                         # who is in it, by face, where the user has allowed that
-            if _faces.faces_on(cfg):
-                _faces.detect(engine, cfg, image_id)
-                if _faces.face_config(cfg)["face_name_unasked"]:
-                    note += _faces.people_note(_faces.people_in(engine, image_id))
-        except Exception as exc:
-            logger.debug("holonomic: looking for faces in image %s failed: %s", image_id, exc)
         prompt = _WHOLE.format(note=note, n=int(ic["image_max_labels"]))
         data = _parse(_look_once_more(see, "image", prompt, _jpeg(img, view_box(row["width"], row["height"], ic)), _WHOLE_SCHEMA,
                                       int(ic["image_max_tokens"])))
