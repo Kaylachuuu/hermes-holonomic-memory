@@ -741,14 +741,16 @@ def _mentions(message: str, name: str) -> bool:
     return bool(re.search(r"\b" + r"\s*".join(re.escape(part) for part in re.split(r"[-_]+", name) if part) + r"\b", plain))
 
 
-def user_asked(root: Path, session: str, message: str, name: str) -> bool:
+def user_asked(root: Path, session: str, message: str, name: str, reply: str = "") -> bool:
     """Whether the user's own message asks for this library to be opened.
 
     Being told in her instructions to open a library only when asked was not enough: asked a question the library
     could answer, she reasoned that opening it was 'logical' and did.  An open library feeds every message of the
     conversation, so that is the user's to decide, and it is decided here from the user's words: the message names
     the library and speaks of a library (or data store, or reference material); or it speaks of all the libraries;
-    or it says yes after she asked whether to open this one."""
+    or it says yes after she asked whether to open this one.  `reply` is what she last said: when it asked about
+    opening this library, a yes is the user's answer to it.  (At first a yes counted only after an attempt had been
+    refused; she then did the right thing, asked before trying, was told yes, and was refused.)"""
     message = " ".join(str(message or "").split())
     if not message:
         return False
@@ -756,7 +758,9 @@ def user_asked(root: Path, session: str, message: str, name: str) -> bool:
         return not re.search(r"\b(don'?t|do not|never)\s+(open|use|load)\b", message, re.IGNORECASE)
     with _LOCK:
         waiting = name in _ASKED.get(f"{root}|{session}", [])
-    return waiting and len(message) <= 80 and bool(_YES.search(message)) and not _NO.search(message)
+    reply = " ".join(str(reply or "").split())
+    offered = bool(reply) and _mentions(reply, name) and bool(re.search(r"\bopen(?:ing)?\b|\blibrar", reply, re.IGNORECASE))
+    return (waiting or offered) and len(message) <= 80 and bool(_YES.search(message)) and not _NO.search(message)
 
 
 def note_refused(root: Path, session: str, wanted: List[str]) -> None:

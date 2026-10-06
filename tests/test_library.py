@@ -242,6 +242,7 @@ def test_she_makes_opens_and_uses_a_library_through_her_tool(tmp_path):
         assert once["results"][0]["source"] == "boot.md > Reading sectors" and "A single lookup: x86 is not open" in once["note"]
         assert lib_tool(p, action="list")["open_in_this_conversation"] == []
         assert "Reference material" not in p.prefetch("and how many sectors can it read at once", session_id="monday")
+        assert refused["error"].startswith("NOT OPENED: x86.") and "Do not tell the user it is open" in refused["error"]
         # She asks, the user says yes: now it opens.  A yes to nothing in particular opens nothing.
         p.prefetch("yes please", session_id="monday")
         assert lib_tool(p, action="open", names=["x86"])["opened"] is True
@@ -250,6 +251,14 @@ def test_she_makes_opens_and_uses_a_library_through_her_tool(tmp_path):
         assert lib_tool(p, action="open", names=["x86"])["opened"] is False                  # that yes was already used
         p.prefetch("no, leave it closed", session_id="monday")
         assert lib_tool(p, action="open", names=["x86"])["opened"] is False
+        # She asks before trying at all, and the user says yes.
+        p.sync_turn("I'd like to get back to the bootloader", "Gladly. Would you like me to open the `x86` library for it?", session_id="monday")
+        p.prefetch("Yes, please.", session_id="monday")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is True
+        assert lib_tool(p, action="close")["open_in_this_conversation"] == []
+        p.sync_turn("thanks", "You're welcome. What shall we look at?", session_id="monday")
+        p.prefetch("Yes, please.", session_id="monday")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is False                  # that reply offered nothing
         # The user asks in their own words.
         p.prefetch("Let's work on the bootloader. Use the x86 library for this conversation.", session_id="monday")
         assert lib_tool(p, action="open", names=["x86"])["open_in_this_conversation"] == ["x86"]
@@ -263,7 +272,7 @@ def test_she_makes_opens_and_uses_a_library_through_her_tool(tmp_path):
         assert "reference libraries open in this conversation: x86" in context
         # reference material is not her memory: none of it was stored there
         assert not [r for r in p._engine.recent(50) if "disk address packet" in r["text"]]
-        assert p._engine.stats()["memories"] == 2
+        assert not [r for r in p._engine.recent(50) if r["kind"] == "reference"]
         # another conversation: nothing open, nothing given
         assert "Reference material" not in p.prefetch("how does INT 13h read sectors with AH=42h", session_id="tuesday")
         p.on_session_switch("tuesday", reset=True)
@@ -359,6 +368,12 @@ def test_only_the_users_own_words_open_a_library(tmp_path):
     assert not asked("yes, " + "and another thing entirely " * 5)                            # a long message that happens to open with yes
     lib.clear_refused(root, "s")
     assert not asked("yes")
+    # She asks before trying, as she should, and the user says yes: that yes is an answer to her question.
+    offer = "I'd love to dive back in. Would you like me to open the `x86` library? That'll give me access to the code."
+    assert lib.user_asked(root, "s", "Yes, please.", "x86", offer) and lib.user_asked(root, "s", "sure", "x86", offer)
+    assert not lib.user_asked(root, "s", "Yes, please.", "marigold", offer)                  # she asked about another one
+    assert not lib.user_asked(root, "s", "no thanks", "x86", offer) and not lib.user_asked(root, "s", "What does x86 mean?", "x86", offer)
+    assert not lib.user_asked(root, "s", "yes", "x86", "x86 assembly is fun, isn't it? Shall we carry on?")      # no offer to open in that
 
 
 def test_old_programs_in_a_source_tree_are_not_read_as_text(tmp_path):

@@ -419,6 +419,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         self._last_user: Dict[str, int] = {}            # session -> id of the user's previous message
         self._looked_at: set = set()                    # images kept while preparing a reply, not to be counted twice
         self._said: Dict[str, str] = {}                 # session -> the user's latest message, in their own words
+        self._replied: Dict[str, str] = {}              # session -> what she last said, for telling what a "yes" answers
 
     # ------------------------------------------------------------- lifecycle
 
@@ -1018,6 +1019,7 @@ class HolonomicMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: Optional[List[Dict[str, Any]]] = None, **_: Any) -> None:
         # Hermes already calls this on its background worker, one turn at a time.
+        self._replied[session_id or self._session_id] = _CONTEXT_RE.sub("", assistant_content or "")[-2000:]
         if not self._writes_enabled:
             return
         sid = session_id or self._session_id
@@ -1111,10 +1113,14 @@ class HolonomicMemoryProvider(MemoryProvider):
                     return _error("open needs 'names': which libraries to open")
                 wanted = [_library._need(root, n)[0] for n in wanted]
                 said = self._said.get(sid, "")
-                unasked = [n for n in wanted if n not in _library.opened(root, sid) and not _library.user_asked(root, sid, said, n)]
+                unasked = [n for n in wanted if n not in _library.opened(root, sid)
+                           and not _library.user_asked(root, sid, said, n, self._replied.get(sid, ""))]
                 if unasked:
                     _library.note_refused(root, sid, wanted)
-                    return json.dumps({"opened": False, "not_opened": unasked, "open_in_this_conversation": _library.opened(root, sid),
+                    # An error, and said plainly: told "opened: false" among other fields, she announced that it was open.
+                    return json.dumps({"error": f"NOT OPENED: {', '.join(unasked)}. The library is still closed. Do not tell the user "
+                                                "it is open.",
+                                       "opened": False, "not_opened": unasked, "open_in_this_conversation": _library.opened(root, sid),
                                        "why": "The user's message did not ask for this to be opened, and an open library feeds "
                                               "every message of the conversation, which is theirs to decide.",
                                        "what_you_can_do": "To answer the question in front of you, look it up once: action 'search' "
