@@ -1015,7 +1015,8 @@ def merge_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]
         if verdict == 0:
             report["kept_apart"] += 1
         elif verdict in (1, 2):
-            decided.append((a, b, "the same words") if verdict == 1 else (b, a, "says more"))
+            alike = set(_words(ta)) == set(_words(tb))
+            decided.append((a, b, "the same words" if alike else "says more") if verdict == 1 else (b, a, "says more"))
         elif sim >= floor:
             unsure.append((a, b))
     if ask and unsure:
@@ -1050,8 +1051,10 @@ def merge_facts(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]
         gone[drop] = keep
         report["merged"].append({"keep": keep, "drop": drop, "how": how, "kept": texts[keep]["text"], "dropped": texts[drop]["text"]})
     for m in report["merged"]:                     # a keeper that was itself merged later: say where it ended up
-        m["keep"] = standing(m["keep"])
-        m["kept"] = texts[m["keep"]]["text"]
+        if standing(m["keep"]) != m["keep"]:
+            m["how"] = f"{m['how']} as #{m['keep']}, which is kept as this"
+            m["keep"] = standing(m["keep"])
+            m["kept"] = texts[m["keep"]]["text"]
     if apply:
         for m in report["merged"]:
             engine.supersede(m["drop"], m["keep"], reason=f"said the same as #{m['keep']}")
