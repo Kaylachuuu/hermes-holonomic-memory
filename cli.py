@@ -233,8 +233,8 @@ def _plates_cmd(engine, cfg, args) -> None:
     def line(name: str, key: str) -> None:
         t = rc[key]
         share = f"{100 * t['found'] / t['expected']:.0f}%" if t["expected"] else "n/a"
-        print(f"  {name:<38} known found: {t['found']}/{t['expected']} ({share});  returned: {t['returned']} "
-              f"= {t['found']} known + {t['explained']} explained + {t['unexplained']} unexplained")
+        print(f"  {name:<38} known found: {t['found']}/{t['expected']} ({share});  returned: {t['returned']} = {t['found']} known "
+              f"+ {t['explained']} explained + {t['conversation']} same conversation + {t['related']} related + {t['unexplained']} unexplained")
     print("\nRead straight off the plates (everything above the noise, before any ranking):")
     line("as recall does it now", "as it is")
     line("with out-of-recall members left out", "without them")
@@ -242,7 +242,9 @@ def _plates_cmd(engine, cfg, args) -> None:
     st_ = d["strength"]
     mid = lambda g: "n/a" if st_[g]["median"] is None else f"{st_[g]['median']:.2f}"
     print(f"  how strongly they come back (typical; 1 is a full-strength link, recall treats anything above as 1): "
-          f"known {mid('known')}, explained {mid('explained')}, unexplained {mid('unexplained')}")
+          f"known {mid('known')}, explained {mid('explained')}, same conversation {mid('conversation')}, "
+          f"related {mid('related')}, unexplained {mid('unexplained')}")
+    print(f"  from a different image than the cue's, and never bound to it: {rc['as it is']['other_image']} (alike is how two pictures get mixed up)")
     ub, rb = d["unexplained_by_plate"], d["returned_by_plate"]
     print(f"  unexplained, by the plate they were read from: {ub['legacy']} of {rb['legacy']} from plates written before the log "
           f"(records are missing there, which may be all it is);")
@@ -254,14 +256,21 @@ def _plates_cmd(engine, cfg, args) -> None:
     g = d["given"]
     print(f"\nWhat she would be given (recall as a message does it, each memory standing in for a message; up to {cfg.get('recall_k', 6)} each):")
     print(f"  {g['given']} given over {g['cues']} cues: {g['by_likeness']} for their likeness to the message, {g['by_association']} brought by the plates.")
-    print(f"  of those the plates brought: {g['known']} known, {g['explained']} explained, {g['unexplained']} unexplained "
-          f"({g['unexplained_legacy']} read from plates written before the log, {g['unexplained_logged']} from plates on record).")
+    print(f"  of those the plates brought: {g['known']} known, {g['explained']} explained, {g['conversation']} from the same conversation, "
+          f"{g['related']} related, {g['unexplained']} unexplained")
+    print(f"      (unexplained: {g['unexplained_legacy']} read from plates written before the log, {g['unexplained_logged']} from plates on record).")
     for e in g["examples"]:
-        print(f"    for #{e['cue']} she would be given #{e['given']} (read from a {' and a '.join(e['read_from'])} plate): hermes holonomic show {e['cue']} {e['given']}")
+        print(f"    unexplained: for #{e['cue']} she would be given #{e['given']} (read from a {' and a '.join(e['read_from'])} plate): hermes holonomic show {e['cue']} {e['given']}")
+    print(f"  from a different image than the message's, and never bound to it: {g['other_image']}")
+    for e in g["other_image_examples"]:
+        print(f"    another image: for #{e['cue']} she would be given #{e['given']}: hermes holonomic show {e['cue']} {e['given']}")
     print("\nReading this:\n"
           "  known       bound to the cue according to the write log, or to the sources a conclusion was stored with.\n"
-          "  explained   linked by something on record that is less exact: the next line of a conversation, an image and its parts.\n"
-          "  unexplained nothing on record links it to the cue. That is not the same as wrong. From a plate written before\n"
+          "  explained   linked by something on record that is less exact: the next line of a conversation, the thing\n"
+          "              you said before, an image and its parts.\n"
+          "  same conversation   never bound to the cue, but said in the same conversation.\n"
+          "  related     never bound to the cue, but alike in what it says: what a memory like the cue was bound to.\n"
+          "  unexplained none of the above. That is not the same as wrong. From a plate written before\n"
           "              the log it may only mean the record is missing; from a plate with every write on record it is\n"
           "              evidence that something was attributed that was never written for that cue.\n"
           "  More returned is not better in itself.")

@@ -21,6 +21,10 @@ import random
 from typing import Any, Dict, List, Optional, Set
 
 OUT_OF_RECALL = 0.15          # the trust below which everyday recall leaves a memory out (provider.recall_options)
+ALIKE = 0.3                   # likeness at which recall will use a memory as a cue in its own right (engine: hop_min)
+SORTS = ("known", "explained", "conversation", "related", "unexplained")
+# Sessions that are not conversations: everything reflection concludes shares one, and so on.
+_NOT_A_CONVERSATION = {"", "reflection", "episodes", "builtin-memory", "dreams"}
 
 
 def _np():
@@ -154,6 +158,16 @@ def _probably_linked(engine) -> Dict[int, Set[int]]:
                 if a != b:
                     out.setdefault(a, set()).add(b)
                     out.setdefault(b, set()).add(a)
+    # Each thing the user says is bound to the thing they said before it, across the replies in between, so that
+    # their train of thought stays connected.  Found by inspection: such pairs read back at full strength and the
+    # report had called them unexplained.
+    said_before: Dict[tuple, int] = {}
+    for m in engine._db.execute("SELECT id, realm, session FROM memories WHERE forgotten = 0 AND kind IN ('said_user', 'dreamtalk_user') ORDER BY id"):
+        key = (m["realm"], m["session"])
+        if key in said_before:
+            out.setdefault(int(m["id"]), set()).add(said_before[key])
+            out.setdefault(said_before[key], set()).add(int(m["id"]))
+        said_before[key] = int(m["id"])
     previous: Dict[tuple, int] = {}
     for m in engine._db.execute("SELECT id, realm, session FROM memories WHERE forgotten = 0 ORDER BY id"):
         key = (m["realm"], m["session"])
@@ -161,6 +175,29 @@ def _probably_linked(engine) -> Dict[int, Set[int]]:
             out.setdefault(int(m["id"]), set()).add(previous[key])
             out.setdefault(previous[key], set()).add(int(m["id"]))
         previous[key] = int(m["id"])
+    return out
+
+
+def sort_returns(back: Set[int], cue_ids: List[int], *, known: Dict[int, Set[int]], probable: Dict[int, Set[int]],
+                 live: Set[int], session_of: Dict[int, str], image_of: Dict[int, int], likeness) -> Dict[str, Set[int]]:
+    """What came back, by the best account there is of why.  In order: known to be bound to a cue; explained by
+    something less exact on record; from the same conversation as a cue; like a cue in what it says; or none of
+    these.  `other_image` is apart from that order: among what was never bound to a cue, the returns that belong
+    to a different image from the cue's, where being alike is how two pictures get confused."""
+    expected: Set[int] = set()
+    explained: Set[int] = set()
+    for c in cue_ids:
+        expected |= known.get(c, set())
+        explained |= {i for i in probable.get(c, set()) if i in live}
+    out = {"expected": expected, "known": back & expected, "explained": (back & explained) - expected}
+    unbound = back - expected - explained
+    talks = {session_of.get(c) for c in cue_ids} - _NOT_A_CONVERSATION - {None}
+    out["conversation"] = {i for i in unbound if session_of.get(i) in talks}
+    rest = unbound - out["conversation"]
+    out["related"] = {i for i in rest if likeness(i, cue_ids) >= ALIKE}
+    out["unexplained"] = rest - out["related"]
+    cue_images = {image_of[c] for c in cue_ids if c in image_of}
+    out["other_image"] = {i for i in unbound if cue_images and i in image_of and image_of[i] not in cue_images}
     return out
 
 
@@ -203,16 +240,24 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cf
         known = _known_links(engine, live_ids)
         probable = _probably_linked(engine)
 
+        row_of = {mid: r for r, mid in ids.items()}
+        session_of = {int(m["id"]): m["session"] for m in db.execute("SELECT id, session FROM memories WHERE forgotten = 0 AND realm = ?", (realm,))}
+        image_of: Dict[int, int] = {}
+        for m in db.execute("SELECT id, meta FROM memories WHERE forgotten = 0 AND meta LIKE '%\"image_id\"%'"):
+            try:
+                image_of[int(m["id"])] = int(json.loads(m["meta"] or "{}").get("image_id"))
+            except (ValueError, TypeError):
+                continue
+
+        def likeness(i: int, cue_ids: List[int]) -> float:
+            cue_rows = [row_of[c] for c in cue_ids if c in row_of]
+            if not cue_rows or i not in row_of:
+                return 0.0
+            return float(np.max(engine._X.a[cue_rows] @ engine._X.a[row_of[i]]))
+
         def sort_out(back: Set[int], cue_ids: List[int]) -> Dict[str, Set[int]]:
-            """What came back, by what is on record about it: known to be bound to a cue, explained by something
-            else on record, or explained by nothing."""
-            expected: Set[int] = set()
-            explained: Set[int] = set()
-            for c in cue_ids:
-                expected |= known.get(c, set())
-                explained |= {i for i in probable.get(c, set()) if i in live_ids}
-            return {"known": back & expected, "explained": (back & explained) - expected, "unexplained": back - expected - explained,
-                    "expected": expected}
+            return sort_returns(back, cue_ids, known=known, probable=probable, live=live_ids, session_of=session_of,
+                                image_of=image_of, likeness=likeness)
 
         def where(plate_ids: Set[int]) -> List[str]:
             """A return read from a plate with every write on record is one thing; from a plate written before
@@ -224,10 +269,11 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cf
         random.Random(seed).shuffle(cues)
         cues = cues[:max(1, int(sample))]
         ways = {"as it is": {}, "without them": {"leave_out": retired_rows}, "no limit": {"max_plates": 10 ** 9}}
-        totals = {w: {"expected": 0, "found": 0, "returned": 0, "explained": 0, "unexplained": 0} for w in ways}
+        totals = {w: {"expected": 0, "found": 0, "returned": 0, "explained": 0, "conversation": 0, "related": 0, "unexplained": 0,
+                      "other_image": 0} for w in ways}
         unexplained_by = {"legacy": 0, "logged": 0}
         returned_by = {"legacy": 0, "logged": 0}
-        scores: Dict[str, List[float]] = {"known": [], "explained": [], "unexplained": []}
+        scores: Dict[str, List[float]] = {group: [] for group in SORTS}
         resonated: List[int] = []
         turned_away = differ = 0
         changed: List[dict] = []
@@ -246,8 +292,8 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cf
                 t["expected"] += len(sorted_out["expected"])
                 t["found"] += len(sorted_out["known"])
                 t["returned"] += len(back)
-                t["explained"] += len(sorted_out["explained"])
-                t["unexplained"] += len(sorted_out["unexplained"])
+                for group in ("explained", "conversation", "related", "unexplained", "other_image"):
+                    t[group] += len(sorted_out[group])
                 if way == "as it is":
                     resonated.append(info.get("resonated", 0))
                     turned_away += 1 if info.get("turned_away", 0) else 0
@@ -273,8 +319,9 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cf
                    "min_strength": float(cfg.get("fade_threshold", 0.35)), "skip_kinds": ("asked_user",),
                    "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75)), "dreamtalk_assistant": 0.5,
                                     "dreamtalk_user": 0.75, "image_part": 0.9}}
-        given = {"cues": 0, "given": 0, "by_likeness": 0, "by_association": 0, "known": 0, "explained": 0, "unexplained": 0,
-                 "unexplained_legacy": 0, "unexplained_logged": 0, "examples": []}
+        given = {"cues": 0, "given": 0, "by_likeness": 0, "by_association": 0, "known": 0, "explained": 0, "conversation": 0,
+                 "related": 0, "unexplained": 0, "other_image": 0, "unexplained_legacy": 0, "unexplained_logged": 0,
+                 "examples": [], "other_image_examples": []}
         for r in cues:
             info = {}
             hits = [h for h in engine.recall(vector=engine._X.a[r].copy(), realms=(realm,), info=info, **options) if h.id != ids[r]]
@@ -286,8 +333,11 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cf
             given["by_association"] += len(brought)
             sorted_out = sort_out({h.id for h in brought}, info.get("hops") or [ids[r]])
             read_from = {ids[row]: plate_ids for row, plate_ids in (info.get("plates") or {}).items() if row in ids}
-            for group in ("known", "explained", "unexplained"):
+            for group in SORTS + ("other_image",):
                 given[group] += len(sorted_out[group])
+            for i in sorted(sorted_out["other_image"]):
+                if len(given["other_image_examples"]) < 6:
+                    given["other_image_examples"].append({"cue": ids[r], "given": i})
             for i in sorted_out["unexplained"]:
                 for kind in where(read_from.get(i, set())):
                     given["unexplained_" + kind] += 1

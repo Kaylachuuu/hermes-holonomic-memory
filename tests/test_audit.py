@@ -153,7 +153,8 @@ def test_what_the_plates_do_at_recall_is_measured_without_changing_anything(tmp_
     assert r["as it is"]["expected"] == r["without them"]["expected"] == r["no limit"]["expected"] > 0
     assert 0 < r["as it is"]["found"] <= r["as it is"]["expected"] and r["no limit"]["found"] == r["as it is"]["found"]
     assert all(r[w]["unexplained"] <= r[w]["returned"] for w in r) and d["known_links"]["cues_with_any"] >= 6
-    assert all(r[w]["found"] + r[w]["explained"] + r[w]["unexplained"] == r[w]["returned"] for w in r)        # each return is one of the three
+    assert all(r[w]["found"] + r[w]["explained"] + r[w]["conversation"] + r[w]["related"] + r[w]["unexplained"] == r[w]["returned"]
+               for w in r)                                                                              # each return is sorted once
     # by the kind of plate read from: every plate here has all its writes on record
     assert d["plates"]["logged"] == d["plates"]["count"] and d["returned_by_plate"]["legacy"] == 0
     assert d["unexplained_by_plate"]["legacy"] == 0 and d["unexplained_by_plate"]["logged"] == r["as it is"]["unexplained"]
@@ -163,7 +164,7 @@ def test_what_the_plates_do_at_recall_is_measured_without_changing_anything(tmp_
     # and what she would actually be given
     g = d["given"]
     assert g["cues"] == 7 and g["given"] == g["by_likeness"] + g["by_association"] and g["given"] <= 7 * 6
-    assert g["known"] + g["explained"] + g["unexplained"] == g["by_association"]
+    assert g["known"] + g["explained"] + g["conversation"] + g["related"] + g["unexplained"] == g["by_association"]
     assert g["unexplained_logged"] >= g["unexplained"] and g["unexplained_legacy"] == 0
     assert all(set(e) == {"cue", "given", "read_from"} for e in g["examples"])
     # the retired twin is never counted as something to find, nor returned
@@ -232,4 +233,70 @@ def test_an_image_and_its_parts_explain_one_another(tmp_path):
     assert part in linked[whole] and whole in linked[part]
     d = audit.diagnose(m, sample=10)
     r = d["recovery"]["as it is"]
-    assert r["expected"] > 0 and r["found"] + r["explained"] + r["unexplained"] == r["returned"]
+    assert r["expected"] > 0 and r["found"] + r["explained"] + r["conversation"] + r["related"] + r["unexplained"] == r["returned"]
+
+
+def test_what_comes_back_is_sorted_by_the_best_account_of_why(tmp_path):
+    """Looking at real pairs the report had called unexplained: two were the user's own consecutive statements,
+    which are bound on purpose; three were what a memory like the cue had been bound to; one of those was another
+    photograph altogether."""
+    m = store(tmp_path)
+    a = m.remember("Good morning, I slept well", kind="said_user", session="talk")[0]
+    reply = m.remember("Good morning! I am glad you slept well", kind="said_assistant", session="talk")[0]
+    b = m.remember("That is incredible news about the lake", kind="said_user", session="talk", links=[a])[0]
+    later = m.remember("We should visit the lake in the spring", kind="said_assistant", session="talk")[0]
+    other = m.remember("Tomatoes need watering early in the day", kind="said_user", session="garden")[0]
+    linked = audit._probably_linked(m)
+    assert b in linked[a] and a in linked[b]                           # what she said before, across the reply between
+    assert reply in linked[a] and other not in linked.get(a, set())
+    photo1 = m.remember("A sunset over a field with orange clouds", kind="image", session="talk", chain=False, meta={"image_id": 1})[0]
+    part1 = m.remember("Orange clouds above a dark ridge at sunset", kind="image_part", session="talk", chain=False, links=[photo1], meta={"image_id": 1})[0]
+    photo2 = m.remember("A sunset over water with orange clouds and pine trees", kind="image", session="pics", chain=False, meta={"image_id": 2})[0]
+    d = audit.diagnose(m, sample=50)
+    r, g = d["recovery"]["as it is"], d["given"]
+    for t in (r,):
+        assert t["found"] + t["explained"] + t["conversation"] + t["related"] + t["unexplained"] == t["returned"]
+    assert g["known"] + g["explained"] + g["conversation"] + g["related"] + g["unexplained"] == g["by_association"]
+    assert set(d["strength"]) == set(audit.SORTS) and r["other_image"] >= 0 and g["other_image"] >= 0
+    assert all(set(e) == {"cue", "given"} for e in g["other_image_examples"])
+    # the sorting itself, on returns chosen by hand: cue 1, in conversation "talk", part of image 7
+    alike = {30: 0.9, 40: 0.1, 50: 0.5, 60: 0.8}
+    got = audit.sort_returns({10, 11, 20, 30, 40, 50, 60, 70}, [1],
+                             known={1: {10, 99}}, probable={1: {10, 11, 12}}, live={10, 11, 20, 30, 40, 50, 60, 70},
+                             session_of={1: "talk", 20: "talk", 30: "garden", 40: "garden", 50: "reflection", 60: "pics", 70: "reflection"},
+                             image_of={1: 7, 11: 7, 60: 8, 20: 7}, likeness=lambda i, cues: alike.get(i, 0.0))
+    assert got["expected"] == {10, 99} and got["known"] == {10} and got["explained"] == {11}       # known comes before explained
+    assert got["conversation"] == {20}                                # said in the same conversation, bound to nothing
+    assert got["related"] == {30, 50, 60}                             # alike enough to have been a cue itself
+    assert got["unexplained"] == {40, 70}                             # none of these
+    assert got["other_image"] == {60}                                 # alike, and from another picture: 11 and 20 are the same picture
+    # sessions that are not conversations do not make two memories conversation-mates
+    got = audit.sort_returns({70}, [50], known={}, probable={}, live={50, 70}, session_of={50: "reflection", 70: "reflection"},
+                             image_of={}, likeness=lambda i, cues: 0.0)
+    assert got["conversation"] == set() and got["unexplained"] == {70} and got["other_image"] == set()
+    assert audit.ALIKE == 0.3
+
+
+def test_cli_plates_names_the_new_sorts(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io, types
+    p = make(tmp_path)
+    p.sync_turn("My name is Kayla and I have a cat named Sushi", "Nice to meet you, Kayla. Sushi sounds lovely.", session_id="s1")
+    p.sync_turn("He is a long-haired tuxedo cat", "A handsome one, then.", session_id="s1")
+    p.shutdown()
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        real = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *a, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            args = parser.parse_args(["plates", "check", "-n", "20"]); args.func(args)
+        text = out.getvalue()
+        assert "same conversation" in text and "related" in text and "the thing\n              you said before" in text
+        assert "from a different image than the cue's" in text and "from a different image than the message's" in text
+    finally:
+        embed.OllamaEmbedder = real
+        sys.modules.pop("hermes_constants", None)
