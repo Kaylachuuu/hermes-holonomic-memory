@@ -1078,3 +1078,17 @@ def test_a_librarys_pictures_are_not_hers(tmp_path):
     assert "is kept at: " + hit["figures"][0]["file"] in context
     assert images.count_images(p._engine) == 0                                         # still none of hers
     p.shutdown()
+
+
+def test_an_assembly_include_file_ending_in_a_is_read_and_a_code_archive_is_not(tmp_path):
+    from holonomic import library as L
+    inc = tmp_path / "STDLIB.A"
+    inc.write_bytes(b"; the standard library's include file\r\nextrn sl_putc:far\r\nputc macro\r\n call sl_putc\r\n endm\r\n" * 4)
+    assert "sl_putc" in L.read_file(inc, 10_000_000)
+    ar = tmp_path / "libthing.a"
+    ar.write_bytes(b"!<arch>\nthing.o/        0           0     0     644     120       `\n" + b"code " * 60)
+    try:
+        L.read_file(ar, 10_000_000)
+        assert False, "a code archive was read as text"
+    except L.LibraryError as e:
+        assert "not a text file" in str(e)

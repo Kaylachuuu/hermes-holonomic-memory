@@ -63,12 +63,12 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 
 # Read as plain text.  Anything else is tried as text and left out if it turns out not to be.
 _SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv", ".idea", ".vscode"}
-_BINARY = {".exe", ".com", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj", ".lib", ".a", ".class", ".jar", ".pyc",
+_BINARY = {".exe", ".com", ".dll", ".so", ".dylib", ".bin", ".img", ".iso", ".o", ".obj", ".lib", ".class", ".jar", ".pyc",
            ".zip", ".7z", ".rar", ".gz", ".tar", ".xz", ".bz2", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic",
            ".ico", ".tif", ".tiff", ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".avi", ".mov", ".ttf", ".otf",
            ".woff", ".woff2", ".db", ".sqlite", ".npy", ".npz", ".pth", ".safetensors", ".onnx", ".xls", ".ppt",
            ".xlsx", ".pptx", ".epub", ".chm", ".lnk", ".ovl", ".ovr", ".dsk", ".ima", ".vhd", ".rom", ".tpu", ".msi", ".cab"}
-# Not on that list, on purpose: .doc and .scr.  A .DOC from the DOS years is plain text as often as not, and a .SCR
+# Not on that list, on purpose: .doc, .scr and .a.  An .A file is a Unix code archive or an assembly include file.  A .DOC from the DOS years is plain text as often as not, and a .SCR
 # may be a script.  Their contents decide (a Word document or a screen saver is caught by what is in it).
 _MARKUP = {".html", ".htm", ".xhtml"}
 _HEADED = {".md", ".markdown", ".txt", ".rst", ".text", ""}
@@ -258,7 +258,7 @@ def looks_binary(raw: bytes) -> bool:
     sample = raw[:16000]
     if not sample:
         return False
-    if b"\x00" in sample or sample[:2] in (b"MZ", b"ZM") or sample[:4] == b"\x7fELF":
+    if b"\x00" in sample or sample[:2] in (b"MZ", b"ZM") or sample[:4] == b"\x7fELF" or sample[:8] == b"!<arch>\n":
         return True
     control = sum(1 for c in sample if c < 32 and c not in (9, 10, 13, 12, 26, 27))     # 26: the old DOS end-of-file mark
     if control > max(8, len(sample) // 20):                  # more than 1 in 20 are control codes
