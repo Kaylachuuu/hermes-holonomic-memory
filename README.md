@@ -654,13 +654,18 @@ something, look there first to see whether she was told it.
 
 Unattended reflection, sleep and the describing of images are done by a worker inside Hermes, while Hermes is
 open. The commands run in a program of their own and cannot look inside Hermes, so the worker writes down,
-every half minute, what it is doing and why it is not doing something else (`<data>/worker.json`).
+every half minute, what it is doing and why it is not doing something else.
 `hermes holonomic sleep status` and `reflect status` read it:
 
-    in the background: Hermes is running (heard from 12 s ago); the conversation has been quiet for 3.2 minutes
+    in the background: Hermes is running (process 4812, up 42 minutes, heard from 12 s ago)
+      quiet for 3.2 minutes, since 21:14:05: a message came in: 'good night'
       sleep is waiting: it has been quiet for 3.2 of the 5 minutes it waits for
 
-or that it is sleeping now and for how long, or what the last sleep reported, or that no Hermes is running
+It says what last restarted the quiet clock (a message coming in, a turn being stored, a reflection that
+failed), because a clock that starts over with nobody at the keyboard is otherwise a mystery. If more than
+one program has the memory open, each has a worker and a clock of its own, and each is shown.
+
+It also says that it is sleeping now and for how long, or what the last sleep reported, or that no Hermes is running
 with this memory at all. A sleep that fails outright is recorded and tried again after ten minutes, not every
 half minute.
 

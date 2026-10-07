@@ -188,35 +188,53 @@ def _library_cmd(engine, cfg, args) -> None:
 
 
 def _worker(engine, what: str) -> None:
-    """What the background worker inside Hermes last said about itself.  These commands run in a program of
-    their own and cannot look inside Hermes, so the worker writes its state down every half minute."""
+    """What the background workers inside Hermes last said about themselves.  These commands run in a program of
+    their own and cannot look inside Hermes, so each worker writes its state down every half minute."""
     import json
-    try:
-        state = json.loads((engine.path / "worker.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    states = []
+    for path in sorted(engine.path.glob("worker*.json")):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["age"] = time.time() - float(state.get("at", 0))
+        except (OSError, ValueError):
+            continue
+        if state["age"] > 86400:                         # a program that ended without tidying up, long ago
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        states.append(state)
+    if not states:
         print("  in the background: nothing on record. Unattended work is done by Hermes while it is open; "
               "no Hermes with this version has run yet.")
         return
-    age = time.time() - float(state.get("at", 0))
-    fresh = age <= 3 * float(state.get("poll_seconds", 30)) + 30 or state.get("doing")
-    if not fresh:
-        print(f"  in the background: no Hermes is running with this memory right now (last heard from {_when(state['at'])}, "
-              f"{age / 60:.0f} minutes ago). Unattended work only happens while Hermes is open.")
-    else:
+    live = [st for st in states if st["age"] <= 3 * float(st.get("poll_seconds", 30)) + 30 or st.get("doing")]
+    if not live:
+        last = min(states, key=lambda st: st["age"])
+        print(f"  in the background: no Hermes is running with this memory right now (last heard from {_when(last['at'])}, "
+              f"{last['age'] / 60:.0f} minutes ago). Unattended work only happens while Hermes is open.")
+        return
+    name = "sleep" if what == "sleep" else "reflection"
+    if len(live) > 1:
+        print(f"  in the background: {len(live)} programs have this memory open, each with a quiet clock of its own:")
+    for state in sorted(live, key=lambda st: st.get("started", 0)):
         quiet = (float(state["at"]) - float(state.get("last_activity", state["at"]))) / 60
-        print(f"  in the background: Hermes is running (heard from {age:.0f} s ago); the conversation has been quiet for {quiet:.1f} minutes")
+        up = (float(state["at"]) - float(state.get("started", state["at"]))) / 60
+        print(f"  in the background: Hermes is running (process {state.get('pid')}, up {up:.0f} minutes, heard from {state['age']:.0f} s ago)")
+        print(f"    quiet for {quiet:.1f} minutes, since {time.strftime('%H:%M:%S', time.localtime(float(state.get('last_activity', state['at']))))}: "
+              f"{state.get('last_cause') or 'something in the conversation'}")
         if state.get("doing"):
             print(f"    it is {state['doing']} now, and has been for {(time.time() - float(state['doing_since'])) / 60:.1f} minutes")
-        why = state.get("sleep_waits_for" if what == "sleep" else "reflection_waits_for")
-        name = "sleep" if what == "sleep" else "reflection"
-        if not state.get("doing"):
+        else:
+            why = state.get("sleep_waits_for" if what == "sleep" else "reflection_waits_for")
             print(f"    {name} is due and should start within half a minute" if not why else f"    {name} is waiting: {why}")
-    for task, error in (state.get("stumbles") or {}).items():
-        print(f"    {task} cannot even be checked, every half minute: {error}")
-    for key, label in (("last_sleep_error", "the last sleep"), ("last_reflection_error", "the last reflection"),
-                       ("last_image_error", "describing images")):
-        if state.get(key) and (what == "sleep" or key != "last_sleep_error"):
-            print(f"    {label} reported: {state[key]}")
+        for task, error in (state.get("stumbles") or {}).items():
+            print(f"    {task} cannot even be checked, every half minute: {error}")
+        for key, label in (("last_sleep_error", "the last sleep"), ("last_reflection_error", "the last reflection"),
+                           ("last_image_error", "describing images")):
+            if state.get(key) and (what == "sleep" or key != "last_sleep_error"):
+                print(f"    {label} reported: {state[key]}")
 
 
 def _plates_cmd(engine, cfg, args) -> None:

@@ -1117,6 +1117,8 @@ class IdleReflector:
         self.foundation_fn = foundation_fn or (lambda: "")
         self.poll_seconds = poll_seconds
         self.last_activity = time.time()
+        self.started = self.last_activity
+        self.last_cause = "Hermes started this worker"
         self.last_error = ""
         self.last_image_error = ""
         self.last_sleep_error = ""
@@ -1131,11 +1133,18 @@ class IdleReflector:
         self._thread = maker(target=self._loop, name="holonomic-reflect")
         self._thread.start()
 
-    def touch(self) -> None:
+    def touch(self, cause: str = "") -> None:
+        """Something happened in the conversation.  `cause` says what: the quiet clock was seen starting over with
+        nobody at the keyboard, and nothing could say what had started it."""
         self.last_activity = time.time()
+        self.last_cause = cause or "something in the conversation"
 
     def stop(self) -> None:
         self._stop.set()
+        try:                                             # gone, not merely silent
+            self._note_path().unlink()
+        except OSError:
+            pass
 
     def wait(self, cfg: Dict[str, Any]) -> str:
         """Why reflection is not due yet, in words; empty when it is due."""
@@ -1169,7 +1178,8 @@ class IdleReflector:
             reflect_why = self.wait(cfg)
         except Exception as exc:
             sleep_why = reflect_why = f"could not be worked out ({exc})"
-        return {"at": now, "pid": os.getpid(), "poll_seconds": self.poll_seconds, "last_activity": self.last_activity,
+        return {"at": now, "pid": os.getpid(), "started": self.started, "poll_seconds": self.poll_seconds,
+                "last_activity": self.last_activity, "last_cause": self.last_cause,
                 "doing": self.doing, "doing_since": self.doing_since if self.doing else None,
                 "sleep_waits_for": sleep_why, "reflection_waits_for": reflect_why,
                 "last_sleep_error": self.last_sleep_error, "last_reflection_error": self.last_error,
@@ -1177,13 +1187,18 @@ class IdleReflector:
 
     def note(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         try:
-            path = Path(self.engine.path) / "worker.json"
-            # A name of its own for the half-written file: two writers sharing one wrote over each other.
+            # One file for each program that has this memory open: there can be more than one (a desktop app and
+            # a gateway, say), each with a worker and a quiet clock of its own, and one file would show whichever
+            # wrote last.
+            path = self._note_path()
             tmp = path.with_name(f"worker.{os.getpid()}.{threading.get_ident()}.part")
             tmp.write_text(json.dumps(self.state(cfg)), encoding="utf-8")
             os.replace(tmp, path)
         except Exception as exc:
             logger.debug("holonomic: could not note the worker's state: %s", exc)
+
+    def _note_path(self) -> Path:
+        return Path(self.engine.path) / f"worker.{os.getpid()}.{id(self) & 0xffff:04x}.json"
 
     def _begin(self, what: str) -> None:
         self.doing, self.doing_since = what, time.time()
@@ -1205,7 +1220,7 @@ class IdleReflector:
             return report
         except Exception as exc:
             self.last_error = str(exc)
-            self.last_activity = time.time()          # back off for one idle period before retrying
+            self.touch("reflection failed, and waits one quiet period before trying again")
             logger.warning("holonomic: reflection failed: %s", exc)
             return None
         finally:
@@ -1294,6 +1309,10 @@ class IdleReflector:
                 logger.warning("holonomic: %s could not be checked: %s", name, self.stumbles[name])
 
     def _loop(self) -> None:
+        try:                                             # the one shared file an earlier version wrote
+            (Path(self.engine.path) / "worker.json").unlink()
+        except OSError:
+            pass
         self.note()
         while not self._stop.wait(self.poll_seconds):
             self.once()

@@ -474,10 +474,14 @@ def test_the_background_worker_says_what_it_is_doing_and_why_not(tmp_path):
     r = reflect.IdleReflector(m, lambda: cfg, poll_seconds=3600)
     real = sl.sleep_once
     try:
-        note = lambda: json.loads((m.path / "worker.json").read_text())
+        note = lambda: json.loads(r._note_path().read_text())
         r.note()
         first = note()
         assert first["doing"] is None and first["pid"] > 0 and abs(first["at"] - time.time()) < 5
+        assert first["last_cause"] == "Hermes started this worker" and abs(first["started"] - first["last_activity"]) < 1
+        r.touch("a message came in: 'good morning'")
+        r.note()
+        assert note()["last_cause"] == "a message came in: 'good morning'"
         assert "it has been quiet for 0.0 of the 5 minutes" in first["sleep_waits_for"]              # she has only just spoken
         assert "new memories are waiting, and it starts at 500" in first["reflection_waits_for"]
         assert sl.sleep_wait(m, dict(cfg, sleep_enabled=False), 0) == "unattended sleep is switched off"
@@ -567,14 +571,26 @@ def test_cli_status_shows_the_background_worker(tmp_path):
         assert "describing images cannot even be checked, every half minute: KeyError" in run("sleep", "status")
         worker.stumbles.clear()
         worker._end()
+        saved = json.loads(worker._note_path().read_text())
+        # the cause of the last activity is said: a turn was stored
+        assert "a turn was stored: 'My name is Kayla and I build memory systems for fun'" in run("sleep", "status")
+        p.prefetch("What is my name, do you remember it?", session_id="s1")
+        worker.note()
+        assert "a message came in: 'What is my name, do you remember it?'" in run("sleep", "status")
         # Hermes closed: the last word from the worker is old, and the status says nobody is there
         p.shutdown()
-        state = json.loads((home / "holonomic" / "worker.json").read_text())
-        state["at"] -= 3600
-        (home / "holonomic" / "worker.json").write_text(json.dumps(state))
-        assert "no Hermes is running with this memory right now" in run("sleep", "status")
-        (home / "holonomic" / "worker.json").unlink()
+        assert not list((home / "holonomic").glob("worker*.json"))                           # a worker that stops takes its note with it
         assert "in the background: nothing on record" in run("sleep", "status")
+        # a program that died without tidying up: its last word is old, and the status says nobody is there
+        state = dict(saved, at=time.time() - 3600)
+        (home / "holonomic" / "worker.999.json").write_text(json.dumps(state))
+        assert "no Hermes is running with this memory right now" in run("sleep", "status")
+        # two programs with the memory open are shown apart
+        (home / "holonomic" / "worker.1.json").write_text(json.dumps(dict(saved, at=time.time(), pid=1, last_cause="a message came in: 'hello'")))
+        (home / "holonomic" / "worker.2.json").write_text(json.dumps(dict(saved, at=time.time(), pid=2, last_activity=time.time() - 240, last_cause="a turn was stored: 'bye'")))
+        text = run("sleep", "status")
+        assert "2 programs have this memory open" in text and "process 1," in text and "process 2," in text
+        assert "a message came in: 'hello'" in text and "quiet for 4.0 minutes" in text and "a turn was stored: 'bye'" in text
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)

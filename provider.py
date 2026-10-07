@@ -572,10 +572,10 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "write MEDIA: followed by its file path on a line of its own:"
                 + "".join(f"{lead}  - {p['scene']} (file: {p['file']})" for p in pictures))
 
-    def _touch(self) -> None:
+    def _touch(self, cause: str = "") -> None:
         reflector = reflector_for(self._engine) if self._engine is not None else None
         if reflector is not None:
-            reflector.touch()
+            reflector.touch(cause)
 
     # ---------------------------------------------------------------- recall
 
@@ -605,7 +605,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         if engine is None:
             return ""
         sid = session_id or self._session_id
-        self._touch()
+        self._touch("a message came in: " + repr(" ".join(_images.strip_image_markers(query).split())[:70]))
         words = _images.strip_image_markers(query)       # recall on what was said, not on Hermes' note about a file
         # The attached image is looked into first.  Something in it that she knows by name is part of what the
         # message is about, though the words may be no more than "look at this": recognising her friend's cat
@@ -1030,7 +1030,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             except Exception as exc:
                 logger.warning("holonomic: could not read the attached image (%s)", exc)
         engine = self._ensure_engine()
-        self._touch()
+        self._touch("a turn was stored: " + repr(" ".join(_images.strip_image_markers(user_content or "").split())[:70]))
         try:
             if engine is None:
                 raise RuntimeError(self._last_error or "memory unavailable")
