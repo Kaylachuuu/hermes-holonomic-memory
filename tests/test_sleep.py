@@ -478,7 +478,7 @@ def test_the_background_worker_says_what_it_is_doing_and_why_not(tmp_path):
         r.note()
         first = note()
         assert first["doing"] is None and first["pid"] > 0 and abs(first["at"] - time.time()) < 5
-        assert first["last_cause"] == "Hermes started this worker" and abs(first["started"] - first["last_activity"]) < 1
+        assert first["last_cause"].startswith("Hermes started this worker") and abs(first["started"] - first["last_activity"]) < 1
         r.touch("a message came in: 'good morning'")
         r.note()
         assert note()["last_cause"] == "a message came in: 'good morning'"
@@ -695,7 +695,7 @@ def test_the_worker_outlives_the_agent_and_the_quiet_clock_outlives_the_worker(t
         ran = []
         nxt = IdleReflector(engine, lambda: cfg, spawn=lambda target, name: types.SimpleNamespace(start=lambda: None), settle_seconds=60)
         try:
-            assert 395 < time.time() - nxt.last_activity < 410 and "(before this worker started)" in nxt.last_cause
+            assert 395 < time.time() - nxt.last_activity < 410 and "(before this worker took over)" in nxt.last_cause and nxt.took_over
             assert sleep.sleep_due(engine, cfg, nxt.last_activity)   # quiet long enough already
             # but it starts nothing in its first moments: a worker is often started because a message is on its way
             nxt.images_if_due = nxt.run_if_due = nxt.sleep_if_due = lambda: ran.append(1)
@@ -709,6 +709,19 @@ def test_the_worker_outlives_the_agent_and_the_quiet_clock_outlives_the_worker(t
         finally:
             nxt.stop("the test is over")
         assert json.loads(nxt._note_path().read_text())["ended_because"] == "the test is over"
+        # Nobody has been running for a while: the app has just been opened.  The quiet is counted from now, however
+        # long ago the last message was, so a sleep does not begin just as the user sits down to say something.
+        for f in Path(engine.path).glob("worker.*.json"):
+            old = json.loads(f.read_text())
+            f.write_text(json.dumps(dict(old, at=time.time() - 600, **({"ended": time.time() - 600} if old.get("ended") else {}))))
+        (Path(engine.path) / "activity.json").write_text(json.dumps(dict(kept, at=time.time() - 7200)))
+        opened = IdleReflector(engine, lambda: cfg, spawn=lambda target, name: types.SimpleNamespace(start=lambda: None))
+        try:
+            assert not opened.took_over and time.time() - opened.last_activity < 5
+            assert opened.last_cause.startswith("Hermes started this worker")
+            assert "it has been quiet for 0.0 of the 5 minutes" in sleep.sleep_wait(engine, cfg, opened.last_activity)
+        finally:
+            opened.stop("the test is over")
         prov.close_everything("Hermes exited")
         assert json.loads(worker._note_path().read_text())["ended_because"] == "Hermes exited" and prov.reflector_for(engine) is None
     finally:

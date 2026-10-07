@@ -231,7 +231,7 @@ def _worker(engine, what: str) -> None:
         try:
             kept = json.loads((engine.path / "activity.json").read_text(encoding="utf-8"))
             print(f"    the last activity on record was at {_when(kept['at'])}: {kept.get('cause')}. "
-                  "The next worker counts the quiet from then.")
+                  "When Hermes is next opened, the quiet is counted from then on.")
         except (OSError, ValueError, KeyError):
             pass
         return

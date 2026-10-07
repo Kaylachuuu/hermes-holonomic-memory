@@ -1112,26 +1112,37 @@ class IdleReflector:
 
     def __init__(self, engine, load_cfg: Callable[[], Dict[str, Any]], key_fn: Optional[Callable[[str], List[str]]] = None,
                  spawn: Optional[Callable[..., threading.Thread]] = None, poll_seconds: float = 30.0,
-                 foundation_fn: Optional[Callable[[], str]] = None, settle_seconds: float = 90.0):
+                 foundation_fn: Optional[Callable[[], str]] = None, settle_seconds: float = 90.0,
+                 takeover_seconds: float = 120.0):
         self.engine, self.load_cfg, self.key_fn = engine, load_cfg, key_fn
         self.foundation_fn = foundation_fn or (lambda: "")
         self.poll_seconds = poll_seconds
         self.last_activity = time.time()
         self.started = self.last_activity
-        self.last_cause = "Hermes started this worker"
-        # The quiet clock belongs to the memory, not to this worker.  Hermes Desktop was seen ending a worker
-        # two minutes after starting it, with the app still open: each new worker began its count at nought, so a
-        # sleep that waits five quiet minutes, let alone sixty, could never come due.  The time of the last
-        # activity is kept on disk and a new worker carries on from it.  It then waits `settle_seconds` before
-        # starting anything, since a worker is often started because a message is on its way.
+        self.last_cause = "Hermes started this worker; the quiet is counted from here"
+        # Hermes Desktop was seen ending a worker two minutes after starting it, with the app still open: each
+        # new worker began its count at nought, so a sleep that waits five quiet minutes, let alone sixty, could
+        # never come due.  So the time of the last activity is kept on disk, and a worker that takes over from one
+        # that was running moments ago carries on from it.  A worker that starts with nobody before it (the app
+        # has just been opened) counts from its own start: the user has probably come to say something, and a
+        # sleep begun then would be in the way of the reply.
         self.settle_until = self.started + max(0.0, settle_seconds)
         self.holders: Optional[int] = None           # how many agents hold the memory open, when the provider says
         self.ended: Optional[float] = None
+        self.took_over = False
         try:
+            before = 0.0                                 # when a worker was last known to be running here
+            for path in Path(self.engine.path).glob("worker.*.json"):
+                try:
+                    other = json.loads(path.read_text(encoding="utf-8"))
+                    before = max(before, float(other.get("ended") or other.get("at") or 0))
+                except (OSError, ValueError, TypeError):
+                    continue
             kept = json.loads(self._activity_path().read_text(encoding="utf-8"))
-            if 0 < float(kept["at"]) < self.started:
+            if self.started - before <= takeover_seconds and 0 < float(kept["at"]) < self.started:
+                self.took_over = True
                 self.last_activity = float(kept["at"])
-                self.last_cause = str(kept.get("cause") or "something in the conversation") + " (before this worker started)"
+                self.last_cause = str(kept.get("cause") or "something in the conversation") + " (before this worker took over)"
         except (OSError, ValueError, KeyError, TypeError):
             pass
         self.last_error = ""
