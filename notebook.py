@@ -20,6 +20,17 @@ A note may also point at memories in her own store (the project conversation it 
 numbers, not on the plates: the library and her memory are separate stores, and nothing from a library reaches a
 conversation in which it is not open.
 
+A note belongs to one library's notebook and is bound, on that library's plates, to passages of that library.  It
+may also point to passages in other libraries ("the calling convention in the x86 manual is what our loader in
+versa-os uses").  Plates cannot tie two stores together, so a pointer is kept in two halves, each where its
+passage is: the note records which library and which marker, and in the other library a marker (a small row in
+that library's notebook, bound on that library's plates to the passage) records which note points there.  The
+marker is what makes the connection findable from the far side: when the passage comes up, the plates bring the
+marker, and the marker names the note.  It also keeps the pointer true: the marker is bound again with its own
+library's passages when that library is read again, so a pointer either still finds its passage or says it is
+stale.  What a pointer leads to is only given from a library that is open in the conversation; of a closed one
+it gives the name of the passage and no more.
+
 When the library's folder is read again, a passage may be replaced.  Each note remembers the file, the section
 and the text of what it was about, and is bound again to the passage that now stands there; if the text changed
 the note says so, and if the passage is gone the note is kept and says that.
@@ -34,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 REALM = "notebook"
 NOTE = "library_note"
+REF = "library_note_ref"          # in another library's notebook: "a note in library X points at this passage"
 TYPES = {"connection": "how it bears on the project", "lesson": "lesson learned", "question": "open question",
          "guidance": "where to look"}
 PROVENANCE = ("inference", "tested", "user")
@@ -169,7 +181,7 @@ def note_of(lib, memory: dict) -> dict:
             "when": float(memory.get("created_at") or 0), "version": int(meta.get("version") or 1),
             "revises": meta.get("revises"), "retired": bool(meta.get("superseded_at")) or float(memory.get("trust", 1)) <= 0,
             "retired_because": meta.get("superseded_reason", ""), "replaced_by": meta.get("superseded_by"),
-            "conversation": meta.get("conversation", "")}
+            "conversation": meta.get("conversation", ""), "refs": [dict(r) for r in meta.get("refs") or []]}
 
 
 def get_note(lib, note_id: Any) -> Optional[dict]:
@@ -217,11 +229,22 @@ def label(note: dict) -> str:
     return out
 
 
-def line(note: dict, main=None, *, sources: bool = False) -> str:
+_STALE = {"changed": " [the passage has changed since]", "gone": " [no longer in that library]",
+          "no library": " [that library no longer exists]"}
+
+
+def line(note: dict, main=None, *, sources: bool = False, shelf=None, open_in: Optional[List[str]] = None) -> str:
     out = f"- ({label(note)}) {' '.join(note['text'].split())}"
     if sources and note["about"]:
         out += "\n  It is about: " + "; ".join(_source(a) + (" [changed]" if a.get("state") == "changed" else " [gone]" if a.get("state") == "gone" else "")
                                                for a in note["about"])
+    if note.get("refs") and shelf is not None:
+        there = []
+        for p in pointers(note, shelf):
+            closed = open_in is not None and p["library"] not in open_in and p["state"] != "no library"
+            there.append(f"{p['library']}: {p['source']}" + _STALE.get(p["state"], "") + (" (that library is not open here)" if closed else ""))
+        if there:
+            out += "\n  It ties this to, in another library: " + "; ".join(there)
     if note["memories"] and main is not None:
         said = []
         for mid in note["memories"][:3]:
@@ -252,6 +275,101 @@ def for_passages(lib, passage_ids: List[int], cfg: Dict[str, Any]) -> Dict[int, 
         if kept:
             out[int(pid)] = sorted(kept, key=_rank)[:per]
     return out
+
+
+# ----------------------------------------------------------------- pointers into other libraries
+
+def split(about: List[Any], owner: str, known: List[str]) -> Tuple[List[Any], Dict[str, List[str]]]:
+    """What a note is about, sorted into passages of its own library and passages of others.  Another library's
+    passage is written as search results print it: 'versa-os: KERNEL.ASM > Load_FAT' (or 'versa-os: 412')."""
+    local: List[Any] = []
+    other: Dict[str, List[str]] = {}
+    for item in about or []:
+        text = str(item).strip()
+        found = re.match(r"^\[?\s*([A-Za-z0-9][A-Za-z0-9_-]*)\s*:\s*(.+?)\]?$", text)
+        name = found.group(1).lower() if found else ""
+        if found and name in known and name != owner:
+            other.setdefault(name, []).append(found.group(2).strip())
+        elif text:
+            local.append(found.group(2).strip() if found and name == owner else item)
+    return local, other
+
+
+def _there(shelf, other: Dict[str, List[str]]) -> List[Tuple[str, Any, dict]]:
+    """(library, its store, the passage) for each passage named in another library: all found before anything is written."""
+    out = []
+    for name, items in other.items():
+        got = shelf.get(name) if shelf is not None else None
+        if got is None:
+            raise _error(f"There is no library called '{name}' to point into.")
+        store, data = got
+        out += [(name, store, a) for a in resolve(store, data.get("files") or {}, items)]
+    if len(out) > 6:
+        raise _error(f"A note can point to at most 6 passages in other libraries; this names {len(out)}.")
+    return out
+
+
+def _point(shelf, owner: str, note_id: int, there: List[Tuple[str, Any, dict]]) -> List[dict]:
+    refs = []
+    for name, store, a in there:
+        ids = store.remember(f"A note in the notebook of the library '{owner}' refers to this passage.", kind=REF, realm=REALM,
+                             session="references", chain=False, whole=True, trust=1.0, links=[a["id"]],
+                             meta={"owner": owner, "owner_uid": shelf.uid(owner), "note": int(note_id), "about": [a]})
+        refs.append({"library": name, "uid": shelf.uid(name), "stub": int(ids[0]), "file": a["file"], "section": a["section"],
+                     "digest": a["digest"]})
+    return refs
+
+
+def _markers(shelf, refs: List[dict]):
+    """The marker each pointer keeps in the library it points into, where that library and its marker still exist."""
+    for r in refs or []:
+        got = shelf.get(r.get("library", "")) if shelf is not None else None
+        if got is None or shelf.uid(r["library"]) != r.get("uid"):
+            continue
+        marker = got[0].get(int(r["stub"])) if r.get("stub") else None
+        if marker and marker["kind"] == REF:
+            yield got[0], marker
+
+
+def pointers(note: dict, shelf) -> List[dict]:
+    """Where a note's pointers lead now: for each, the library, the passage as it stands, and whether it is stale.
+    Read from the marker in the far library, which is bound again whenever that library is."""
+    out = []
+    for r in note.get("refs") or []:
+        got = shelf.get(r.get("library", "")) if shelf is not None else None
+        here = {"library": r.get("library", ""), "source": _source(r), "id": None, "state": ""}
+        if got is None or shelf.uid(r["library"]) != r.get("uid"):
+            out.append(dict(here, state="no library"))
+            continue
+        marker = got[0].get(int(r["stub"])) if r.get("stub") else None
+        a = ((marker or {}).get("meta") or {}).get("about") or []
+        if not marker or marker["kind"] != REF or not a:
+            out.append(dict(here, state="gone"))
+            continue
+        out.append(dict(here, source=_source(a[0]) or here["source"], id=a[0].get("id"), state=a[0].get("state") or ""))
+    return out
+
+
+def incoming(lib, passage_ids: List[int]) -> Dict[int, List[dict]]:
+    """Notes in other libraries that point at these passages, found on this library's plates with the passage as
+    the cue.  Gives which library and which note; the note itself is that library's to give."""
+    out: Dict[int, List[dict]] = {}
+    for pid in passage_ids:
+        for hit in lib.associates(int(pid), k=12, realms=(REALM,), min_score=0.1):
+            if hit.kind != REF or hit.trust <= 0:
+                continue
+            meta = hit.meta or (lib.get(hit.id) or {}).get("meta") or {}
+            if any(a.get("id") == int(pid) for a in meta.get("about") or []):
+                out.setdefault(int(pid), []).append({"owner": meta.get("owner", ""), "owner_uid": meta.get("owner_uid", ""),
+                                                     "note": int(meta.get("note") or 0), "stub": int(hit.id)})
+    return out
+
+
+def has_markers(lib) -> bool:
+    try:
+        return bool(lib.recent(1, realm=REALM, kind=REF))
+    except Exception:
+        return False
 
 
 def _rank(note: dict) -> tuple:
@@ -309,7 +427,10 @@ def _write(lib, text: str, meta: dict, anchors: List[dict]) -> int:
 
 def add(lib, files: Dict[str, dict], cfg: Dict[str, Any], *, text: str, kind: str = "lesson", about: Optional[List[Any]] = None,
         memories: Optional[List[int]] = None, provenance: str = "inference", evidence: str = "", quote: str = "",
-        messages: Optional[List[str]] = None, by_command: bool = False, conversation: str = "", main=None) -> dict:
+        messages: Optional[List[str]] = None, by_command: bool = False, conversation: str = "", main=None,
+        shelf=None, owner: str = "") -> dict:
+    """`shelf` gives the other libraries and `owner` names this one, for a note that also points into another
+    library: such a passage is written 'other-library: FILE > SECTION' among `about`."""
     kind = (kind or "lesson").strip().lower()
     if kind not in TYPES:
         raise _error(f"type is one of: {', '.join(TYPES)}")
@@ -317,20 +438,25 @@ def add(lib, files: Dict[str, dict], cfg: Dict[str, Any], *, text: str, kind: st
     if len(text) < 15:
         raise _error("A note needs 'text': a sentence or two of what you learned.")
     whose = _settle(provenance, evidence, quote, messages, by_command)
-    anchors = resolve(lib, files, about or [])
+    about, other = split(about or [], owner, shelf.names() if shelf is not None else [])
+    anchors = resolve(lib, files, about)
+    there = _there(shelf, other)
     twin = _twin(lib, text, kind)
     if twin is not None:
         raise _error(f"NOT SAVED: note {twin['id']} already says this (\"{twin['text'][:160]}\"). To change or add to it, use "
                      f"action 'revise_note' with note_id {twin['id']}; to say it is now tested or was confirmed, use 'confirm_note'.")
     kept = [int(i) for i in (memories or []) if main is None or main.get(int(i))][:6]
     meta = {"type": kind, **whose, "about": anchors, "memories": kept, "version": 1, "conversation": conversation}
-    return get_note(lib, _write(lib, text, meta, anchors))
+    note_id = _write(lib, text, meta, anchors)
+    if there:
+        lib.update_meta(note_id, {"refs": _point(shelf, owner, note_id, there)})
+    return get_note(lib, note_id)
 
 
 def revise(lib, files: Dict[str, dict], cfg: Dict[str, Any], note_id: Any, *, text: Optional[str] = None, kind: Optional[str] = None,
            about: Optional[List[Any]] = None, memories: Optional[List[int]] = None, provenance: Optional[str] = None,
            evidence: str = "", quote: str = "", messages: Optional[List[str]] = None, by_command: bool = False,
-           conversation: str = "", main=None) -> dict:
+           conversation: str = "", main=None, shelf=None, owner: str = "") -> dict:
     """A better version of a note takes its place.  The earlier one is retired, not deleted: it leaves recall and
     stays on record.  A note whose words change is her inference again unless she says otherwise: what was tested
     or confirmed was the earlier wording."""
@@ -352,11 +478,26 @@ def revise(lib, files: Dict[str, dict], cfg: Dict[str, Any], note_id: Any, *, te
             whose["by_command"] = True
     else:
         whose = {"provenance": "inference"}
-    anchors = resolve(lib, files, about) if about else [a for a in old["about"]]
+    there = None                                      # None: its pointers into other libraries stay as they are
+    if about:
+        about, other = split(about, owner, shelf.names() if shelf is not None else [])
+        anchors, there = resolve(lib, files, about), _there(shelf, other)
+    else:
+        anchors = [a for a in old["about"]]
     kept = [int(i) for i in memories if main is None or main.get(int(i))][:6] if memories else old["memories"]
     meta = {"type": kind, **whose, "about": anchors, "memories": kept, "version": old["version"] + 1, "revises": old["id"],
             "conversation": conversation}
     new_id = _write(lib, new_text, meta, anchors)
+    if there is None:                                 # the markers in the other libraries now name the new note
+        for store, marker in _markers(shelf, old["refs"]):
+            store.update_meta(marker["id"], {"note": new_id})
+        if old["refs"]:
+            lib.update_meta(new_id, {"refs": old["refs"]})
+    else:
+        for store, marker in _markers(shelf, old["refs"]):
+            store.supersede(marker["id"], None, "the note was revised and no longer points here")
+        if there:
+            lib.update_meta(new_id, {"refs": _point(shelf, owner, new_id, there)})
     lib.supersede(old["id"], new_id, "revised")
     return get_note(lib, new_id)
 
@@ -378,22 +519,27 @@ def confirm(lib, note_id: Any, *, provenance: str, evidence: str = "", quote: st
     return get_note(lib, old["id"])
 
 
-def retire(lib, note_id: Any, reason: str = "") -> dict:
+def retire(lib, note_id: Any, reason: str = "", shelf=None) -> dict:
     old = get_note(lib, note_id)
     if old is None:
         raise _error(f"There is no note {note_id}.")
     if not old["retired"]:
         lib.supersede(old["id"], None, " ".join(str(reason or "retired").split())[:300])
+        for store, marker in _markers(shelf, old["refs"]):           # nothing in another library leads to a retired note
+            store.supersede(marker["id"], None, "the note was retired")
     return get_note(lib, old["id"])
 
 
-def restore(lib, note_id: Any) -> dict:
+def restore(lib, note_id: Any, shelf=None) -> dict:
     old = get_note(lib, note_id)
     if old is None:
         raise _error(f"There is no note {note_id}.")
     if old["retired"]:
         lib.unsupersede(old["id"], 1.0)
         lib.update_meta(old["id"], {"superseded_by": None, "superseded_at": None, "superseded_reason": None})
+        for store, marker in _markers(shelf, old["refs"]):
+            store.unsupersede(marker["id"], 1.0)
+            store.update_meta(marker["id"], {"superseded_by": None, "superseded_at": None, "superseded_reason": None})
     return get_note(lib, old["id"])
 
 
@@ -404,10 +550,10 @@ def rebind(lib, files: Dict[str, dict]) -> dict:
     stood.  Unchanged text is found again and nothing is said.  Changed text is bound and the note says the
     passage changed.  A passage that is gone leaves the note standing, saying so."""
     report = {"notes": 0, "rebound": 0, "changed": 0, "gone": 0}
-    for note in list_notes(lib):
-        report["notes"] += 1
+
+    def again(row_id: int, about: List[dict], count: dict) -> None:
         touched = False
-        for a in note["about"]:
+        for a in about:
             if a.get("id") and _piece(lib, a["id"]) is not None:
                 continue                                           # still there, as it was
             now = [p for p in (_piece(lib, i) for i in ((files.get(a.get("file") or "") or {}).get("ids") or []))
@@ -415,7 +561,7 @@ def rebind(lib, files: Dict[str, dict]) -> dict:
             touched = True
             if not now:
                 if a.get("state") != "gone":
-                    report["gone"] += 1
+                    count["gone"] += 1
                 a.update(id=None, state="gone")
                 continue
             same = [p for p in now if digest(p["text"]) == a.get("digest")]
@@ -423,25 +569,48 @@ def rebind(lib, files: Dict[str, dict]) -> dict:
             a.update(id=int(pick["id"]), n=int(pick["meta"].get("n") or 0), state="" if same else "changed")
             if not same:
                 a.update(was=a.get("digest"), digest=digest(pick["text"]))
-                report["changed"] += 1
+                count["changed"] += 1
             else:
-                report["rebound"] += 1
-            lib.link(note["id"], int(pick["id"]), realm=REALM)
+                count["rebound"] += 1
+            lib.link(row_id, int(pick["id"]), realm=REALM)
         if touched:
-            lib.update_meta(note["id"], {"about": note["about"]})
+            lib.update_meta(row_id, {"about": about})
+
+    for note in list_notes(lib):
+        report["notes"] += 1
+        again(note["id"], note["about"], report)
+    # Markers of notes in other libraries that point here are bound again the same way: it is what keeps a
+    # pointer from another library true, or shows it stale.
+    markers = [lib.get(m["id"]) for m in lib.recent(100000, realm=REALM, kind=REF) if float(m.get("trust", 1)) > 0]
+    if markers:
+        report["pointed_at"] = {"markers": 0, "rebound": 0, "changed": 0, "gone": 0}
+        for marker in markers:
+            if marker:
+                report["pointed_at"]["markers"] += 1
+                again(marker["id"], [dict(a) for a in (marker["meta"] or {}).get("about") or []], report["pointed_at"])
     return report
 
 
-def check(lib) -> dict:
+def check(lib, shelf=None) -> dict:
     """Whether the plates do what the notes' own records say: from each passage, is the note read back; from each
-    note, the passage?  Read-only."""
+    note, the passage?  And of pointers into other libraries: does each still find its passage, and is its marker
+    read back from that passage on that library's plates?  Read-only."""
     out = {"notes": 0, "bindings": 0, "passage_to_note": 0, "note_to_passage": 0, "unbound": 0, "stale": 0}
     for note in list_notes(lib):
         out["notes"] += 1
+        if note["refs"] and shelf is not None:
+            for r, p in zip(note["refs"], pointers(note, shelf)):
+                out["pointers"] = out.get("pointers", 0) + 1
+                out["pointers_stale"] = out.get("pointers_stale", 0) + int(bool(p["state"]))
+                found = False
+                if p["id"] and p["state"] != "no library":
+                    far = shelf.get(p["library"])[0]
+                    found = any(i["stub"] == r["stub"] for i in incoming(far, [p["id"]]).get(p["id"], []))
+                out["pointers_found_from_far_side"] = out.get("pointers_found_from_far_side", 0) + int(found)
         live = [a for a in note["about"] if a.get("id")]
         out["stale"] += sum(1 for a in note["about"] if a.get("state"))
         if not live:
-            out["unbound"] += 1
+            out["unbound"] += int(not note["refs"])
             continue
         back = {h.id for h in lib.associates(note["id"], k=16, realms=(REALM, "waking"), min_score=0.1)}
         for a in live:

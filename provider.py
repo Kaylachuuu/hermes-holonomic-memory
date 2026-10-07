@@ -315,7 +315,9 @@ LIBRARY_TOOL = {
         "on the project; lesson: what worked or failed, and the correction; question: something you are unsure of; "
         "guidance: which passages to read for a kind of problem), and `passages` it is about (each a passage number or "
         "a source exactly as a search result gives it, like \"KERNEL.ASM > Load_FAT\"), so that the note comes back "
-        "with them. `memories` may give ids of your own memories it came out of. `provenance` says where it comes "
+        "with them. A note belongs to one library but may also point to a passage in another: write that one as "
+        "\"other-library: FILE > SECTION\" among `passages` (for example a note in x86 on a calling convention, "
+        "pointing to \"versa-os: KERNEL.ASM > Load_FAT\" where the project relies on it). `memories` may give ids of your own memories it came out of. `provenance` says where it comes "
         "from: 'inference' (your own reasoning, the default); 'tested' (you tried it: `evidence` must say what was run "
         "and what happened); 'user' (the user told you: `quote` must be their exact words from this conversation). "
         "A guess saved as a result is worse than no note.\n"
@@ -1207,15 +1209,22 @@ class HolonomicMemoryProvider(MemoryProvider):
                 found = _library.search(root, which, query, engine.embedder, self._cfg,
                                         k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
                 from . import notebook as _notebook
+                shelf = _library.Shelf(root, engine.embedder, self._cfg)
                 out = {"searched": which, "count": len(found), "results": [
                     {"library": f["library"], "source": f["source"], "passage": f["id"], "text": f["text"], "score": f["score"],
                      **({"same_passage_also_in": f["also_in"]} if f.get("also_in") else {}),
-                     **({"your_notes_on_this_passage": [_notebook.line(n, engine)[2:] for n in f["notes"]]} if f.get("notes") else {})}
+                     **({"your_notes_on_this_passage": [
+                         (f"(from your notebook in {n['library']}) " if n["library"] != f["library"] else "")
+                         + _notebook.line(n, engine, shelf=shelf, open_in=which)[2:] for n in f["notes"]]} if f.get("notes") else {}),
+                     **({"brought_in_by": f"your note {f['brought_by']['note']} in {f['brought_by']['library']}, which ties this "
+                                          f"passage to {f['brought_by']['with']}"} if f.get("brought_by") else {}),
+                     **({"also_noted": [f"A note of yours in the notebook of '{o}' refers to this passage; {o} was not searched."
+                                        for o in f["noted_in"]]} if f.get("noted_in") else {})}
                     for f in found]}
                 own = _library.note_matches(root, which, query, engine.embedder, self._cfg, floor=0.25,
                                             skip=tuple(n["id"] for f in found for n in f.get("notes", [])))
                 if own:
-                    out["your_notes_matching_this"] = [f"[{n['library']}] " + _notebook.line(n, engine, sources=True)[2:] for n in own]
+                    out["your_notes_matching_this"] = [f"[{n['library']}] " + _notebook.line(n, engine, sources=True, shelf=shelf, open_in=which)[2:] for n in own]
                 looked = [n for n in which if n not in now]
                 if looked:
                     out["note"] = (f"A single lookup: {', '.join(looked)} is not open in this conversation, and nothing more from it "
@@ -1239,12 +1248,15 @@ class HolonomicMemoryProvider(MemoryProvider):
         name, data = _library._need(root, name)
         lib = _library.store(root, name, engine.embedder, self._cfg)
         files = data.get("files") or {}
+        shelf = _library.Shelf(root, engine.embedder, self._cfg)
 
         def out(note: dict) -> dict:
             return {"note_id": note["id"], "library": name, "type": note["type"], "text": note["text"],
                     "where_it_comes_from": _notebook.where_from(note),
                     "about": [_notebook._source(a) + (f" ({a['state']})" if a.get("state") else "") for a in note["about"]],
                     **({"memories": note["memories"]} if note["memories"] else {}),
+                    **({"points_to_in_other_libraries": [f"{p['library']}: {p['source']}" + _notebook._STALE.get(p["state"], "")
+                                                         for p in _notebook.pointers(note, shelf)]} if note.get("refs") else {}),
                     **({"retired": True, "why": note["retired_because"]} if note["retired"] else {})}
         if action == "notes":
             query = (args.get("query") or "").strip()
@@ -1268,9 +1280,10 @@ class HolonomicMemoryProvider(MemoryProvider):
         if action == "note":
             note = _notebook.add(lib, files, self._cfg, text=args.get("text") or "", kind=args.get("type") or "lesson",
                                  about=args.get("passages") or [], memories=args.get("memories") or [], conversation=sid, main=engine,
+                                 shelf=shelf, owner=name,
                                  **dict(given, provenance=given["provenance"] or "inference"))
             said = out(note)
-            if not note["about"]:
+            if not note["about"] and not note["refs"]:
                 said["warning"] = ("This note is not about any passage, so it will only come back when a message resembles it. "
                                    "If it concerns particular passages, revise it with 'passages'.")
             return json.dumps(dict(said, saved=True))
@@ -1278,12 +1291,13 @@ class HolonomicMemoryProvider(MemoryProvider):
             return _error(f"{action} needs 'note_id'")
         if action == "revise_note":
             note = _notebook.revise(lib, files, self._cfg, args["note_id"], text=args.get("text"), kind=args.get("type"),
-                                    about=args.get("passages"), memories=args.get("memories"), conversation=sid, main=engine, **given)
+                                    about=args.get("passages"), memories=args.get("memories"), conversation=sid, main=engine,
+                                    shelf=shelf, owner=name, **given)
             return json.dumps(dict(out(note), saved=True, replaced_note=note["revises"]))
         if action == "confirm_note":
             note = _notebook.confirm(lib, args["note_id"], **dict(given, provenance=given["provenance"] or ""))
             return json.dumps(dict(out(note), saved=True))
-        note = _notebook.retire(lib, args["note_id"], args.get("reason") or "")
+        note = _notebook.retire(lib, args["note_id"], args.get("reason") or "", shelf=shelf)
         return json.dumps(out(note))
 
     def _hit_json(self, hit) -> Dict[str, Any]:

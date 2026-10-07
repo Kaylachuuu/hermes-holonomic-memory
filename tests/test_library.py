@@ -771,3 +771,172 @@ def test_cli_library_notes(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+LOADER = """# Loader
+
+The second stage loader of Versa OS is entered from the boot sector with the drive in DL.
+
+## Reading the kernel
+
+The loader reads the kernel image with INT 13h AH=02h, sixteen sectors at a time, converting each LBA to
+cylinder, head and sector for a 1.44 MB floppy before every call.
+
+## Entering protected mode
+
+The loader enables the A20 line, loads the GDT and sets the PE bit of CR0 before the far jump.
+"""
+
+
+def two_libraries(tmp_path):
+    from holonomic import notebook as nb
+    root, _ = built(tmp_path)
+    src = tmp_path / "versa-src"
+    src.mkdir()
+    (src / "loader.md").write_text(LOADER, encoding="utf-8")
+    (src / "todo.txt").write_text("Things still to do in the kernel: a file system driver and a shell.\n", encoding="utf-8")
+    lib.create(root, "versa", str(src), "The project's own source")
+    lib.build(root, "versa", HashEmbedder(), CFG)
+    shelf = lib.Shelf(root, HashEmbedder(), CFG)
+    x86, versa = shelf.get("x86")[0], shelf.get("versa")[0]
+    return nb, root, shelf, x86, versa, src
+
+
+def test_a_note_points_into_another_library_and_is_found_from_both_sides(tmp_path):
+    """Plates cannot tie two stores together.  A note keeps a pointer, and the library pointed into keeps a marker
+    on its own plates, so the connection is found whichever passage comes up first."""
+    nb, root, shelf, x86, versa, src = two_libraries(tmp_path)
+    files = lib.info(root, "x86")["files"]
+    emb = HashEmbedder()
+    kernel = next(i for i in lib.info(root, "versa")["files"]["loader.md"]["ids"] if versa.get(i)["meta"]["section"].endswith("Reading the kernel"))
+    reading = next(i for i in files["boot.md"]["ids"] if x86.get(i)["meta"]["section"] == "Reading sectors")
+    assert nb.split(["boot.md > Reading sectors", "versa: loader.md > Reading the kernel", "[x86: fat12.txt]", "C: not a library"], "x86",
+                    ["x86", "versa"]) == (["boot.md > Reading sectors", "fat12.txt", "C: not a library"], {"versa": ["loader.md > Reading the kernel"]})
+    with pytest.raises(lib.LibraryError, match="has no section"):
+        nb.add(x86, files, CFG, text="A note that points at a section that is not in the other library.", about=["versa: loader.md > Nowhere"],
+               shelf=shelf, owner="x86")
+    assert nb.list_notes(x86) == [] and not nb.has_markers(versa)                       # refused before anything was written
+    note = nb.add(x86, files, CFG, kind="connection", shelf=shelf, owner="x86",
+                  text="The CHS read described here is the call our loader uses for the kernel, so the geometry must be the floppy's.",
+                  about=["boot.md > Reading sectors", "versa: loader.md > Reading the kernel"])
+    # one owning notebook; its own passage on its own plates, the other as a pointer
+    assert [a["id"] for a in note["about"]] == [reading] and len(note["refs"]) == 1 and nb.list_notes(versa) == []
+    ref = note["refs"][0]
+    assert ref["library"] == "versa" and ref["uid"] == shelf.uid("versa") and ref["digest"] == nb.digest(versa.get(kernel)["text"])
+    assert nb.pointers(note, shelf) == [{"library": "versa", "source": "loader.md > Loader > Reading the kernel", "id": kernel, "state": ""}]
+    assert nb.incoming(versa, [kernel]) == {kernel: [{"owner": "x86", "owner_uid": shelf.uid("x86"), "note": note["id"], "stub": ref["stub"]}]}
+    c = nb.check(x86, shelf)
+    assert c["pointers"] == 1 and c["pointers_stale"] == 0 and c["pointers_found_from_far_side"] == 1 and c["bindings"] == 1
+    assert "It ties this to, in another library: versa: loader.md > Loader > Reading the kernel" in nb.line(note, shelf=shelf)
+    assert "(that library is not open here)" in nb.line(note, shelf=shelf, open_in=["x86"])
+    assert all(h.kind == lib.PIECE for h in versa.recall("a note refers to this passage", k=10, min_score=0.0))      # the marker is not reference material
+    # FROM THE OWNING SIDE, both libraries read: the x86 passage comes up, its note brings the loader passage in
+    # with it, in place of the weakest piece and not in addition
+    q = "the extended read takes a disk address packet in DS:SI"
+    wide = dict(CFG, library_score_band=9.0)                                            # so that two pieces are given without it
+    plain = lib.search(root, ["x86", "versa"], q, emb, wide, k=2, floor=0.0, notes=False)
+    found = lib.search(root, ["x86", "versa"], q, emb, wide, k=2, floor=0.0)
+    assert len(found) == len(plain) == 2 and found[0]["id"] == reading and [n["id"] for n in found[0]["notes"]] == [note["id"]]
+    assert plain[1]["id"] != kernel and found[1]["library"] == "versa" and found[1]["id"] == kernel
+    assert found[1]["brought_by"] == {"library": "x86", "note": note["id"], "with": "x86: boot.md > Reading sectors"}
+    one = lib.search(root, ["x86", "versa"], q, emb, CFG, k=1, floor=0.0)
+    assert [f["id"] for f in one] == [reading]                                          # no room: nothing is pushed out for it
+    assert not any(f.get("brought_by") for f in lib.search(root, ["x86", "versa"], q, emb, dict(CFG, library_follow_notes=0), k=2, floor=0.0))
+    # only x86 read: the pointer names the passage and no more
+    alone = lib.search(root, ["x86"], q, emb, CFG, k=3, floor=0.0)
+    assert all(f["library"] == "x86" for f in alone) and not any(f.get("brought_by") for f in alone)
+    # FROM THE FAR SIDE: the loader passage comes up in versa; its plates bring the marker, the marker the note
+    q2 = "The loader reads the kernel image sixteen sectors at a time converting each LBA"
+    far = next(f for f in lib.search(root, ["versa", "x86"], q2, emb, CFG, k=4, floor=0.0) if f["id"] == kernel)
+    assert [(n["library"], n["id"]) for n in far["notes"]] == [("x86", note["id"])] and far["noted_in"] == []
+    # versa alone: that there is a note, and where; not what it says
+    far = next(f for f in lib.search(root, ["versa"], q2, emb, CFG, k=4, floor=0.0) if f["id"] == kernel)
+    assert far["notes"] == [] and far["noted_in"] == ["x86"]
+    # a revision keeps the pointer, and the marker names the new note
+    better = nb.revise(x86, files, CFG, note["id"], shelf=shelf, owner="x86",
+                       text="The CHS read described here is the call our loader uses for the kernel: geometry is 80 cylinders, 2 heads, 18 sectors.")
+    assert better["refs"] == note["refs"] and nb.incoming(versa, [kernel])[kernel][0]["note"] == better["id"]
+    # retired: nothing in the other library leads to it; restored: it does again
+    nb.retire(x86, better["id"], "testing", shelf=shelf)
+    assert nb.incoming(versa, [kernel]) == {}
+    nb.restore(x86, better["id"], shelf=shelf)
+    assert nb.incoming(versa, [kernel])[kernel][0]["note"] == better["id"]
+    # the far library is read again: the pointer follows its passage, or says it is stale
+    (src / "loader.md").write_text(LOADER.replace("sixteen sectors at a time", "eighteen sectors at a time"), encoding="utf-8")
+    time.sleep(0.01)
+    report = lib.build(root, "versa", emb, CFG)
+    assert report["notes"]["notes"] == 0 and report["notes"]["pointed_at"] == {"markers": 1, "rebound": 0, "changed": 1, "gone": 0}
+    now = nb.pointers(nb.get_note(x86, better["id"]), shelf)[0]
+    assert now["state"] == "changed" and now["id"] != kernel and "eighteen sectors" in versa.get(now["id"])["text"]
+    assert "[the passage has changed since]" in nb.line(nb.get_note(x86, better["id"]), shelf=shelf)
+    assert nb.check(x86, shelf)["pointers_stale"] == 1
+    assert lib.build(root, "versa", emb, CFG, fresh=True)["notes"]["pointed_at"]["rebound"] == 1          # every passage new: found again
+    assert nb.pointers(nb.get_note(x86, better["id"]), shelf)[0]["id"] in lib.info(root, "versa")["files"]["loader.md"]["ids"]
+    (src / "loader.md").unlink()
+    time.sleep(0.01)
+    assert lib.build(root, "versa", emb, CFG)["notes"]["pointed_at"]["gone"] == 1
+    assert nb.pointers(nb.get_note(x86, better["id"]), shelf)[0]["state"] == "gone"
+    # the far library is removed, and another made under its name: the pointer does not take it for the old one
+    old_uid = shelf.uid("versa")
+    lib.delete(root, "versa")
+    assert nb.pointers(nb.get_note(x86, better["id"]), shelf)[0]["state"] == "no library"
+    time.sleep(0.01)
+    lib.create(root, "versa", str(src))
+    assert shelf.uid("versa") != old_uid and nb.pointers(nb.get_note(x86, better["id"]), shelf)[0]["state"] == "no library"
+
+
+def test_a_marker_whose_note_is_gone_leads_nowhere(tmp_path):
+    nb, root, shelf, x86, versa, src = two_libraries(tmp_path)
+    emb = HashEmbedder()
+    note = nb.add(versa, lib.info(root, "versa")["files"], CFG, kind="connection", shelf=shelf, owner="versa",
+                  text="Our loader depends on the BIOS loading the boot sector at 0x7C00 as described in the reference.",
+                  about=["loader.md > Loader", "x86: boot.md > Boot sector"])
+    boot = nb.pointers(note, shelf)[0]["id"]
+    q = "The boot sector is the first 512 bytes of the disk and ends with the signature 0xAA55"
+    assert next(f for f in lib.search(root, ["x86"], q, emb, CFG, floor=0.0) if f["id"] == boot)["noted_in"] == ["versa"]
+    lib.delete(root, "versa")                                                       # the owning library is removed outright
+    assert nb.incoming(x86, [boot])[boot]
+    assert next(f for f in lib.search(root, ["x86"], q, emb, CFG, floor=0.0) if f["id"] == boot)["noted_in"] == []
+    assert nb.incoming(x86, [boot]) == {}                                           # and the marker has been retired
+
+
+def test_she_ties_two_libraries_together_through_her_tool(tmp_path):
+    if not HAVE_HERMES: return
+    src = folder(tmp_path)
+    other = tmp_path / "versa-src"
+    other.mkdir()
+    (other / "loader.md").write_text(LOADER, encoding="utf-8")
+    p = make(tmp_path)
+    root = lib.root_of(p._engine)
+    for name, where in (("x86", src), ("versa", other)):
+        lib.create(root, name, str(where))
+        lib.build(root, name, p._engine.embedder, p._cfg)
+    assert "'other-library: FILE > SECTION'" in p.system_prompt_block()
+    p.prefetch("Use the x86 library and the versa library for this.", session_id="s1")
+    assert lib_tool(p, action="open", names=["x86", "versa"])["opened"] is True
+    assert "Say which library" in lib_tool(p, action="note", text="A note with two libraries open and neither of them named.")["error"]
+    saved = lib_tool(p, action="note", name="x86", type="connection",
+                     text="The CHS read described here is the call the Versa loader makes for the kernel image.",
+                     passages=["boot.md > Reading sectors", "versa: loader.md > Reading the kernel"])
+    assert saved["saved"] and saved["about"] == ["boot.md > Reading sectors"] and "warning" not in saved
+    assert saved["points_to_in_other_libraries"] == ["versa: loader.md > Loader > Reading the kernel"]
+    # the x86 passage comes up: the note, and the loader passage it brings in
+    context = p.prefetch("INT 13h with AH=02h reads sectors using cylinder, head and sector numbers", session_id="s1")
+    assert f"(note {saved['note_id']}, how it bears on the project" in context
+    assert "It ties this to, in another library: versa: loader.md > Loader > Reading the kernel" in context
+    assert f"(brought in by your note {saved['note_id']}, which ties it to x86: boot.md > Reading sectors)" in context
+    assert "sixteen sectors at a time" in context
+    # the loader passage comes up: the note from the x86 notebook comes with it
+    context = p.prefetch("The loader reads the kernel image sixteen sectors at a time converting each LBA", session_id="s1")
+    assert f"- (from your notebook in x86) (note {saved['note_id']}" in context
+    # a conversation with only versa open is told there is a note, and nothing of what it says
+    p.prefetch("Open the versa library please.", session_id="s2")
+    assert json.loads(p.handle_tool_call("holonomic_library", {"action": "open", "names": ["versa"]}, session_id="s2"))["opened"] is True
+    context = p.prefetch("The loader reads the kernel image sixteen sectors at a time converting each LBA", session_id="s2")
+    assert "A note of yours in the notebook of 'x86' refers to this passage; x86 is not open in this conversation." in context
+    assert "the call the Versa loader makes" not in context
+    found = json.loads(p.handle_tool_call("holonomic_library", {"action": "search", "query": "The loader reads the kernel image sixteen sectors at a time"},
+                                          session_id="s2"))
+    hit = next(r for r in found["results"] if r["source"].endswith("Reading the kernel"))
+    assert hit["also_noted"] == ["A note of yours in the notebook of 'x86' refers to this passage; x86 was not searched."]
+    p.shutdown()

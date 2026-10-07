@@ -95,6 +95,10 @@ def _library_cmd(engine, cfg, args) -> None:
             print(f"  Her notebook: {nb['notes']} note(s). {nb['rebound']} binding(s) moved to the same passage read again, "
                   f"{nb['changed']} to a passage whose text changed, {nb['gone']} left without a passage that is gone."
                   + (f"  See: hermes holonomic library notes {r['name']}" if nb["changed"] or nb["gone"] else ""))
+        far = nb.get("pointed_at") or {}
+        if far.get("markers"):
+            print(f"  Notes in other libraries point at {far['markers']} passage(s) here: {far['rebound']} moved to the same passage "
+                  f"read again, {far['changed']} now point at changed text, {far['gone']} at a passage that is gone.")
 
     def building(name: str, fresh: bool = False) -> None:
         started, last = time.time(), [0.0]
@@ -220,6 +224,7 @@ def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
     name, data = lib._need(root, items[0])
     store = lib.store(root, name, engine.embedder, cfg)
     files = data.get("files") or {}
+    shelf = lib.Shelf(root, engine.embedder, cfg)
     sub, rest = (items[1] if len(items) > 1 else "list"), items[2:]
 
     def show(n: dict, full: bool = False) -> None:
@@ -228,6 +233,8 @@ def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
         print(f"    {n['text'] if full else _clip(n['text'], args.width)}")
         for a in n["about"]:
             print(f"    about: {nb._source(a) or '(a passage)'}" + {"changed": "   [the passage has changed since]", "gone": "   [no longer in the library]"}.get(a.get("state") or "", ""))
+        for ptr in nb.pointers(n, shelf):
+            print(f"    points to, in another library: {ptr['library']}: {ptr['source']}" + nb._STALE.get(ptr["state"], ""))
         for mid in n["memories"]:
             got = engine.get(int(mid))
             print(f"    from her memory #{mid}: {_clip(got['text'], 120) if got else '(forgotten)'}")
@@ -243,7 +250,7 @@ def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
             print("She writes them while the library is open in a conversation. You can add one: hermes holonomic library notes "
                   f"{name} add \"TEXT\" --on \"FILE > SECTION\"")
     elif sub == "check":
-        c = nb.check(store)
+        c = nb.check(store, shelf)
         print(f"{c['notes']} note(s), bound to {c['bindings']} passage(s) in all.")
         if c["bindings"]:
             print(f"  read off the plates: the note from its passage {c['passage_to_note']} of {c['bindings']}; "
@@ -252,12 +259,15 @@ def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
             print(f"  {c['unbound']} note(s) are about no passage now in the library: they come back only by what they say")
         if c["stale"]:
             print(f"  {c['stale']} binding(s) are to a passage that has changed or gone since the note was written")
+        if c.get("pointers"):
+            print(f"  {c['pointers']} pointer(s) into other libraries: {c['pointers'] - c['pointers_stale']} find their passage as it was, "
+                  f"{c['pointers_stale']} are stale; {c['pointers_found_from_far_side']} are found from the other library's side, off its plates")
     elif sub == "add":
         if not rest:
             print(usage)
             return
         show(nb.add(store, files, cfg, text=" ".join(rest), kind=args.type or "lesson", about=args.on or [], provenance="user",
-                    by_command=True), True)
+                    by_command=True, shelf=shelf, owner=name), True)
         print("Saved, as yours.")
     elif sub in ("show", "correct", "confirm", "retire", "restore") and rest and rest[0].lstrip("#").isdigit():
         note_id = int(rest[0].lstrip("#"))
@@ -269,15 +279,15 @@ def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
                 print(usage)
                 return
             show(nb.revise(store, files, cfg, note_id, text=" ".join(rest[1:]), kind=args.type, about=args.on or None,
-                           provenance="user", by_command=True), True)
+                           provenance="user", by_command=True, shelf=shelf, owner=name), True)
             print(f"Note {note_id} is retired and this takes its place, as yours.")
         elif sub == "confirm":
             show(nb.confirm(store, note_id, provenance="user", by_command=True), True)
             print("Marked as confirmed by you.")
         elif sub == "retire":
-            show(nb.retire(store, note_id, args.reason or "retired by the user"), True)
+            show(nb.retire(store, note_id, args.reason or "retired by the user", shelf=shelf), True)
         else:
-            show(nb.restore(store, note_id), True)
+            show(nb.restore(store, note_id, shelf=shelf), True)
     else:
         print(usage)
 
@@ -1687,7 +1697,8 @@ def register_cli(subparser) -> None:
     lb.add_argument("--left-out", action="store_true", help="With 'show': the files that were left out, and why")
     lb.add_argument("--type", choices=["connection", "lesson", "question", "guidance"], help="With 'notes add' or 'correct': what kind of note")
     lb.add_argument("--on", action="append", metavar="SOURCE", help="With 'notes add' or 'correct': a passage the note is about, as "
-                    "FILE > SECTION or a passage number; may be given more than once")
+                    "FILE > SECTION or a passage number, or OTHER-LIBRARY: FILE > SECTION to point into another library; may "
+                    "be given more than once")
     lb.add_argument("--reason", help="With 'notes retire': why")
     lb.add_argument("--all", action="store_true", help="With 'notes': include retired notes")
     lb.add_argument("-n", type=int, default=6, help="With 'search': how many results")

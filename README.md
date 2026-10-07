@@ -264,6 +264,17 @@ written to.
 - A note may also name memories of hers that it came out of. Those are kept as numbers, not on the plates: the
   library and her memory are separate stores, and a note never reaches a conversation in which its library is
   not open.
+- A note belongs to one library's notebook and can also point to passages in other libraries, written among
+  its passages as `other-library: FILE > SECTION`. Plates cannot tie two stores together, so a pointer is kept
+  in two halves: the note records the library and a marker, and the library pointed into keeps the marker in
+  its own notebook, bound on its own plates to the passage. That makes the connection findable from either
+  side, and keeps it true: the marker is bound again when its library is read again, so a pointer either finds
+  its passage or says it is stale (changed, gone, or the library replaced by another of the same name).
+- What a pointer leads to is given only from a library that is open in the conversation. Of a closed library a
+  pointer gives the passage's name; of a note in a closed library, only that there is one.
+- When a passage is given and a note ties it to a passage in another open library, that passage is brought in
+  with it, in place of the weakest piece and never in addition (`library_follow_notes`, default one per
+  message; 0 turns it off).
 - Every note says where it came from, and recall says it in those words: her own inference, not checked;
   tested (the note must record what was run and what happened); or yours (the note must carry your words, and
   they are looked for in what you actually wrote in that conversation). She cannot mark a guess as a result.

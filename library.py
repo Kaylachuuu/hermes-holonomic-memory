@@ -45,6 +45,9 @@ LIBRARY_DEFAULTS: Dict[str, Any] = {
     "library_notes_k": 3,                 # notes given because they answer the message itself
     "library_notes_min_score": 0.35,
     "library_notes_context_chars": 1400,  # budget for notes in a message, beside the reference material
+    # A note that ties a passage that came up to a passage in another open library may bring that passage in with
+    # it, in place of the weakest of the pieces given: never more pieces, and this many such passages at most.
+    "library_follow_notes": 1,
 }
 
 PIECE = "reference"
@@ -131,6 +134,31 @@ def store(root: Path, name: str, embedder, cfg: Dict[str, Any]):
             got = _STORES[key] = HolonomicMemory(Path(root) / name, embedder, dim=int(cfg.get("dim", 4096)),
                                                  plate_capacity=float(cfg.get("plate_capacity", 128.0)))
         return got
+
+
+def uid_of(data: dict) -> str:
+    """What tells this library from another made later under the same name.  From when it was made, so nothing
+    has to be written to a library that existed before pointers did."""
+    return str(data.get("uid") or hashlib.sha1(f"{data.get('name')}|{data.get('created')}".encode("utf-8")).hexdigest()[:12])
+
+
+class Shelf:
+    """The libraries there are, for a note in one that points into another."""
+
+    def __init__(self, root: Path, embedder, cfg: Dict[str, Any]):
+        self.root, self.embedder, self.cfg = Path(root), embedder, cfg
+
+    def names(self) -> List[str]:
+        return names(self.root)
+
+    def get(self, name: str):
+        """(the library's store, what is known of it), or None if there is no such library."""
+        data = info(self.root, name) if name and _NAME_RE.match(name) else None
+        return (store(self.root, name, self.embedder, self.cfg), data) if data is not None else None
+
+    def uid(self, name: str) -> str:
+        data = info(self.root, name) if name and _NAME_RE.match(name) else None
+        return uid_of(data) if data is not None else ""
 
 
 def close_all(root: Optional[Path] = None) -> None:
@@ -594,7 +622,7 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
     if not report["stopped"]:
         try:                                          # her notes are bound again to the passages that now stand there
             from . import notebook as _notebook
-            if _notebook.has_notes(lib):
+            if _notebook.has_notes(lib) or _notebook.has_markers(lib):
                 report["notes"] = _notebook.rebind(lib, files)
         except Exception as exc:
             report["notes"] = {"error": str(exc)[:300]}
@@ -838,19 +866,72 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
         kept.append(dict(f, _words=words, also_in=[], _ids=[(f["library"], f["id"])]))
     kept = kept[:k]
     from . import notebook as _notebook
+    shelf = Shelf(root, embedder, cfg)
     for f in kept:
         f.pop("_words")
-        f["notes"] = []
+        f["notes"], f["noted_in"] = [], []
+        if not notes:
+            f.pop("_ids")
+            continue
+        have = set()
         for name, pid in f.pop("_ids"):               # a note written on any copy of the passage comes with it
             try:
                 lib = store(root, name, embedder, cfg)
-                if notes and _notebook.has_notes(lib):
+                if _notebook.has_notes(lib):
                     for n in _notebook.for_passages(lib, [pid], cfg).get(pid, []):
-                        if n["id"] not in {x["id"] for x in f["notes"]}:
+                        if (name, n["id"]) not in have:
+                            have.add((name, n["id"]))
                             f["notes"].append(dict(n, library=name))
+                # Notes in other libraries that point at this passage: this library's plates bring the marker,
+                # the marker names the note.  The note is given only if its own library is among those being
+                # read; otherwise only that there is one.
+                if _notebook.has_markers(lib):
+                    for inc in _notebook.incoming(lib, [pid]).get(pid, []):
+                        got = shelf.get(inc["owner"])
+                        note = _notebook.get_note(got[0], inc["note"]) if got and shelf.uid(inc["owner"]) == inc["owner_uid"] else None
+                        if note is None or note["retired"]:
+                            lib.supersede(inc["stub"], None, "the note that pointed here is gone")       # nothing leads nowhere
+                        elif inc["owner"] not in which:
+                            if inc["owner"] not in f["noted_in"]:
+                                f["noted_in"].append(inc["owner"])
+                        elif (inc["owner"], note["id"]) not in have:
+                            have.add((inc["owner"], note["id"]))
+                            f["notes"].append(dict(note, library=inc["owner"]))
             except Exception:
                 pass
-    return kept
+    # A note that ties a passage given here to a passage in another of these libraries nominates that passage.
+    # The best pieces of a question about two subjects can all come from one of them: four strong matches in
+    # the x86 manual, and the constraint in the project's own source left out.  The connection she wrote down
+    # brings its other half, in place of the weakest piece and never in addition.
+    follow = int(cfg.get("library_follow_notes", 1)) if notes else 0
+    given = {(f["library"], f["id"]) for f in kept}
+    for f in list(kept):
+        if follow <= 0:
+            break
+        for n in f["notes"]:
+            there = [(n["library"], a["id"], _source(a)) for a in n["about"] if a.get("id")]
+            there += [(p["library"], p["id"], p["source"]) for p in _notebook.pointers(n, shelf) if p["id"] and p["state"] != "gone"]
+            pick = next((t for t in there if t[0] in which and t[0] != f["library"] and (t[0], t[1]) not in given), None)
+            got = shelf.get(pick[0]) if pick else None
+            piece = got[0].get(int(pick[1])) if got else None
+            if not piece or piece["kind"] != PIECE:
+                continue
+            meta = piece["meta"] or {}
+            text = piece["text"].split("\n", 1)[1] if "\n" in piece["text"] else piece["text"]
+            new = {"library": pick[0], "file": meta.get("file", ""), "section": meta.get("section", ""), "source": _source(meta),
+                   "text": text, "score": f["score"], "linked": False, "id": int(piece["id"]), "also_in": [], "notes": [], "noted_in": [],
+                   "brought_by": {"library": n["library"], "note": n["id"], "with": f"{f['library']}: {f['source']}"}}
+            kept.insert(kept.index(f) + 1, new)
+            given.add((pick[0], pick[1]))
+            follow -= 1
+            if len(kept) > k:                          # within what would have been given anyway
+                out = next((x for x in reversed(kept) if x is not f and not x.get("brought_by")), None)
+                if out is not None:
+                    kept.remove(out)
+                else:
+                    kept.remove(new)
+            break
+    return kept[:max(k, 1)]
 
 
 def note_matches(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, Any], *, skip: Tuple[int, ...] = (),
@@ -892,7 +973,8 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
                 spare[0] -= len(text)
                 out.append(text)
         return out
-    mine = said([_notebook.line(n, main, sources=True) for n in own])
+    shelf = Shelf(root, embedder, cfg)
+    mine = said([_notebook.line(n, main, sources=True, shelf=shelf, open_in=which) for n in own])
     tail = ("\n\n### Your notes that bear on this message\nThese are notes you wrote in the library's notebook, not reference "
             "material. Each says where it came from: weigh an unchecked inference as a guess.\n" + "\n".join(mine)) if mine else ""
     if mine:
@@ -909,11 +991,19 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
         if len(text) > room:
             text = text[:room].rsplit("\n", 1)[0].rstrip() + "\n[...]"
         also = f" (the same passage is also in: {', '.join(f['also_in'][:4])})" if f.get("also_in") else ""
-        hers = said([_notebook.line(n, main) for n in f.get("notes", [])])
+        hers = said([(f"- (from your notebook in {n['library']}) " if n["library"] != f["library"] else "- ")
+                     + _notebook.line(n, main, shelf=shelf, open_in=which)[2:] for n in f.get("notes", [])])
         if hers:
             notes.append(f"her notes on {f['source']}: " + ", ".join(f"note {n['id']}" for n in f["notes"][:len(hers)]))
+        by = f.get("brought_by")
+        if by:
+            also += f" (brought in by your note {by['note']}, which ties it to {by['with']})"
+            notes.append(f"{f['library']}: {f['source']} was brought in by note {by['note']} of {by['library']}")
+        elsewhere = "".join(f"A note of yours in the notebook of '{o}' refers to this passage; {o} is not open in this conversation.\n"
+                            for o in f.get("noted_in", []))
         lines.append(f"[{f['library']}: {f['source']}] (passage {f['id']}){also}\n{text}\n"
-                     + ("Your notes on this passage (yours, not the reference material):\n" + "\n".join(hers) + "\n" if hers else ""))
+                     + ("Your notes on this passage (yours, not the reference material):\n" + "\n".join(hers) + "\n" if hers else "")
+                     + elsewhere)
     notes.append("pieces given: " + "; ".join(f"{f['library']}: {f['source']} ({f['score']})" for f in found[:len(lines)]))
     return (head + "This is reference material, not something you remember. Rely on it for exact details over your "
             "own recollection, and say which file a detail came from if asked.\n\n" + "\n".join(lines).rstrip() + tail), notes
@@ -951,6 +1041,8 @@ def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:
             "what failed and the correction, what you are still unsure of, and which passages to read together for a kind "
             "of problem. Say which passages a note is about, so it comes back with them. After you solve something with a "
             "library, a short note on which clues led you to the right passage and how you checked the answer makes the "
-            "next lookup quicker. A note is your inference unless you tested it (say what you ran and what happened) or "
+            "next lookup quicker. A note belongs to one library but can also point to a passage in another: among its "
+            "passages write that one as 'other-library: FILE > SECTION', the way a search result prints it. That is how "
+            "to record that something in a manual is what the project's own code relies on. A note is your inference unless you tested it (say what you ran and what happened) or "
             "the user told you (quote their words): never call a guess a result. When a note turns out wrong or "
             "incomplete, revise it or retire it; do not write a second one beside it.")
