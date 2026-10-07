@@ -619,3 +619,36 @@ def test_a_dream_can_reach_back_through_the_plates(tmp_path):
     assert all(f["age"] == "OLDER" for f in linked if f.get("via") == "plates")
     assert m.linked(a, older_than=now - DAY, k=3)[0]["id"] == b and m.linked(a, older_than=long_ago - 1, k=3) == []
     assert [x["id"] for x in m.linked(a, k=3, skip_kinds=("said_user",))] == []
+
+
+def test_an_old_memory_is_dreamt_of_once_a_night(tmp_path):
+    """Recent memories one dream used were kept from the next; the older ones it reached were not, so a well-tied
+    old memory turned up in dream after dream of the same sleep."""
+    from holonomic.sleep import gather_fragments
+    m = store(tmp_path)
+    now = time.time()
+    long_ago = now - 40 * DAY
+    old = [m.remember(t, kind="said_user", session="garden", created_at=long_ago + i * 60)[0] for i, t in enumerate((
+        "We planted tomatoes along the south fence in spring",
+        "The neighbour's dog dug up half of the tomatoes the very next week",
+        "We replanted the tomatoes and put wire around the bed",
+        "The tomatoes by the fence needed watering every single evening",
+        "A late frost nearly killed the tomato seedlings by the fence",
+        "We staked the tomato plants along the fence with bamboo canes",
+        "The first green tomatoes appeared on the fence plants in June",
+        "Blight got into the tomatoes at the far end of the fence",
+        "We fed the tomato bed by the fence with seaweed every fortnight",
+        "The tomatoes along the fence ripened all at once in August"))]
+    for i, t in enumerate(("The tomatoes along the fence are finally ripe this week",
+                           "I think I will make tomato sauce at the weekend",
+                           "The tomato plants by the fence have grown taller than me",
+                           "I picked a whole basket of tomatoes from the fence bed")):
+        m.remember(t, kind="said_user", session=f"today{i}", created_at=now - 3600 + i * 60)
+    cfg = {"dream_seeds": 2, "dream_links": 1}
+    first = gather_fragments(m, cfg, random.Random(1), now)
+    older = {f["id"] for f in first if f["age"] == "OLDER"}
+    assert older and older < set(old)
+    second = gather_fragments(m, cfg, random.Random(1), now, {f["id"] for f in first})
+    again = {f["id"] for f in second}
+    assert not again & {f["id"] for f in first}                      # nothing from the first dream, old or new
+    assert again & (set(old) - older)                                # and the past is still reached: other old memories step in

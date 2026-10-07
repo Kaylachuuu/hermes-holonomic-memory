@@ -344,7 +344,8 @@ def dreams_tonight(engine, cfg: Dict[str, Any], now: Optional[float] = None) -> 
 def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optional[float] = None,
                      exclude: Optional[set] = None) -> List[dict]:
     """Recent memories to dream from, each with older memories it echoes.  Seeds are drawn across
-    conversations, so different days run together; `exclude` keeps a second dream off the first one's ground."""
+    conversations, so different days run together; `exclude` keeps a second dream off the first one's ground,
+    the older memories it reached included, so one well-tied old memory does not turn up in every dream of a night."""
     sc = sleep_config(cfg)
     now = time.time() if now is None else now
     since = now - float(sc["dream_days"]) * 86400
@@ -369,7 +370,8 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         seed = pool.pop(pick)[0]
         seeds.append(seed)
         used_sessions.add(seed["session"])
-    fragments, seen = [], set()
+    fragments, seen = [], set(exclude)
+    spare = len(exclude)                                 # ask for that many more, so what is passed over can be replaced
     for seed in seeds:
         if seed["id"] in seen:
             continue
@@ -377,8 +379,8 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"],
                           "kind": seed["kind"]})
         echoed = []
-        for echo in engine.echoes(seed["id"], older_than=since, k=2, skip_kinds=skip):
-            if echo["id"] not in seen:
+        for echo in engine.echoes(seed["id"], older_than=since, k=2 + spare, skip_kinds=skip):
+            if echo["id"] not in seen and len(echoed) < 2:
                 seen.add(echo["id"])
                 echoed.append(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
@@ -387,7 +389,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         for origin in [seed["id"]] + echoed:             # what the plates tie to the memory itself, then to its echoes
             if room <= 0:
                 break
-            for tied in engine.linked(origin, older_than=since, k=room, skip_kinds=skip):
+            for tied in engine.linked(origin, older_than=since, k=room + spare, skip_kinds=skip):
                 if tied["id"] not in seen and len(tied["text"]) >= 25 and room > 0:
                     seen.add(tied["id"])
                     room -= 1
@@ -398,11 +400,12 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         seen.add(seed["id"])
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"], "kind": IMAGE,
                           "image_id": _image_of(engine, seed["id"])})
-        for echo in engine.echoes(seed["id"], older_than=since, k=1, kinds=(IMAGE,)):
+        for echo in engine.echoes(seed["id"], older_than=since, k=1 + spare, kinds=(IMAGE,)):
             if echo["id"] not in seen:
                 seen.add(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
                                   "kind": IMAGE, "echo_of": seed["id"], "image_id": _image_of(engine, echo["id"])})
+                break
     return fragments
 
 
@@ -427,7 +430,7 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
         if one is None:
             break
         report["dreams"].append(one)
-        used |= {f["id"] for f in one["fragments"] if f["age"] == "RECENT"}
+        used |= {f["id"] for f in one["fragments"]}
     report["dream"] = report["dreams"][0] if report["dreams"] else {"skipped": "not enough recent memories to dream from"}
 
 
