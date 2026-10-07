@@ -2411,3 +2411,45 @@ def test_a_picture_of_the_whole_dream(tmp_path):
         assert [p.get("whole") for p in report["dreams"][0]["pictures"]] == [None]
     finally:
         images.pick_best = keep
+
+
+def test_the_whole_picture_for_dreams_she_already_had(tmp_path):
+    """A dream from before the picture of the whole dream existed can be given one, and nothing else about it changes."""
+    import random
+    from holonomic import images
+    from holonomic.sleep import WHOLE_CAPTION, draw_whole, dreams, sleep_once
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=1, dream_image_style="")
+    painted = []
+
+    drawn = []
+
+    def paint(prompt, start, size=None):
+        painted.append(prompt)
+        drawn.append(1)                                                          # every picture different, as real ones are
+        return picture(768, 512, colour=(len(drawn) * 30, 10, 10))
+    first = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=paint)["dreams"][0]
+    second = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(2), now=now + 9, paint=paint)["dreams"][0]
+    assert len(first["pictures"]) == 1 and len(painted) == 2                     # whole is off in CFG: the moment only
+    text, folder = m.get(first["id"])["text"], images.dream_folder(m, first["id"])
+    painted.clear()
+    told = []
+    report = draw_whole(m, cfg, [first["id"], 99999, ids["cat"]], paint=paint, tell=told.append)
+    assert not report["errors"] and report["missing"] == [99999, ids["cat"]] and report["had"] == []
+    assert painted == [text] and len(report["drawn"]) == 1 and told == report["drawn"]       # the dream itself, and no model was asked
+    got = report["drawn"][0]
+    assert got["dream"] == first["id"] and got["whole"] and got["scene"] == WHOLE_CAPTION and folder.split("/")[-1] in got["file"].replace("\\", "/")
+    kept = dreams(m, 2)
+    mine = next(d for d in kept if d["id"] == first["id"])
+    assert [p.get("whole") for p in mine["pictures"]] == [True, None] and mine["text"] == text
+    assert [p.get("whole") for p in next(d for d in kept if d["id"] == second["id"])["pictures"]] == [None]
+    # asked again it is passed over, unless told to draw another
+    assert draw_whole(m, cfg, [first["id"], second["id"]], paint=paint)["had"] == [first["id"]] and len(painted) == 2
+    assert len(draw_whole(m, cfg, [first["id"]], paint=paint, again=True)["drawn"]) == 1 and len(painted) == 3
+    # the image server is off: said once, and the rest are not tried
+
+    def broken(prompt, start, size=None):
+        raise RuntimeError("Could not reach the image server")
+    report = draw_whole(m, cfg, [first["id"], second["id"]], paint=broken, again=True)
+    assert report["drawn"] == [] and len(report["errors"]) == 1 and "Could not reach the image server" in report["errors"][0]
+    assert "switched off" in draw_whole(m, dict(cfg, dream_images="words"), [first["id"]], paint=paint)["errors"][0]

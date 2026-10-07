@@ -8,6 +8,7 @@
     hermes holonomic reflect status | on [--model NAME] [--host URL] | off | now [--dry-run] [--depth N] [--think]
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
+    hermes holonomic dreams whole [--id ID ...] [-n 5] [--again]     draw the picture of the whole dream for dreams she already had
     hermes holonomic dreams images [off|words|pictures|from_images] [--api comfyui|a1111|openai] [--host URL] [--model NAME]
                                    [--size 768x512] [--count 3] [--whole text|scene|off] [--people yes|no] [--strength 0.75] [--style "..."]
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
@@ -515,6 +516,26 @@ def holonomic_command(args) -> None:
                 print(f"  {done['missing']} file(s) on record were not found on disk.")
         elif action == "dreams" and args.dreams_action == "images":
             _dream_images(cfg, args)
+        elif action == "dreams" and args.dreams_action == "whole":
+            from .sleep import DREAM, DREAM_REALM, draw_whole
+            ids = list(args.id) if args.id else [d["id"] for d in reversed(engine.recent(args.n, realm=DREAM_REALM, kind=DREAM))]
+            if not ids:
+                print("No dreams yet.")
+                return
+            print(f"Drawing the picture of the whole dream for {len(ids)} dream(s)"
+                  + ("" if args.again else " (any that already have one are passed over; --again draws another)")
+                  + ". Each is drawn like any dream picture, so this takes a few minutes a dream.", flush=True)
+            t0 = time.time()
+            report = draw_whole(engine, cfg, ids, again=args.again,
+                                tell=lambda p: print(f"  [#{p['dream']}] {p['file']}"
+                                                     + (f"   (attempt {p['chosen']} of {p['of']})" if p.get("chosen") else ""), flush=True))
+            if report["had"]:
+                print(f"  already had one: {', '.join('#' + str(i) for i in report['had'])}")
+            if report["missing"]:
+                print(f"  not a dream: {', '.join('#' + str(i) for i in report['missing'])}")
+            for error in report["errors"]:
+                print(f"  ! {error}")
+            print(f"{len(report['drawn'])} picture(s) drawn in {(time.time() - t0) / 60:.1f} minutes. See them with: hermes holonomic dreams")
         elif action == "dreams":
             from .sleep import dreams
             found = dreams(engine, args.n)
@@ -1597,7 +1618,9 @@ def register_cli(subparser) -> None:
     dt.add_argument("--apply", action="store_true", help="Label what is found (without this, it is only listed)")
     dt.add_argument("--width", type=int, default=110, help="Characters of text to show")
     drm = subs.add_parser("dreams", help="Show recent dreams, or set what images do in dreams")
-    drm.add_argument("dreams_action", nargs="?", choices=["show", "images", "sort"], default="show")
+    drm.add_argument("dreams_action", nargs="?", choices=["show", "images", "sort", "whole"], default="show")
+    drm.add_argument("--id", type=int, nargs="+", metavar="ID", help="With 'whole': which dreams (default: the most recent, see -n)")
+    drm.add_argument("--again", action="store_true", help="With 'whole': draw another even if the dream has one; the earlier one is kept")
     drm.add_argument("mode", nargs="?", help="With 'images': off, words, pictures or from_images")
     drm.add_argument("-n", type=int, default=5, help="How many (default 5)")
     drm.add_argument("--api", choices=["comfyui", "a1111", "openai"], help="With 'images': which interface the image generator speaks")

@@ -582,7 +582,7 @@ _SCENES_SCHEMA = {"type": "object", "properties": {"scenes": {"type": "array", "
 
 
 def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], one: dict, *, dry_run: bool,
-                    paint: Optional[Callable[..., bytes]], label: str) -> List[dict]:
+                    paint: Optional[Callable[..., bytes]], label: str, only_whole: bool = False) -> List[dict]:
     """Pictures of a dream.  The dream's author says which moments and what they look like; an image generator
     draws them.  In 'from_images' mode a moment that resembles images she has seen is drawn starting from those.
     A failure here never loses the dream: it is reported and the dream stands without pictures."""
@@ -599,7 +599,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
         report["errors"].append(f"dream pictures: {exc}")
         return []
     usable: Dict[int, str] = {}
-    if mode == "from_images":
+    if mode == "from_images" and not only_whole:
         for f in one["fragments"]:
             image_id = f.get("image_id")
             if image_id and _images.may_dream_from(engine, image_id, _faces.people_allowed_in_dream(
@@ -608,15 +608,17 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
                 if img and img["description"]:
                     usable[int(image_id)] = img["description"] if sc["dream_image_keep_signature"] else _images.without_signature(img["description"])
                     usable[int(image_id)] += _faces.dream_names(engine, cfg, image_id)
-    n = int(sc["dream_image_count"])
+    n = 0 if only_whole else int(sc["dream_image_count"])        # only_whole: a dream from before, given its one picture
     prompt = (_SCENES.format(n=n, refs=_SCENE_REFS if usable else "") + f"\n\nDREAM:\n{one['text']}"
               + ("\n\nIMAGES:\n" + "\n".join(f"[{i}] {' '.join(d.split())[:300]}" for i, d in usable.items()) if usable else ""))
-    try:
-        data = _parse(call("scenes" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt,
-                           _SCENES_SCHEMA, 700, 0.6))
-    except ReflectionError as exc:
-        report["errors"].append(f"dream pictures{label}: {exc}")
-        return []
+    data: Dict[str, Any] = {}
+    if not only_whole:
+        try:
+            data = _parse(call("scenes" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES, prompt,
+                               _SCENES_SCHEMA, 700, 0.6))
+        except ReflectionError as exc:
+            report["errors"].append(f"dream pictures{label}: {exc}")
+            return []
     scenes = []
     for item in (data.get("scenes") if isinstance(data.get("scenes"), list) else [])[:n]:
         picture = " ".join(str((item or {}).get("picture") or "").split())[:500] if isinstance(item, dict) else ""
@@ -624,6 +626,8 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             refs = [int(i) for i in (item.get("images") or []) if isinstance(i, int) and i in usable][:2]
             scenes.append({"scene": picture, "from": list(dict.fromkeys(refs))})
     whole = str(sc["dream_image_whole"] or "off").strip().lower()
+    if only_whole and whole != "scene":              # asked for outright, so drawn even where it is off for new dreams
+        whole = "text"
     if whole == "scene":
         try:
             seen = _parse(call("whole scene" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES,
@@ -848,6 +852,39 @@ def dreams(engine, n: int = 5) -> List[dict]:
         out.append(dict(d, thoughts=(full.get("meta") or {}).get("thoughts", ""), connections=insights,
                         pictures=_pictures_of(engine, d["id"])))
     return out
+
+
+def draw_whole(engine, cfg: Dict[str, Any], dream_ids: List[int], *, llm: Optional[Callable[..., str]] = None,
+               paint: Optional[Callable[..., bytes]] = None, again: bool = False,
+               tell: Optional[Callable[[dict], None]] = None) -> Dict[str, Any]:
+    """The picture of the whole dream, for dreams she has already had.  Nothing about a dream changes: it gains a
+    picture, kept in the folder of the sleep it came from.  A dream that has one is passed over unless `again`."""
+    report: Dict[str, Any] = {"calls": [], "errors": [], "drawn": [], "had": [], "missing": []}
+    sc = sleep_config(cfg)
+    if sc["dream_images"] not in ("pictures", "from_images"):
+        report["errors"].append("pictures of dreams are switched off. Turn them on with: hermes holonomic dreams images pictures")
+        return report
+    call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True) if sc["dream_image_whole"] == "scene" else None
+    for dream_id in dream_ids:
+        d = engine.get(int(dream_id))
+        if not d or d.get("kind") != DREAM:
+            report["missing"].append(int(dream_id))
+            continue
+        if not again and any(p.get("whole") for p in _pictures_of(engine, int(dream_id))):
+            report["had"].append(int(dream_id))
+            continue
+        before = len(report["errors"])
+        made = _dream_pictures(engine, cfg, call, report, {"id": int(dream_id), "text": d["text"], "fragments": []},
+                               dry_run=False, paint=paint, label=f" #{int(dream_id)}", only_whole=True)
+        for p in made:
+            report["drawn"].append(dict(p, dream=int(dream_id)))
+            if tell:
+                tell(report["drawn"][-1])
+        if not made and len(report["errors"]) == before:
+            report["errors"].append(f"dream #{int(dream_id)}: nothing was drawn")
+        if len(report["errors"]) > before and not made:      # the image server is probably off: do not go on to the rest
+            break
+    return report
 
 
 # ---------------------------------------------------------------------- cycle
