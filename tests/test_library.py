@@ -524,3 +524,250 @@ def test_source_is_cut_at_its_routines_and_named_for_them(tmp_path):
         assert lib.store(root, "versa", HashEmbedder(), CFG).stats()["memories"] == before
     finally:
         lib.close_all(root)
+
+
+# ----------------------------------------------------------------- her notebook
+
+def notebook_of(tmp_path):
+    from holonomic import notebook as nb
+    root, _ = built(tmp_path)
+    store = lib.store(root, "x86", HashEmbedder(), CFG)
+    return nb, root, store, lib.info(root, "x86")["files"]
+
+
+def test_a_note_is_bound_to_its_passages_and_comes_back_with_them(tmp_path):
+    """A library is a shelf; the notebook is what she has learned by using it.  A note is bound on plates of its own
+    to the passages it is about, so each brings the other up though they are nothing alike."""
+    nb, root, store, files = notebook_of(tmp_path)
+    reading = next(i for i in files["boot.md"]["ids"] if store.get(i)["meta"]["section"] == "Reading sectors")
+    before = {i: store.get(i)["text"] for f in files.values() for i in f["ids"]}
+    note = nb.add(store, files, CFG, text="This example failed on our target because the drive number was not passed in DL; set it first.",
+                  kind="lesson", about=["boot.md > Reading sectors"])
+    guide = nb.add(store, files, CFG, text="For disk geometry problems read the BIOS parameter block and the FAT12 notes together.",
+                   kind="guidance", about=["BOOT.MD > bios parameter block", "fat12.txt"])
+    assert [a["id"] for a in note["about"]] == [reading] and note["provenance"] == "inference" and note["version"] == 1
+    assert [a["file"] for a in guide["about"]] == ["boot.md", "fs/fat12.txt"]
+    # the reference material is untouched, and is still all a search of the library gives
+    assert {i: store.get(i)["text"] for f in files.values() for i in f["ids"]} == before
+    assert lib.summary(root, "x86")["pieces"] == len(before)
+    assert all(h.kind == lib.PIECE for h in store.recall("drive number DL", k=10, min_score=0.0))
+    # the plates carry it both ways
+    c = nb.check(store)
+    assert c == {"notes": 2, "bindings": 3, "passage_to_note": 3, "note_to_passage": 3, "unbound": 0, "stale": 0}
+    assert [n["id"] for n in nb.for_passages(store, [reading], CFG)[reading]] == [note["id"]]
+    assert nb.for_passages(store, [files["loader.asm"]["ids"][0]], CFG) == {}
+    # a passage that comes up brings its note, whatever the note's own words
+    found = lib.search(root, ["x86"], "INT 13h AH=02h reads sectors cylinder head", HashEmbedder(), CFG, floor=0.0)
+    hit = next(f for f in found if f["id"] == reading)
+    assert [n["id"] for n in hit["notes"]] == [note["id"]] and all(not f["notes"] for f in found if f["id"] not in (reading, *[a["id"] for a in guide["about"]]))
+    # and a note that answers the message itself comes up with where it points
+    own = lib.note_matches(root, ["x86"], "disk geometry problems", HashEmbedder(), CFG, floor=0.0, k=1)
+    assert [n["id"] for n in own] == [guide["id"]]
+    line = nb.line(own[0], sources=True)
+    assert "where to look, your own inference, not checked" in line and "boot.md > Boot sector > BIOS parameter block; fs/fat12.txt" in line
+    # what cannot be found says what there is
+    for bad, why in ((["nothing.asm"], "No file called"), (["boot.md > Nonsense"], "has no section"), (["999"], "no passage numbered")):
+        with pytest.raises(lib.LibraryError, match=why):
+            nb.add(store, files, CFG, text="A note about something that is not in the library at all.", about=bad)
+    with pytest.raises(lib.LibraryError, match="already says this"):
+        nb.add(store, files, CFG, text="This example failed on our target because the drive number was not passed in DL, set it first!", kind="lesson")
+    assert len(nb.list_notes(store)) == 2
+
+
+def test_a_guess_is_never_worded_like_a_result(tmp_path):
+    """Where a note comes from is carried into recall, and decided here: a model asked for provenance calls its own
+    guess confirmed."""
+    nb, root, store, files = notebook_of(tmp_path)
+    said = ["Yes, the loader has to set DL before the call, I checked the Bochs log myself."]
+    text = "The loader must set DL to the boot drive before calling INT 13h."
+    with pytest.raises(lib.LibraryError, match="NOT SAVED as tested"):
+        nb.add(store, files, CFG, text=text, provenance="tested", evidence="it works")
+    with pytest.raises(lib.LibraryError, match="NOT SAVED as the user's"):
+        nb.add(store, files, CFG, text=text, provenance="user", quote="The user confirmed that DL must be set", messages=said)
+    with pytest.raises(lib.LibraryError, match="NOT SAVED as the user's"):
+        nb.add(store, files, CFG, text=text, provenance="user", quote="", messages=said)
+    assert nb.list_notes(store) == []
+    guess = nb.add(store, files, CFG, text=text, about=["loader.asm"])
+    assert nb.where_from(guess) == "your own inference, not checked"
+    tested = nb.confirm(store, guess["id"], provenance="tested", evidence="Assembled with NASM and booted in Bochs: the sector read succeeded.")
+    assert tested["id"] == guess["id"] and nb.where_from(tested) == "you tested this: Assembled with NASM and booted in Bochs: the sector read succeeded."
+    hers = nb.confirm(store, guess["id"], provenance="user", quote="the loader has to set DL before the call", messages=said)
+    assert nb.where_from(hers) == 'the user told you: "the loader has to set DL before the call"' and hers["evidence"] == ""
+    with pytest.raises(lib.LibraryError):
+        nb.confirm(store, guess["id"], provenance="inference")
+    # a better version takes the note's place; changed words are her inference again
+    better = nb.revise(store, files, CFG, guess["id"], text="The loader must set DL to the boot drive, which the BIOS leaves in DL at entry, before INT 13h.")
+    assert better["revises"] == guess["id"] and better["version"] == 2 and better["provenance"] == "inference"
+    assert [a["file"] for a in better["about"]] == ["loader.asm"]                         # it is still about what it was about
+    old = nb.get_note(store, guess["id"])
+    assert old["retired"] and old["replaced_by"] == better["id"] and [n["id"] for n in nb.list_notes(store)] == [better["id"]]
+    assert [n["id"] for n in nb.list_notes(store, retired=True)] == [guess["id"], better["id"]]
+    passage = files["loader.asm"]["ids"][0]
+    assert [n["id"] for n in nb.for_passages(store, [passage], CFG)[passage]] == [better["id"]]      # the retired one does not come back
+    assert nb.matching(store, text, CFG, floor=0.0)[0]["id"] == better["id"]
+    # the same words with more passages keep their standing
+    again = nb.revise(store, files, CFG, better["id"], about=["loader.asm", "boot.md > Reading sectors"], provenance="tested",
+                      evidence="Booted in Bochs with DL preserved from the BIOS; the read returned carry clear.")
+    wider = nb.revise(store, files, CFG, again["id"], kind="connection")
+    assert wider["provenance"] == "tested" and wider["type"] == "connection" and len(wider["about"]) == 2
+    gone = nb.retire(store, wider["id"], "the loader was rewritten")
+    assert gone["retired"] and gone["retired_because"] == "the loader was rewritten" and nb.list_notes(store) == []
+    assert not nb.restore(store, wider["id"])["retired"] and len(nb.list_notes(store)) == 1
+    # the user's ranks above a test, a test above a guess
+    a = nb.add(store, files, CFG, text="A guess about how the print routine walks the string.", about=["loader.asm"])
+    b = nb.add(store, files, CFG, text="The print routine stops at a zero byte, as the user explained.", about=["loader.asm"], provenance="user", by_command=True)
+    order = [n["id"] for n in nb.for_passages(store, [passage], dict(CFG, library_notes_per_passage=3))[passage]]
+    assert order == [b["id"], wider["id"], a["id"]] and nb.where_from(b) == "from the user"
+
+
+def test_notes_follow_their_passages_when_the_folder_is_read_again(tmp_path):
+    nb, root, store, files = notebook_of(tmp_path)
+    src = tmp_path / "material"
+    kept = nb.add(store, files, CFG, text="FAT12 entries are packed, so read two bytes and mask or shift by the cluster's parity.", about=["fat12.txt"])
+    edited = nb.add(store, files, CFG, text="The extended read needs a disk address packet; our loader does not build one yet.",
+                    kind="connection", about=["boot.md > Reading sectors"])
+    lost = nb.add(store, files, CFG, text="Mode 13h is the mode the splash screen should use.", kind="connection", about=["page.html"])
+    old = {n["id"]: [a["id"] for a in n["about"]] for n in (kept, edited, lost)}
+    # adding a file changes nothing for the notes
+    (src / "notes.md").write_text("# A20\n\nThe A20 line must be enabled before using memory above one megabyte.\n", encoding="utf-8")
+    time.sleep(0.01)
+    report = lib.build(root, "x86", HashEmbedder(), CFG)
+    assert report["added"] == 1 and report["notes"] == {"notes": 3, "rebound": 0, "changed": 0, "gone": 0}
+    assert {n["id"]: [a["id"] for a in n["about"]] for n in nb.list_notes(store)} == old
+    # a file edited, a file removed
+    (src / "boot.md").write_text(BOOT.replace("takes a disk address packet in DS:SI", "takes a 16-byte disk address packet in DS:SI"), encoding="utf-8")
+    (src / "page.html").unlink()
+    time.sleep(0.01)
+    report = lib.build(root, "x86", HashEmbedder(), CFG)
+    assert report["changed"] == 1 and report["removed"] == 1 and report["notes"] == {"notes": 3, "rebound": 0, "changed": 1, "gone": 1}
+    files = lib.info(root, "x86")["files"]
+    now = {n["id"]: n for n in nb.list_notes(store)}
+    assert [a["id"] for a in now[kept["id"]]["about"]] == old[kept["id"]] and not now[kept["id"]]["about"][0]["state"]
+    moved = now[edited["id"]]["about"][0]
+    assert moved["state"] == "changed" and moved["id"] != old[edited["id"]][0] and moved["id"] in files["boot.md"]["ids"]
+    assert "16-byte" in store.get(moved["id"])["text"] and "the passage it was written about has since changed" in nb.label(now[edited["id"]])
+    assert [n["id"] for n in nb.for_passages(store, [moved["id"]], CFG)[moved["id"]]] == [edited["id"]]       # bound to the new passage
+    orphan = now[lost["id"]]
+    assert orphan["about"][0]["state"] == "gone" and orphan["about"][0]["id"] is None and "no longer in the library" in nb.label(orphan)
+    assert nb.matching(store, "splash screen mode 13h", CFG, floor=0.0)[0]["id"] == lost["id"]              # kept, and found by what it says
+    assert nb.check(store)["unbound"] == 1 and nb.check(store)["stale"] == 2
+    # everything read again: every passage is new, and every note that can be is bound again without a word
+    report = lib.build(root, "x86", HashEmbedder(), CFG, fresh=True)
+    assert report["notes"] == {"notes": 3, "rebound": 2, "changed": 0, "gone": 0}
+    files = lib.info(root, "x86")["files"]
+    now = {n["id"]: n for n in nb.list_notes(store)}
+    assert now[kept["id"]]["about"][0]["id"] == files["fs/fat12.txt"]["ids"][0] != old[kept["id"]][0]
+    c = nb.check(store)
+    assert c["bindings"] == 2 and c["passage_to_note"] == 2 and c["note_to_passage"] == 2
+    # the page comes back: its note finds it again
+    (src / "page.html").write_text("<html><body><h1>Video modes</h1><p>Mode 13h is 320 by 200 pixels in 256 colours.</p></body></html>", encoding="utf-8")
+    assert lib.build(root, "x86", HashEmbedder(), CFG)["notes"]["rebound"] == 1
+    assert nb.get_note(store, lost["id"])["about"][0]["state"] == ""
+
+
+def test_she_keeps_a_notebook_through_her_tool(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic import notebook as nb
+    src = folder(tmp_path)
+    p = make(tmp_path)
+    root = lib.root_of(p._engine)
+    lib.create(root, "x86", str(src), "Booting an x86 machine")
+    lib.build(root, "x86", p._engine.embedder, p._cfg)
+    block = p.system_prompt_block()
+    assert "Each library has a notebook that is yours" in block and "never call a guess a result" in block
+    # closed: she may read notes, not write them
+    p.prefetch("How does the boot sector end?", session_id="s1")
+    refused = lib_tool(p, action="note", name="x86", text="The boot signature is the last two bytes of the sector.", passages=["boot.md > Boot sector"])
+    assert "NOT SAVED" in refused["error"] and "not open" in refused["error"]
+    assert lib_tool(p, action="notes", name="x86")["count"] == 0
+    p.prefetch("Please open the x86 library for this.", session_id="s1")
+    assert lib_tool(p, action="open", names=["x86"])["opened"] is True
+    found = lib_tool(p, action="search", query="INT 13h AH=02h reads sectors")
+    passage = next(r for r in found["results"] if r["source"] == "boot.md > Reading sectors")
+    mine = p._engine.remember("We are writing a loader that reads the kernel with INT 13h", kind="said_user", session="s1")[0]
+    saved = lib_tool(p, action="note", text="Our loader reads the kernel with the AH=02h call described here, so it needs CHS numbers.",
+                     type="connection", passages=[str(passage["passage"])], memories=[mine, 99999])
+    assert saved["saved"] and saved["about"] == ["boot.md > Reading sectors"] and saved["memories"] == [mine]
+    assert saved["where_it_comes_from"] == "your own inference, not checked"
+    loose = lib_tool(p, action="note", text="Remember to check which BIOS calls the target machine really supports.", type="question")
+    assert loose["saved"] and "not about any passage" in loose["warning"]
+    # she cannot make a guess the user's word, or a result
+    p.prefetch("Right, and CHS is fine for a floppy, we do not need the extended read.", session_id="s1")
+    claim = dict(action="confirm_note", note_id=saved["note_id"], provenance="user")
+    assert "NOT SAVED as the user's" in lib_tool(p, quote="The user agreed that the loader is correct", **claim)["error"]
+    assert "NOT SAVED as tested" in lib_tool(p, action="confirm_note", note_id=saved["note_id"], provenance="tested", evidence="works")["error"]
+    ok = lib_tool(p, quote="CHS is fine for a floppy", **claim)
+    assert ok["where_it_comes_from"] == 'the user told you: "CHS is fine for a floppy"'
+    # the note comes back with its passage, in the message's context and in a lookup, labelled as hers
+    context = p.prefetch("What does INT 13h with AH=02h need to read sectors?", session_id="s1")
+    assert "(passage %d)" % passage["passage"] in context and "Your notes on this passage (yours, not the reference material):" in context
+    assert f"(note {saved['note_id']}, how it bears on the project, the user told you: \"CHS is fine for a floppy\")" in context
+    assert "It came out of what you remember: #%d" % mine in context
+    again = lib_tool(p, action="search", query="INT 13h AH=02h reads sectors")
+    with_note = next(r for r in again["results"] if r["source"] == "boot.md > Reading sectors")
+    assert "Our loader reads the kernel" in with_note["your_notes_on_this_passage"][0]
+    # a note that answers the message itself
+    context = p.prefetch("Which BIOS calls does the target machine really support?", session_id="s1")
+    assert "### Your notes that bear on this message" in context and f"(note {loose['note_id']}, open question, your own inference, not checked)" in context
+    # revised, not doubled
+    dup = lib_tool(p, action="note", text="Our loader reads the kernel with the AH=02h call described here so it needs CHS numbers", type="connection")
+    assert "already says this" in dup["error"] and f"note_id {saved['note_id']}" in dup["error"]
+    new = lib_tool(p, action="revise_note", note_id=saved["note_id"], text="Our loader reads the kernel with AH=02h, so it needs CHS numbers worked out from the LBA.")
+    assert new["replaced_note"] == saved["note_id"] and new["where_it_comes_from"] == "your own inference, not checked"
+    listed = lib_tool(p, action="notes")
+    assert [n["note_id"] for n in listed["notes"]] == [loose["note_id"], new["note_id"]]
+    assert lib_tool(p, action="retire_note", note_id=loose["note_id"], reason="answered")["retired"] is True
+    # none of it is in her own memory, and another conversation sees none of it
+    assert not [h for h in p._engine.recall("CHS numbers worked out from the LBA", k=10, min_score=0.0) if "CHS numbers worked out" in h.text]
+    assert "Your notes" not in (p.prefetch("What does INT 13h with AH=02h need to read sectors?", session_id="s2") or "")
+    assert len(nb.list_notes(lib.store(root, "x86", p._engine.embedder, p._cfg))) == 1
+    p.shutdown()
+
+
+def test_cli_library_notes(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io, types
+    src = folder(tmp_path)
+    p = make(tmp_path)
+    home = tmp_path / "home"
+    p.shutdown()
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        run("library", "create", "x86", str(src))
+        assert "0 note(s) in the notebook of 'x86'." in run("library", "notes", "x86")
+        text = run("library", "notes", "x86", "add", "INT 13h AH=02h wants the drive number in DL.", "--on", "boot.md > Reading sectors")
+        assert "lesson learned; from the user" in text and "about: boot.md > Reading sectors" in text and "Saved, as yours." in text
+        assert "No file called" in run("library", "notes", "x86", "add", "A note about a file that is not there at all.", "--on", "zzz.asm")
+        listing = run("library", "notes", "x86")
+        note_id = int(listing.split("[")[1].split("]")[0])
+        assert "1 note(s)" in listing
+        assert "the note from its passage 1 of 1; the passage from its note 1 of 1" in run("library", "notes", "x86", "check")
+        assert f"her note {note_id} (lesson learned; from the user)" in run("library", "search", "x86", "INT 13h AH=02h reads sectors")
+        fixed = run("library", "notes", "x86", "correct", str(note_id), "INT 13h AH=02h wants the drive in DL and the count in AL.", "--type", "lesson")
+        assert f"Note {note_id} is retired and this takes its place" in fixed and "version 2" in fixed
+        new_id = int(fixed.split("[")[1].split("]")[0])
+        assert "Marked as confirmed by you." in run("library", "notes", "x86", "confirm", str(new_id))
+        assert "RETIRED (superseded)" in run("library", "notes", "x86", "retire", str(new_id), "--reason", "superseded")
+        assert "0 note(s)" in run("library", "notes", "x86") and "2 note(s)" in run("library", "notes", "x86", "--all")
+        assert "RETIRED" not in run("library", "notes", "x86", "restore", str(new_id))
+        (src / "boot.md").write_text(BOOT.replace("reads sectors using", "reads up to 127 sectors using"), encoding="utf-8")
+        time.sleep(0.01)
+        updated = run("library", "update", "x86")
+        assert "Her notebook: 1 note(s). 0 binding(s) moved to the same passage read again, 1 to a passage whose text changed" in updated
+        assert "[the passage has changed since]" in run("library", "notes", "x86", "show", str(new_id))
+        assert "[the passage has changed since]" not in run("library", "notes", "x86", "confirm", str(new_id))      # confirmed as it now stands
+        assert "and the 1 note(s) she has written in its notebook" in run("library", "delete", "x86")
+        assert "Usage:" in run("library", "notes", "x86", "frobnicate")
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)

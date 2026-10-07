@@ -251,6 +251,37 @@ From the command line:
     hermes holonomic library search NAME "words"           what she would be given
     hermes holonomic library delete NAME --yes             remove the library (the folder of material is not touched)
 
+### Her notebook in a library
+
+A library is a shelf; its notebook is what she has learned by using it. While a library is open she can leave
+notes in it: how a passage bears on the project in hand, what worked or failed and the correction, what she is
+still unsure of, and which passages to read together for a kind of problem. The reference material is never
+written to.
+
+- A note lives in the library's own store on plates of its own, and is bound on them to the passages it is
+  about. A passage that comes up brings its notes; a note leads back to its passages. This does not depend on
+  the two resembling each other.
+- A note may also name memories of hers that it came out of. Those are kept as numbers, not on the plates: the
+  library and her memory are separate stores, and a note never reaches a conversation in which its library is
+  not open.
+- Every note says where it came from, and recall says it in those words: her own inference, not checked;
+  tested (the note must record what was run and what happened); or yours (the note must carry your words, and
+  they are looked for in what you actually wrote in that conversation). She cannot mark a guess as a result.
+  "Tested" is still her account of a test: the plugin does not see one run.
+- A better version of a note replaces it (the earlier one is retired and stays on record); a note that says
+  what another already says is refused. Changed words are her inference again.
+- When the folder is read again, each note is bound to the passage that now stands where its passage stood. If
+  the text changed the note says so until it is revised or confirmed; if the passage is gone the note is kept
+  and says that.
+
+    hermes holonomic library notes NAME [--all]            her notes (with retired ones)
+    hermes holonomic library notes NAME show ID
+    hermes holonomic library notes NAME add "TEXT" [--type lesson] [--on "FILE > SECTION" ...]
+    hermes holonomic library notes NAME correct ID "TEXT"  replace a note with your wording
+    hermes holonomic library notes NAME confirm ID         say a note is right
+    hermes holonomic library notes NAME retire ID [--reason WHY] | restore ID
+    hermes holonomic library notes NAME check              do the plates bring each note back from its passages
+
 What is read: text of any kind (Markdown, plain text, source code, HTML with its markup removed), `.docx`,
 and `.pdf` if `pypdf` is installed in Hermes' Python (a scanned PDF is pictures and has no text to read).
 Writing is cut into pieces at its headings and paragraphs; source code at its routines (assembly labels,

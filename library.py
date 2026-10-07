@@ -11,6 +11,9 @@ next morning's talk.
     <data>/libraries/<name>/holonomic.db ...   the library's own store
     <data>/libraries/<name>/library.json       where it came from and which files are in it
     <data>/libraries/open.json                 which libraries each conversation has open
+
+Each library also holds a notebook: her own notes on the material, in the same store on plates of their own, bound
+to the passages they are about (see notebook.py).  The reference material itself is never written to.
 """
 from __future__ import annotations
 
@@ -36,6 +39,12 @@ LIBRARY_DEFAULTS: Dict[str, Any] = {
     "library_max_file_mb": 40,        # a larger file is left out, and said to be
     "library_max_files": 5000,        # a folder with more files than this is refused: it is probably the wrong folder
     "library_remember_days": 30,      # how long "last time you used X" is worth mentioning
+    # her notebook in each library (see notebook.py)
+    "library_note_chars": 700,            # a note is short: longer is cut at a sentence
+    "library_notes_per_passage": 2,       # notes given with a passage that is given
+    "library_notes_k": 3,                 # notes given because they answer the message itself
+    "library_notes_min_score": 0.35,
+    "library_notes_context_chars": 1400,  # budget for notes in a message, beside the reference material
 }
 
 PIECE = "reference"
@@ -583,6 +592,13 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
             progress(report)
     data["left_out"] = report["skipped"][:2000]       # kept, so that it can be looked at after the build has scrolled away
     if not report["stopped"]:
+        try:                                          # her notes are bound again to the passages that now stand there
+            from . import notebook as _notebook
+            if _notebook.has_notes(lib):
+                report["notes"] = _notebook.rebind(lib, files)
+        except Exception as exc:
+            report["notes"] = {"error": str(exc)[:300]}
+    if not report["stopped"]:
         data["built"] = time.time()
     _save_info(root, name, data)
     report["in_library"] = {"files": len(files), "pieces": sum(len(f.get("ids") or []) for f in files.values())}
@@ -780,7 +796,7 @@ def _source(meta: dict) -> str:
 
 
 def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, Any], *, k: Optional[int] = None,
-           floor: Optional[float] = None) -> List[dict]:
+           floor: Optional[float] = None, notes: bool = True) -> List[dict]:
     """The pieces of the given libraries that best answer a query, best first.  A piece linked on the plates to a
     good match (the next part of the same section) comes with it."""
     query = " ".join(str(query or "").split())
@@ -817,15 +833,45 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
                     f[key], twin[key] = twin[key], f[key]
             if f["source"] != twin["source"] and f["source"] not in twin["also_in"]:
                 twin["also_in"].append(f["source"])
+            twin["_ids"].append((f["library"], f["id"]))
             continue
-        kept.append(dict(f, _words=words, also_in=[]))
+        kept.append(dict(f, _words=words, also_in=[], _ids=[(f["library"], f["id"])]))
+    kept = kept[:k]
+    from . import notebook as _notebook
     for f in kept:
         f.pop("_words")
-    return kept[:k]
+        f["notes"] = []
+        for name, pid in f.pop("_ids"):               # a note written on any copy of the passage comes with it
+            try:
+                lib = store(root, name, embedder, cfg)
+                if notes and _notebook.has_notes(lib):
+                    for n in _notebook.for_passages(lib, [pid], cfg).get(pid, []):
+                        if n["id"] not in {x["id"] for x in f["notes"]}:
+                            f["notes"].append(dict(n, library=name))
+            except Exception:
+                pass
+    return kept
 
 
-def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str, Any]) -> Tuple[str, List[str]]:
-    """What the open libraries have on a message, as a block for her context, and notes for checking."""
+def note_matches(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, Any], *, skip: Tuple[int, ...] = (),
+                 k: Optional[int] = None, floor: Optional[float] = None) -> List[dict]:
+    """Her notes in these libraries that answer the message itself, whatever passages came up."""
+    from . import notebook as _notebook
+    out: List[dict] = []
+    for name in which:
+        if info(root, name) is None:
+            continue
+        lib = store(root, name, embedder, cfg)
+        if _notebook.has_notes(lib):
+            out += [dict(n, library=name) for n in _notebook.matching(lib, query, cfg, skip=skip, k=k, floor=floor)]
+    out.sort(key=lambda n: -n["score"])
+    return out[:int(k or cfg.get("library_notes_k", 3))]
+
+
+def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str, Any], main=None) -> Tuple[str, List[str]]:
+    """What the open libraries have on a message, as a block for her context, and notes for checking.  `main` is
+    her own memory, so that a note can say which of her memories it came out of."""
+    from . import notebook as _notebook
     which = opened(root, session)
     if not which:
         return "", []
@@ -833,9 +879,27 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
     found = search(root, which, query, embedder, cfg)
     head = (f"## Reference material (from the librar{'ies' if len(which) > 1 else 'y'} open in this conversation: "
             f"{', '.join(which)})\n")
+    try:
+        own = note_matches(root, which, query, embedder, cfg, skip=tuple(n["id"] for f in found for n in f.get("notes", [])))
+    except Exception:
+        own = []
+    spare = [int(cfg.get("library_notes_context_chars", 1400))]
+
+    def said(note_lines: List[str]) -> List[str]:
+        out = []
+        for text in note_lines:
+            if len(text) <= spare[0]:
+                spare[0] -= len(text)
+                out.append(text)
+        return out
+    mine = said([_notebook.line(n, main, sources=True) for n in own])
+    tail = ("\n\n### Your notes that bear on this message\nThese are notes you wrote in the library's notebook, not reference "
+            "material. Each says where it came from: weigh an unchecked inference as a guess.\n" + "\n".join(mine)) if mine else ""
+    if mine:
+        notes.append("her notes given: " + ", ".join(f"{n['library']} note {n['id']} ({n['score']})" for n in own[:len(mine)]))
     if not found:
         notes.append("nothing in them matched this message")
-        return head + "Nothing in it matched this message. Look something up with holonomic_library (action 'search') if you need it.", notes
+        return head + "Nothing in it matched this message. Look something up with holonomic_library (action 'search') if you need it." + tail, notes
     budget, lines = int(cfg.get("library_context_chars", 3600)), []
     for f in found:
         text = f["text"].strip()
@@ -845,10 +909,14 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
         if len(text) > room:
             text = text[:room].rsplit("\n", 1)[0].rstrip() + "\n[...]"
         also = f" (the same passage is also in: {', '.join(f['also_in'][:4])})" if f.get("also_in") else ""
-        lines.append(f"[{f['library']}: {f['source']}]{also}\n{text}\n")
+        hers = said([_notebook.line(n, main) for n in f.get("notes", [])])
+        if hers:
+            notes.append(f"her notes on {f['source']}: " + ", ".join(f"note {n['id']}" for n in f["notes"][:len(hers)]))
+        lines.append(f"[{f['library']}: {f['source']}] (passage {f['id']}){also}\n{text}\n"
+                     + ("Your notes on this passage (yours, not the reference material):\n" + "\n".join(hers) + "\n" if hers else ""))
     notes.append("pieces given: " + "; ".join(f"{f['library']}: {f['source']} ({f['score']})" for f in found[:len(lines)]))
     return (head + "This is reference material, not something you remember. Rely on it for exact details over your "
-            "own recollection, and say which file a detail came from if asked.\n\n" + "\n".join(lines).rstrip()), notes
+            "own recollection, and say which file a detail came from if asked.\n\n" + "\n".join(lines).rstrip() + tail), notes
 
 
 def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:
@@ -877,4 +945,12 @@ def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:
             + " When the user asks a question that one of these would answer, you may look it up once with the "
             "holonomic_library tool (action 'search', with the library in 'names') and say which library it came from. "
             "Opening a library (action 'open') makes it feed every message of the conversation, so that is the user's "
-            "decision: it works only when the user's own message asks for it. If you think one should be open, ask them.")
+            "decision: it works only when the user's own message asks for it. If you think one should be open, ask them."
+            "\n\nEach library has a notebook that is yours. While a library is open you can leave notes in it (action "
+            "'note') on what you learn by using the material: how a passage bears on the project in hand, what worked and "
+            "what failed and the correction, what you are still unsure of, and which passages to read together for a kind "
+            "of problem. Say which passages a note is about, so it comes back with them. After you solve something with a "
+            "library, a short note on which clues led you to the right passage and how you checked the answer makes the "
+            "next lookup quicker. A note is your inference unless you tested it (say what you ran and what happened) or "
+            "the user told you (quote their words): never call a guess a result. When a note turns out wrong or "
+            "incomplete, revise it or retire it; do not write a second one beside it.")

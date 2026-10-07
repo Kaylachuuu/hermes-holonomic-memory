@@ -12,10 +12,13 @@ def main() -> int:
         shim = types.ModuleType("pytest")
 
         @contextlib.contextmanager
-        def raises(exc):
+        def raises(exc, match=None):
             try:
                 yield
-            except exc:
+            except exc as caught:
+                import re
+                if match is not None and not re.search(match, str(caught)):
+                    raise AssertionError(f"{exc.__name__} raised, but {match!r} is not in: {caught}")
                 return
             raise AssertionError(f"{exc.__name__} not raised")
 

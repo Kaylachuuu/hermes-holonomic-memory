@@ -1076,6 +1076,43 @@ class HolonomicMemory:
                              "FROM memories WHERE id = ? AND forgotten = 0", (memory_id,)).fetchone()
         return dict(r, meta=json.loads(r["meta"] or "{}")) if r else None
 
+    def update_meta(self, memory_id: int, changes: dict) -> bool:
+        """Change some of what is noted about a memory, leaving the rest.  A value of None removes the entry."""
+        with self._lock:
+            r = self._db.execute("SELECT meta FROM memories WHERE id = ? AND forgotten = 0", (memory_id,)).fetchone()
+            if r is None:
+                return False
+            meta = json.loads(r["meta"] or "{}")
+            for key, value in changes.items():
+                if value is None:
+                    meta.pop(key, None)
+                else:
+                    meta[key] = value
+            self._db.execute("UPDATE memories SET meta = ? WHERE id = ?", (json.dumps(meta), memory_id))
+            return True
+
+    def link(self, a: int, b: int, *, realm: str = "waking", weight: float = 1.0) -> bool:
+        """Associate two memories that are both already stored: each then recalls the other, on a plate of
+        `realm`.  The two may be of different realms (a note in a library's notebook and the passage it is about);
+        the realm says whose plates carry the tie, and so which searches read it."""
+        w = float(min(max(weight, MIN_WEIGHT), MAX_WEIGHT))
+        with self._lock, _single_threaded():
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._sync()
+                ra, rb = self._row.get(int(a)), self._row.get(int(b))
+                if ra is None or rb is None or ra == rb:
+                    self._db.execute("ROLLBACK")
+                    return False
+                pa, pb = self._phasor_of(ra), self._phasor_of(rb)
+                self._write(realm, [(self._cue(pb), pa, ra, w, int(b), None), (self._cue(pa), pb, rb, w, int(a), None)])
+                self._db.execute("COMMIT")
+                return True
+            except Exception:
+                self._db.execute("ROLLBACK")
+                self._load()
+                raise
+
     def recent(self, n: int = 20, *, realm: str = "waking", kind: str | None = None, since: float | None = None) -> list[dict]:
         sql, params = "SELECT id, text, kind, realm, session, created_at, strength, trust FROM memories WHERE forgotten = 0 AND realm = ?", [realm]
         if kind:

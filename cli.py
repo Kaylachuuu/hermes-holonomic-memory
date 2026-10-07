@@ -88,6 +88,13 @@ def _library_cmd(engine, cfg, args) -> None:
             print(f"  left out: {skipped['file']}  ({skipped['why']})")
         if len(r["skipped"]) > 40:
             print(f"  ... and {len(r['skipped']) - 40} more left out")
+        nb = r.get("notes") or {}
+        if nb.get("error"):
+            print(f"  ! her notes could not be bound again to the passages: {nb['error']}")
+        elif nb.get("notes"):
+            print(f"  Her notebook: {nb['notes']} note(s). {nb['rebound']} binding(s) moved to the same passage read again, "
+                  f"{nb['changed']} to a passage whose text changed, {nb['gone']} left without a passage that is gone."
+                  + (f"  See: hermes holonomic library notes {r['name']}" if nb["changed"] or nb["gone"] else ""))
 
     def building(name: str, fresh: bool = False) -> None:
         started, last = time.time(), [0.0]
@@ -167,6 +174,11 @@ def _library_cmd(engine, cfg, args) -> None:
             for f in found:
                 print(f"[{f['score']:.2f}{' linked' if f['linked'] else ''}] {f['source']}"
                       + (f"\n    also in: {', '.join(f['also_in'])}" if f.get("also_in") else "") + f"\n    {_clip(f['text'], args.width)}")
+                for n in f.get("notes") or []:
+                    from . import notebook as _nb
+                    print(f"    her note {n['id']} ({_nb.TYPES.get(n['type'], n['type'])}; {_nb.where_from(n)}): {_clip(n['text'], args.width)}")
+        elif what == "notes":
+            _library_notes(engine, cfg, lib, root, items, args)
         elif what == "delete":
             if len(items) != 1:
                 print("Usage: hermes holonomic library delete NAME --yes")
@@ -177,7 +189,10 @@ def _library_cmd(engine, cfg, args) -> None:
                 print(f"There is no library called '{name}'.")
             elif not args.yes:
                 s = lib.summary(root, name)
-                print(f"This would remove library '{name}' ({s['pieces']} pieces from {s['files']} files). The folder it was "
+                from . import notebook as _nb
+                hers = len(_nb.list_notes(lib.store(root, name, engine.embedder, cfg)))
+                print(f"This would remove library '{name}' ({s['pieces']} pieces from {s['files']} files"
+                      + (f", and the {hers} note(s) she has written in its notebook" if hers else "") + "). The folder it was "
                       f"built from, {s['folder']}, is not touched. Add --yes to do it.")
             else:
                 lib.delete(root, name)
@@ -186,6 +201,85 @@ def _library_cmd(engine, cfg, args) -> None:
         print(exc)
     finally:
         lib.close_all(root)
+
+
+def _library_notes(engine, cfg, lib, root, items: list, args) -> None:
+    """Her notebook in a library, from the command line.  What is done here is done by the user: a note written or
+    confirmed here is the user's word."""
+    from . import notebook as nb
+    usage = ("Usage: hermes holonomic library notes NAME                      her notes\n"
+             "       hermes holonomic library notes NAME show ID              one note in full\n"
+             "       hermes holonomic library notes NAME add \"TEXT\" [--type lesson] [--on \"FILE > SECTION\" ...]\n"
+             "       hermes holonomic library notes NAME correct ID \"TEXT\"   replace a note with your wording\n"
+             "       hermes holonomic library notes NAME confirm ID           say a note is right\n"
+             "       hermes holonomic library notes NAME retire ID [--reason WHY] | restore ID\n"
+             "       hermes holonomic library notes NAME check                do the plates bring each note back from its passages")
+    if not items:
+        print(usage)
+        return
+    name, data = lib._need(root, items[0])
+    store = lib.store(root, name, engine.embedder, cfg)
+    files = data.get("files") or {}
+    sub, rest = (items[1] if len(items) > 1 else "list"), items[2:]
+
+    def show(n: dict, full: bool = False) -> None:
+        print(f"[{n['id']}] {nb.TYPES.get(n['type'], n['type'])}; {nb.where_from(n)}" + (f"; version {n['version']}" if n["version"] > 1 else "")
+              + (f"   RETIRED ({n['retired_because'] or 'no reason given'})" if n["retired"] else ""))
+        print(f"    {n['text'] if full else _clip(n['text'], args.width)}")
+        for a in n["about"]:
+            print(f"    about: {nb._source(a) or '(a passage)'}" + {"changed": "   [the passage has changed since]", "gone": "   [no longer in the library]"}.get(a.get("state") or "", ""))
+        for mid in n["memories"]:
+            got = engine.get(int(mid))
+            print(f"    from her memory #{mid}: {_clip(got['text'], 120) if got else '(forgotten)'}")
+        if full:
+            print(f"    written {_when(n['when'])}" + (f"; it replaced note {n['revises']}" if n.get("revises") else "")
+                  + (f"; replaced by note {n['replaced_by']}" if n.get("replaced_by") else ""))
+    if sub == "list":
+        notes = nb.list_notes(store, retired=args.all)
+        print(f"{len(notes)} note(s) in the notebook of '{name}'" + (" (retired ones included)" if args.all else "") + (":" if notes else "."))
+        for n in notes:
+            show(n)
+        if not notes:
+            print("She writes them while the library is open in a conversation. You can add one: hermes holonomic library notes "
+                  f"{name} add \"TEXT\" --on \"FILE > SECTION\"")
+    elif sub == "check":
+        c = nb.check(store)
+        print(f"{c['notes']} note(s), bound to {c['bindings']} passage(s) in all.")
+        if c["bindings"]:
+            print(f"  read off the plates: the note from its passage {c['passage_to_note']} of {c['bindings']}; "
+                  f"the passage from its note {c['note_to_passage']} of {c['bindings']}")
+        if c["unbound"]:
+            print(f"  {c['unbound']} note(s) are about no passage now in the library: they come back only by what they say")
+        if c["stale"]:
+            print(f"  {c['stale']} binding(s) are to a passage that has changed or gone since the note was written")
+    elif sub == "add":
+        if not rest:
+            print(usage)
+            return
+        show(nb.add(store, files, cfg, text=" ".join(rest), kind=args.type or "lesson", about=args.on or [], provenance="user",
+                    by_command=True), True)
+        print("Saved, as yours.")
+    elif sub in ("show", "correct", "confirm", "retire", "restore") and rest and rest[0].lstrip("#").isdigit():
+        note_id = int(rest[0].lstrip("#"))
+        if sub == "show":
+            n = nb.get_note(store, note_id)
+            print(f"There is no note {note_id} in '{name}'.") if n is None else show(n, True)
+        elif sub == "correct":
+            if len(rest) < 2:
+                print(usage)
+                return
+            show(nb.revise(store, files, cfg, note_id, text=" ".join(rest[1:]), kind=args.type, about=args.on or None,
+                           provenance="user", by_command=True), True)
+            print(f"Note {note_id} is retired and this takes its place, as yours.")
+        elif sub == "confirm":
+            show(nb.confirm(store, note_id, provenance="user", by_command=True), True)
+            print("Marked as confirmed by you.")
+        elif sub == "retire":
+            show(nb.retire(store, note_id, args.reason or "retired by the user"), True)
+        else:
+            show(nb.restore(store, note_id), True)
+    else:
+        print(usage)
 
 
 def _worker(engine, what: str) -> None:
@@ -1586,11 +1680,16 @@ def register_cli(subparser) -> None:
     fa.add_argument("--yes", action="store_true", help="With 'forget --all': actually do it")
     fa.add_argument("--width", type=int, default=110, help="Characters of text to show")
     lb = subs.add_parser("library", help="Reference libraries: material to work from, kept apart from memory")
-    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "rebuild", "show", "search", "delete"])
+    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "rebuild", "show", "search", "delete", "notes"])
     lb.add_argument("items", nargs="*", help="A library name; for 'create' the folder too; for 'search' the words")
     lb.add_argument("--about", help="With 'create': one line saying what the library is for")
     lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")
     lb.add_argument("--left-out", action="store_true", help="With 'show': the files that were left out, and why")
+    lb.add_argument("--type", choices=["connection", "lesson", "question", "guidance"], help="With 'notes add' or 'correct': what kind of note")
+    lb.add_argument("--on", action="append", metavar="SOURCE", help="With 'notes add' or 'correct': a passage the note is about, as "
+                    "FILE > SECTION or a passage number; may be given more than once")
+    lb.add_argument("--reason", help="With 'notes retire': why")
+    lb.add_argument("--all", action="store_true", help="With 'notes': include retired notes")
     lb.add_argument("-n", type=int, default=6, help="With 'search': how many results")
     lb.add_argument("--width", type=int, default=300, help="Characters of text to show")
     bkp = subs.add_parser("backup", help="Write the whole store (memories, images, libraries, settings) to one zip file")

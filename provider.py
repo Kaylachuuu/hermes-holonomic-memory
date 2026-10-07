@@ -308,18 +308,44 @@ LIBRARY_TOOL = {
         "- close: close `names`, or every open library if none is given.\n"
         "- search: look up `query` once. In the open libraries by default; or in `names`, which need not be open. "
         "Use it when the user asks something a library would answer, and for exact details: a file format, an "
-        "instruction, a number. Results name the library and file they came from; say so when you use one."
+        "instruction, a number. Results name the library and file they came from; say so when you use one.\n"
+        "YOUR NOTEBOOK. Each library has a notebook of your own notes on its material, kept with it and never mixed "
+        "into the reference text. Notes can be written only in a library that is open in this conversation.\n"
+        "- note: write a note in library `name`: `text` (a sentence or two), `type` (connection: how a passage bears "
+        "on the project; lesson: what worked or failed, and the correction; question: something you are unsure of; "
+        "guidance: which passages to read for a kind of problem), and `passages` it is about (each a passage number or "
+        "a source exactly as a search result gives it, like \"KERNEL.ASM > Load_FAT\"), so that the note comes back "
+        "with them. `memories` may give ids of your own memories it came out of. `provenance` says where it comes "
+        "from: 'inference' (your own reasoning, the default); 'tested' (you tried it: `evidence` must say what was run "
+        "and what happened); 'user' (the user told you: `quote` must be their exact words from this conversation). "
+        "A guess saved as a result is worse than no note.\n"
+        "- revise_note: replace note `note_id` with better `text` (and anything else you give); the old one is "
+        "retired, not kept beside it. Changed words are your inference again unless you give provenance.\n"
+        "- confirm_note: note `note_id` is now 'tested' (with `evidence`) or the user confirmed it (provenance "
+        "'user' with their `quote`); its words stay as they are.\n"
+        "- retire_note: note `note_id` was wrong or is no longer needed (`reason`). It leaves recall and stays on record.\n"
+        "- notes: your notes in library `name`, or those matching `query`."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["list", "create", "update", "status", "open", "close", "search"]},
+            "action": {"type": "string", "enum": ["list", "create", "update", "status", "open", "close", "search",
+                                                  "note", "revise_note", "confirm_note", "retire_note", "notes"]},
             "name": {"type": "string", "description": "A library's name: letters, digits, - or _ (create, update, status)."},
             "names": {"type": "array", "items": {"type": "string"}, "description": "Library names (open, close, search)."},
             "folder": {"type": "string", "description": "Full path of the folder holding the material (create)."},
             "about": {"type": "string", "description": "One line saying what the library is for (create)."},
             "query": {"type": "string", "description": "What to look up (search)."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Max results for search (default 6)."},
+            "text": {"type": "string", "description": "The note: a sentence or two (note, revise_note)."},
+            "type": {"type": "string", "enum": ["connection", "lesson", "question", "guidance"], "description": "What kind of note (note, revise_note)."},
+            "passages": {"type": "array", "items": {"type": "string"}, "description": "What the note is about: passage numbers, or sources as search results give them (note, revise_note)."},
+            "memories": {"type": "array", "items": {"type": "integer"}, "description": "Ids of your own memories the note came out of (note, revise_note)."},
+            "provenance": {"type": "string", "enum": ["inference", "tested", "user"], "description": "Where the note comes from (note, revise_note, confirm_note)."},
+            "evidence": {"type": "string", "description": "For 'tested': what was run and what happened."},
+            "quote": {"type": "string", "description": "For 'user': the user's exact words from this conversation."},
+            "note_id": {"type": "integer", "description": "A note's number (revise_note, confirm_note, retire_note)."},
+            "reason": {"type": "string", "description": "Why a note is retired (retire_note)."},
         },
         "required": ["action"],
     },
@@ -546,7 +572,7 @@ class HolonomicMemoryProvider(MemoryProvider):
     def _reference_block(self, engine, words: str, sid: str, trace: List[str]) -> str:
         """What the libraries open in this conversation have on the message.  Nothing when none is open."""
         try:
-            block, notes = _library.context_block(_library.root_of(engine), sid, words, engine.embedder, self._cfg)
+            block, notes = _library.context_block(_library.root_of(engine), sid, words, engine.embedder, self._cfg, main=engine)
             trace.extend(notes)
             return block
         except Exception as exc:
@@ -1180,18 +1206,85 @@ class HolonomicMemoryProvider(MemoryProvider):
                     return _error("Say which library to look in, with 'names'. There " + (f"are: {', '.join(have)}." if have else "are none yet."))
                 found = _library.search(root, which, query, engine.embedder, self._cfg,
                                         k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
+                from . import notebook as _notebook
                 out = {"searched": which, "count": len(found), "results": [
-                    {"library": f["library"], "source": f["source"], "text": f["text"], "score": f["score"],
-                     **({"same_passage_also_in": f["also_in"]} if f.get("also_in") else {})} for f in found]}
+                    {"library": f["library"], "source": f["source"], "passage": f["id"], "text": f["text"], "score": f["score"],
+                     **({"same_passage_also_in": f["also_in"]} if f.get("also_in") else {}),
+                     **({"your_notes_on_this_passage": [_notebook.line(n, engine)[2:] for n in f["notes"]]} if f.get("notes") else {})}
+                    for f in found]}
+                own = _library.note_matches(root, which, query, engine.embedder, self._cfg, floor=0.25,
+                                            skip=tuple(n["id"] for f in found for n in f.get("notes", [])))
+                if own:
+                    out["your_notes_matching_this"] = [f"[{n['library']}] " + _notebook.line(n, engine, sources=True)[2:] for n in own]
                 looked = [n for n in which if n not in now]
                 if looked:
                     out["note"] = (f"A single lookup: {', '.join(looked)} is not open in this conversation, and nothing more from it "
                                    "will reach you unless you look again or the user asks for it to be opened. Say which library "
                                    "an answer came from.")
                 return json.dumps(out)
+            if action in ("note", "revise_note", "confirm_note", "retire_note", "notes"):
+                return self._notebook_action(engine, root, action, args, sid)
             return _error(f"Unknown action: {action}")
         except LibraryError as exc:
             return _error(exc)
+
+    def _notebook_action(self, engine, root, action: str, args: Dict[str, Any], sid: str) -> str:
+        """Her notes in a library.  Written only in a library that is open in this conversation: which libraries a
+        conversation works with is the user's decision, and so is which notebooks it may write in."""
+        from . import notebook as _notebook
+        now = _library.opened(root, sid)
+        name = str(args.get("name") or (args.get("names") or [""])[0] or (now[0] if len(now) == 1 else "")).strip()
+        if not name:
+            return _error("Say which library, with 'name'." + (f" Open here: {', '.join(now)}." if now else " None is open in this conversation."))
+        name, data = _library._need(root, name)
+        lib = _library.store(root, name, engine.embedder, self._cfg)
+        files = data.get("files") or {}
+
+        def out(note: dict) -> dict:
+            return {"note_id": note["id"], "library": name, "type": note["type"], "text": note["text"],
+                    "where_it_comes_from": _notebook.where_from(note),
+                    "about": [_notebook._source(a) + (f" ({a['state']})" if a.get("state") else "") for a in note["about"]],
+                    **({"memories": note["memories"]} if note["memories"] else {}),
+                    **({"retired": True, "why": note["retired_because"]} if note["retired"] else {})}
+        if action == "notes":
+            query = (args.get("query") or "").strip()
+            if query:
+                found = _notebook.matching(lib, query, self._cfg, k=max(1, min(int(args.get("limit") or 6), 12)), floor=0.15)
+            else:
+                found = _notebook.list_notes(lib)[-max(1, min(int(args.get("limit") or 12), 12)):]
+            return json.dumps({"library": name, "count": len(found), "notes": [out(n) for n in found],
+                               **({} if name in now else {"note": f"{name} is not open in this conversation: you can read its notes but not write any."})})
+        if name not in now:
+            return _error(f"NOT SAVED: {name} is not open in this conversation, and notes can be written only in an open library. "
+                          "If the work in front of you uses it, ask the user whether to open it.")
+        # the user's own words in this conversation, for a note that claims to be theirs
+        messages = [self._said.get(sid, "")]
+        try:
+            messages += [m["text"] for m in engine.session_memories(sid, kinds=("said_user",))][-80:]
+        except Exception:
+            pass
+        given = dict(provenance=args.get("provenance"), evidence=args.get("evidence") or "", quote=args.get("quote") or "",
+                     messages=messages)
+        if action == "note":
+            note = _notebook.add(lib, files, self._cfg, text=args.get("text") or "", kind=args.get("type") or "lesson",
+                                 about=args.get("passages") or [], memories=args.get("memories") or [], conversation=sid, main=engine,
+                                 **dict(given, provenance=given["provenance"] or "inference"))
+            said = out(note)
+            if not note["about"]:
+                said["warning"] = ("This note is not about any passage, so it will only come back when a message resembles it. "
+                                   "If it concerns particular passages, revise it with 'passages'.")
+            return json.dumps(dict(said, saved=True))
+        if not args.get("note_id"):
+            return _error(f"{action} needs 'note_id'")
+        if action == "revise_note":
+            note = _notebook.revise(lib, files, self._cfg, args["note_id"], text=args.get("text"), kind=args.get("type"),
+                                    about=args.get("passages"), memories=args.get("memories"), conversation=sid, main=engine, **given)
+            return json.dumps(dict(out(note), saved=True, replaced_note=note["revises"]))
+        if action == "confirm_note":
+            note = _notebook.confirm(lib, args["note_id"], **dict(given, provenance=given["provenance"] or ""))
+            return json.dumps(dict(out(note), saved=True))
+        note = _notebook.retire(lib, args["note_id"], args.get("reason") or "")
+        return json.dumps(out(note))
 
     def _hit_json(self, hit) -> Dict[str, Any]:
         out = {"id": hit.id, "text": hit.text, "kind": hit.kind,
