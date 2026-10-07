@@ -650,6 +650,31 @@ hermes holonomic forget 52 --yes
 recalled memories, what was seen in an attached image, what was recognised. When she does not act on
 something, look there first to see whether she was told it.
 
+## The write log, and looking into the plates
+
+Every term added to a plate is recorded: which plate, what the cue was made from (a memory, or a key's text),
+the target, and the weight it was written with. The row is written in the same transaction as the plate, so
+the log and the plate cannot disagree after a crash. Each row also names the *encoding* it was made under: a
+fingerprint of the projection, the centre, the cue's permutations and role, and the cue formula.
+
+A memory is written with the vector the store keeps for it, at the precision it is kept at, so a write can be
+made again exactly from the log. That makes the associative layer auditable, and rebuildable for every plate
+written since the log began. Plates from before it are closed as they stand, so no plate mixes recorded and
+unrecorded writes. Forgetting still removes a memory's vector, which is what forgetting means; a plate that
+carried it can no longer be rebuilt, and the record of which plates those were is kept.
+
+    hermes holonomic plates          how much the log covers, and whether rebuilding from it gives the stored plates
+    hermes holonomic plates check    what the plates do at recall, measured (changes nothing)
+
+`plates check` uses memories as cues and reports how many plates answer a cue and whether the limit of 24 ever
+turns one away; how much of what the plates carry belongs to memories recall can no longer return; and whether
+those memories, still counted among a plate's members, change what is recalled. It reads the plates three
+ways (as recall does, with those members left out, and with no limit) and counts how many of a cue's *known*
+associates each finds: known from the log, or from the sources a conclusion was stored with. More results are
+not better in themselves, so it also counts returns that nothing on record explains.
+
+Not done: taking a retired or forgotten memory's terms back out of a plate. The log is what that would need.
+
 ## Where the files are
 
     <Hermes home>/holonomic/holonomic.db                 memories, plates, profiles

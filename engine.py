@@ -116,7 +116,33 @@ CREATE TABLE IF NOT EXISTS plate_members (
     memory_id INTEGER NOT NULL,
     PRIMARY KEY (plate_id, memory_id)
 ) WITHOUT ROWID;
+-- How phasors and cues are built: the projection, the centre, the cue's permutations and role, and the formula.
+-- A write can be reproduced only by the encoding it was made with, so each binding names its own.
+CREATE TABLE IF NOT EXISTS encodings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    created_at  REAL NOT NULL
+);
+-- The write log: one row for every term ever added to a plate.  trace += weight * cue * phasor(target), and
+-- gate += weight * cue, where the cue is built from a memory (cue_memory) or from a key's text (cue_key).
+-- Written in the same transaction as the plate it describes, so the two cannot disagree.
+CREATE TABLE IF NOT EXISTS bindings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    plate_id   INTEGER NOT NULL,
+    cue_memory INTEGER,
+    cue_key    TEXT,
+    target     INTEGER NOT NULL,
+    weight     REAL NOT NULL,
+    encoding   INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bind_plate ON bindings(plate_id, id);
+CREATE INDEX IF NOT EXISTS idx_bind_target ON bindings(target);
+CREATE INDEX IF NOT EXISTS idx_bind_cue ON bindings(cue_memory);
 """
+
+# The cue formula in _cue().  Change the formula, change this: it is part of an encoding's fingerprint.
+CUE_FORMULA = "selfbind(perm2)-perm-role/1"
 
 # Generic sentences used once, at creation, to estimate the component every
 # embedding shares.  Fixed forever afterwards so stored phasors stay valid.
@@ -323,6 +349,7 @@ class HolonomicMemory:
             except sqlite3.OperationalError:                 # SQLite built without FTS5
                 self._fts = False
             self._init_meta(dim, plate_capacity)
+            self._migrate()
             self._load()
         except BaseException:
             # e.g. the embedding server is down during first-time calibration.  Without
@@ -369,6 +396,43 @@ class HolonomicMemory:
         self._perm2 = vsa.permutation(_CUE_PERM + "2", self.dim)
         self._role = vsa.atom(ROLE_ASSOC, self.dim)
 
+    def _fingerprint(self) -> str:
+        """What a write depends on besides the two memories: change any of it and old writes cannot be reproduced."""
+        import hashlib
+        h = hashlib.sha256()
+        for part in (CUE_FORMULA.encode(), str(self.dim).encode(), np.ascontiguousarray(self.proj.P).tobytes(),
+                     np.ascontiguousarray(self.proj.center).tobytes(), np.ascontiguousarray(self._perm).tobytes(),
+                     np.ascontiguousarray(self._perm2).tobytes(), np.ascontiguousarray(self._role).tobytes()):
+            h.update(part)
+        return h.hexdigest()
+
+    def _migrate(self) -> None:
+        """Bring a store made by an earlier version up to date, and find this store's encoding."""
+        columns = lambda table: {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            if "logged" not in columns("plates"):
+                # 1 = every write to this plate is in the write log.
+                self._db.execute("ALTER TABLE plates ADD COLUMN logged INTEGER NOT NULL DEFAULT 0")
+            if "gone" not in columns("plate_members"):
+                # 1 = the memory has been forgotten; kept so that what a plate still carries can be counted.
+                self._db.execute("ALTER TABLE plate_members ADD COLUMN gone INTEGER NOT NULL DEFAULT 0")
+            if self._meta_get("log_started") is None:
+                # Plates written before there was a log are closed as they stand: no plate then holds some
+                # writes that are recorded and some that are not.
+                self._db.execute("UPDATE plates SET sealed = 1 WHERE logged = 0 AND sealed = 0")
+                self._meta_set("log_started", str(time.time()))
+            fingerprint = self._fingerprint()
+            row = self._db.execute("SELECT id FROM encodings WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            if row is None:
+                row = {"id": self._db.execute("INSERT INTO encodings (fingerprint, created_at) VALUES (?, ?)",
+                                              (fingerprint, time.time())).lastrowid}
+            self._encoding = int(row["id"])
+            self._db.execute("COMMIT")
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
+
     def _load(self) -> None:
         self._X = _Grow(self.embed_dim, np.float32)      # cleanup memory
         self._ids = _Grow(0, np.int64)
@@ -406,7 +470,7 @@ class HolonomicMemory:
             pidx[p["id"]] = i
             if not p["sealed"]:
                 self._open[code] = i
-        for m in self._db.execute("SELECT plate_id, memory_id FROM plate_members"):
+        for m in self._db.execute("SELECT plate_id, memory_id FROM plate_members WHERE gone = 0"):
             row = self._row.get(m["memory_id"])
             if row is not None and m["plate_id"] in pidx:
                 self._members[pidx[m["plate_id"]]].add(row)
@@ -468,7 +532,7 @@ class HolonomicMemory:
             i = None
         if i is None:
             zeros = np.zeros(self.dim, dtype=np.complex64)
-            cur = self._db.execute("INSERT INTO plates (realm, created_at, trace, gate) VALUES (?, ?, ?, ?)",
+            cur = self._db.execute("INSERT INTO plates (realm, created_at, trace, gate, logged) VALUES (?, ?, ?, ?, 1)",
                                    (realm, time.time(), zeros.tobytes(), zeros.tobytes()))
             i = self._trace.add()
             self._gate.add()
@@ -481,19 +545,27 @@ class HolonomicMemory:
             self._open[code] = i
         return i
 
-    def _write(self, realm: str, bindings: list[tuple[np.ndarray, np.ndarray, int, float]]) -> None:
-        """bindings: (cue, target phasor, target row, weight)."""
+    def _write(self, realm: str, bindings: list[tuple]) -> None:
+        """bindings: (cue, target phasor, target row, weight, cue memory id or None, cue key or None).
+
+        Every term added to the plate is also written to the log, in the transaction the caller holds open:
+        either both are kept or neither is."""
         if not bindings:
             return
-        i = self._plate_for(realm, sum(w * w for *_, w in bindings))
+        i = self._plate_for(realm, sum(b[3] * b[3] for b in bindings))
         pid = int(self._pid.a[i])
-        for cue, target, row, w in bindings:
+        now = time.time()
+        log = []
+        for cue, target, row, w, cue_memory, cue_key in bindings:
             self._trace.a[i] += np.complex64(w) * cue * target
             self._gate.a[i] += np.complex64(w) * cue
+            log.append((pid, cue_memory, cue_key, int(self._ids.a[row]), float(w), self._encoding, now))
             if row not in self._members[i]:
                 self._members[i].add(row)
                 self._db.execute("INSERT OR IGNORE INTO plate_members (plate_id, memory_id) VALUES (?, ?)",
                                  (pid, int(self._ids.a[row])))
+        self._db.executemany("INSERT INTO bindings (plate_id, cue_memory, cue_key, target, weight, encoding, created_at) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?)", log)
         # Load is the plate's measured energy, not a count of bindings: many similar
         # targets under one key add up coherently and use far more of the plate's
         # capacity than the same number of unrelated associations.
@@ -523,7 +595,9 @@ class HolonomicMemory:
             return []
         raw = self.embedder.embed(chunks, "document")         # network call: outside the lock
         with _single_threaded():
-            X = self.proj.prep(raw)
+            # A memory is written with the vector that is kept for it, at the precision it is kept at.  The
+            # phasor used to be made from the full-precision embedding, which the store cannot give back.
+            X = self.proj.prep(raw).astype(np.float16).astype(np.float32)
             phasors = self.proj.phasor(X)
         now = time.time() if created_at is None else created_at
         all_keys = list(dict.fromkeys(normalize_key(k) for k in keys if k and k.strip()))
@@ -549,9 +623,9 @@ class HolonomicMemory:
                         if orow is None:
                             continue
                         po = self._phasor_of(orow)
-                        bindings.append((self._cue(po), p, row, w))      # the other one recalls this one
-                        bindings.append((self._cue(p), po, orow, w))     # and this one recalls the other
-                    bindings += [(self._key_atom(k), p, row, w) for k in all_keys]
+                        bindings.append((self._cue(po), p, row, w, int(other), None))     # the other one recalls this one
+                        bindings.append((self._cue(p), po, orow, w, mid, None))           # and this one recalls the other
+                    bindings += [(self._key_atom(k), p, row, w, None, k) for k in all_keys]
                     self._write(realm, bindings)
                     self._last[(realm, session)] = mid
                     ids.append(mid)
@@ -565,8 +639,12 @@ class HolonomicMemory:
     # ---------------------------------------------------------------- reading
 
     def _probe(self, cue: np.ndarray, realm_codes: list[int], *, aperture: float = 1.0,
-               max_plates: int = 24, z_min: float = 3.5, ridge: float = 0.1) -> dict[int, float]:
-        """Unbind `cue` from every resonating plate; return {row: recovered strength}."""
+               max_plates: int = 24, z_min: float = 3.5, ridge: float = 0.1,
+               leave_out: set | None = None, info: dict | None = None) -> dict[int, float]:
+        """Unbind `cue` from every resonating plate; return {row: recovered strength}.
+
+        `leave_out` and `info` are for measuring, not for recall: rows to keep out of the attribution among a
+        plate's members, and a dict that is told how many plates resonated and how many the limit turned away."""
         n = self._trace.n
         if n == 0:
             return {}
@@ -583,6 +661,9 @@ class HolonomicMemory:
             resonance = resonance - np.median(resonance[eligible] / load[eligible]) * load
         ok = eligible & (resonance > 2.5 * gate_sigma)
         idx = np.nonzero(ok)[0]
+        if info is not None:
+            info["resonated"] = int(idx.size)
+            info["turned_away"] = max(0, int(idx.size) - int(max_plates))
         if idx.size == 0:
             return {}
         if idx.size > max_plates:
@@ -594,6 +675,10 @@ class HolonomicMemory:
             if rows.size == 0:
                 continue
             rows = rows[np.isin(self._realm.a[rows], realm_codes)]
+            if leave_out:
+                rows = rows[~np.isin(rows, list(leave_out))]
+                if rows.size == 0:
+                    continue
             M = self._X.a[rows]
             # Ridge deconvolution: members of a plate resemble each other, so a
             # plain matched filter credits every member for its neighbours'
@@ -1095,7 +1180,8 @@ class HolonomicMemory:
             for members in self._members:
                 members.discard(row)
             self._db.execute("UPDATE memories SET forgotten = 1, text = '', vec = NULL WHERE id = ?", (memory_id,))
-            self._db.execute("DELETE FROM plate_members WHERE memory_id = ?", (memory_id,))
+            # The record of which plates carried it is kept, marked: its traces are still there, and counted.
+            self._db.execute("UPDATE plate_members SET gone = 1 WHERE memory_id = ?", (memory_id,))
             self._last.clear()
             return True
 

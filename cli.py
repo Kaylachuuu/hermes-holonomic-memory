@@ -187,6 +187,66 @@ def _library_cmd(engine, cfg, args) -> None:
         lib.close_all(root)
 
 
+def _plates_cmd(engine, args) -> None:
+    """Read-only: whether the write log accounts for the plates, and what the plates do at recall."""
+    from . import audit
+    st = audit.log_status(engine)
+    print(f"Plates: {st['plates']}, of which {st['plates_logged']} have every write in the write log "
+          f"({st['bindings']} bindings logged"
+          + (f", since {_when(st['log_started'])}" if st["log_started"] else "") + f"). Encoding #{st['encoding']}"
+          + (f" of {st['encodings']}." if st["encodings"] > 1 else "."))
+    v = audit.verify(engine)
+    if v["checked"] or v["cannot"]:
+        print(f"Rebuilt from the log alone and compared with what is stored: {v['agree']} of {v['checked']} plate(s) agree "
+              f"(largest difference {v['worst']:.1e} of the plate; {v['tolerance']:.0e} is allowed).")
+        for d in v["disagree"]:
+            print(f"  DISAGREES: plate {d['plate']} ({d['bindings']} bindings) differs by {d['difference']:.2e}")
+        for c in v["cannot"]:
+            print(f"  not checked: plate {c['plate']} ({c['bindings']} bindings): {c['forgotten']} involve a forgotten memory"
+                  + (f", {c['other_encoding']} were written under another encoding" if c["other_encoding"] else ""))
+    else:
+        print("No plate has been written since the log began, so there is nothing to check yet.")
+    if v["unlogged"]:
+        print(f"{v['unlogged']} plate(s) were written before the log began and cannot be rebuilt from it.")
+    if args.plates_action != "check":
+        print("For what the plates do at recall: hermes holonomic plates check")
+        return
+    d = audit.diagnose(engine, sample=args.n)
+    if not d["cues"]:
+        print(d.get("note", "Nothing to measure."))
+        return
+    pl, fg, rs, rc = d["plates"], d["forgotten"], d["resonance"], d["recovery"]
+    print(f"\nMeasured with {d['cues']} of {d['live']} memories as cues.")
+    print(f"What the plates carry: {pl['members_out_of_recall']} of {pl['members']} memberships belong to memories recall can no "
+          f"longer return (retired or marked wrong), on {pl['with_out_of_recall']} of {pl['count']} plates.")
+    print(f"  forgotten memories: {fg['total']}; their plates are on record for {fg['on_record']}"
+          + (f" (for {fg['plates_unknown']}, forgotten before records were kept, they are not)." if fg["plates_unknown"] else "."))
+    for w in pl["worst"]:
+        if w["out_of_recall"] or w["forgotten"]:
+            print(f"    plate {w['plate']}: {w['members']} members, {w['out_of_recall']} out of recall, {w['forgotten']} forgotten, load {w['load']:.0f}")
+    print(f"How many plates answer a cue: typically {rs['median']}, at most {rs['most']}; the limit is {rs['limit']}. "
+          f"Cues for which the limit turned a plate away: {rs['cues_with_plates_turned_away']}.")
+    known = d["known_links"]
+    print(f"Associates a cue is known to have (from the log, or the sources a conclusion was stored with): "
+          f"{known['cues_with_any']} of the cues have any.")
+
+    def line(name: str, key: str) -> None:
+        t = rc[key]
+        share = f"{100 * t['found'] / t['expected']:.0f}%" if t["expected"] else "n/a"
+        print(f"  {name:<46} known associates found: {t['found']}/{t['expected']} ({share});  returned in all: {t['returned']};  "
+              f"of those, linked by nothing on record: {t['unexplained']}")
+    line("as recall does it now", "as it is")
+    line("with out-of-recall members left out", "without them")
+    line("with no limit on plates read", "no limit")
+    print(f"Cues whose result changed when out-of-recall members were left out: {d['cues_where_leaving_them_out_changed_the_result']}.")
+    for e in d["examples"]:
+        print(f"    cue #{e['cue']}: gained {e['gained'] or 'nothing'} ({e['gained_expected']} known), "
+              f"lost {e['lost'] or 'nothing'} ({e['lost_expected']} known)")
+    print("Reading this: more returned is not better in itself. What counts is known associates found, and how many\n"
+          "returns nothing on record explains. A conversation's neighbouring lines are linked too but were not recorded\n"
+          "before the log, so they are never 'known', only explained.")
+
+
 def _backup_cmd(args) -> None:
     from hermes_constants import get_hermes_home
     from . import backup as bk
@@ -232,7 +292,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore", "plates"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
@@ -270,6 +330,8 @@ def holonomic_command(args) -> None:
             _faces_cmd(engine, cfg, args)
         elif action == "library":
             _library_cmd(engine, cfg, args)
+        elif action == "plates":
+            _plates_cmd(engine, args)
         elif action == "context":
             try:
                 print((engine.path / "last_context.txt").read_text(encoding="utf-8").rstrip())
@@ -1397,6 +1459,9 @@ def register_cli(subparser) -> None:
     rst.add_argument("--from", dest="folder", help="Folder the backups are in")
     rst.add_argument("--list", action="store_true", help="Show the backups there are")
     rst.add_argument("--yes", action="store_true", help="Actually do it")
+    plt = subs.add_parser("plates", help="Check the write log against the plates, and measure what the plates do at recall (changes nothing)")
+    plt.add_argument("plates_action", nargs="?", choices=["status", "check"], default="status")
+    plt.add_argument("-n", type=int, default=300, help="With 'check': how many memories to use as cues (default 300)")
     td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
     td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")
