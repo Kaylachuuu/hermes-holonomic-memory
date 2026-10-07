@@ -594,3 +594,28 @@ def test_cli_status_shows_the_background_worker(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+def test_a_dream_can_reach_back_through_the_plates(tmp_path):
+    """A dream reached into the past by likeness alone.  As an experiment it can also follow the plates: likeness
+    finds an old memory, the plates bring what was said around it."""
+    from holonomic.sleep import gather_fragments
+    m = store(tmp_path)
+    now = time.time()
+    long_ago = now - 40 * DAY
+    a = m.remember("We planted tomatoes along the south fence in spring", kind="said_user", session="garden", created_at=long_ago)[0]
+    b = m.remember("The neighbour's dog dug up half of them the very next week", kind="said_user", session="garden", created_at=long_ago + 60)[0]
+    m.remember("The tomatoes along the fence are finally ripe this week", kind="said_user", session="today", created_at=now - 3600)
+    m.remember("I think I will make sauce from them at the weekend", kind="said_user", session="today", created_at=now - 3500)
+    plain = gather_fragments(m, {"dream_seeds": 2}, random.Random(1), now)
+    assert a in {f["id"] for f in plain} and b not in {f["id"] for f in plain}                 # by likeness: the planting, not the dog
+    assert all(f.get("via") in (None, "likeness") for f in plain)
+    linked = gather_fragments(m, {"dream_seeds": 2, "dream_links": 1}, random.Random(1), now)
+    got = {f["id"]: f for f in linked}
+    # tied to the old planting, or straight to the recent line that resembles it: either way it came off the plates
+    assert b in got and got[b]["via"] == "plates" and got[b]["linked_to"] in (a, got[a]["echo_of"]) and got[b]["age"] == "OLDER"
+    assert got[a]["via"] == "likeness"
+    # nothing recent comes in that way, and it changes nothing
+    assert all(f["age"] == "OLDER" for f in linked if f.get("via") == "plates")
+    assert m.linked(a, older_than=now - DAY, k=3)[0]["id"] == b and m.linked(a, older_than=long_ago - 1, k=3) == []
+    assert [x["id"] for x in m.linked(a, k=3, skip_kinds=("said_user",))] == []

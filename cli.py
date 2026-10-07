@@ -1289,6 +1289,8 @@ def _sleep(engine, cfg, args) -> None:
         _worker(engine, "sleep")
         return
     steps = [s.strip() for s in args.only.split(",")] if args.only else None
+    if getattr(args, "links", None) is not None:
+        cfg = dict(cfg, dream_links=max(0, int(args.links)))
     t0 = time.perf_counter()
     try:
         report = sleep_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
@@ -1311,7 +1313,10 @@ def _sleep(engine, cfg, args) -> None:
         print(f"  DREAM     skipped: {d['skipped']}")
     for n, d in enumerate(report.get("dreams") or [], 1):
         faded = sum(1 for f in d["fragments"] if f["faded"])
-        print(f"  DREAM {n}   from {len(d['fragments'])} fragments ({sum(1 for f in d['fragments'] if f['age'] == 'OLDER')} older, {faded} faded)")
+        by_plates = sum(1 for f in d["fragments"] if f.get("via") == "plates")
+        print(f"  DREAM {n}   from {len(d['fragments'])} fragments ({sum(1 for f in d['fragments'] if f['age'] == 'OLDER')} older, {faded} faded"
+              + (f"; {by_plates} of the older ones reached through the plates: "
+                 f"{', '.join('#' + str(f['id']) for f in d['fragments'] if f.get('via') == 'plates')}" if by_plates else "") + ")")
         print(f"            {d['text']}")
         print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
         for c in d["connections"]:
@@ -1512,6 +1517,8 @@ def register_cli(subparser) -> None:
     slp.add_argument("sleep_action", choices=["status", "on", "off", "now"], nargs="?", default="status")
     slp.add_argument("--dry-run", action="store_true", help="With 'now': show what would happen, store nothing")
     slp.add_argument("--only", help="With 'now': comma-separated steps to run (reflect,consolidate,fade,dream)")
+    slp.add_argument("--links", type=int, help="With 'now': for this run, let a dream also reach back through the plates: up to this "
+                                               "many older memories tied to each recent one (the dream_links setting; an experiment)")
     subs.add_parser("context", help="Show what memory gave the agent for the most recent message")
     fa = subs.add_parser("faces", help="Knowing particular people by their faces (off until you turn it on)")
     fa.add_argument("faces_action", nargs="?", default="status",

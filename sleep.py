@@ -53,6 +53,11 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_host": "",                 # empty = the reflection server
     "dream_temperature": 1.0,
     "dream_seeds": 4,                 # recent memories a dream starts from
+    # An experiment, off unless asked for.  A dream reaches into the past by likeness alone: older memories that
+    # resemble a recent one.  With this above 0 it also follows the plates: for each recent memory, up to this many
+    # older memories that the plates tie to it or to one of its echoes.  Likeness finds an old memory; the plates
+    # bring what was around it.
+    "dream_links": 0,
     # A busy stretch gets more dreams, not one longer dream: asked to fit many fragments into one, a
     # model stops blending them and starts listing them.  Each dream draws on all recent conversations.
     "dream_max_per_sleep": 3,
@@ -371,11 +376,23 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         seen.add(seed["id"])
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"],
                           "kind": seed["kind"]})
-        for echo in engine.echoes(seed["id"], older_than=since, k=2):
-            if echo["id"] not in seen and echo["kind"] not in skip:
+        echoed = []
+        for echo in engine.echoes(seed["id"], older_than=since, k=2, skip_kinds=skip):
+            if echo["id"] not in seen:
                 seen.add(echo["id"])
+                echoed.append(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],
-                                  "kind": echo["kind"], "echo_of": seed["id"]})
+                                  "kind": echo["kind"], "echo_of": seed["id"], "via": "likeness"})
+        room = max(0, int(sc["dream_links"]))
+        for origin in [seed["id"]] + echoed:             # what the plates tie to the memory itself, then to its echoes
+            if room <= 0:
+                break
+            for tied in engine.linked(origin, older_than=since, k=room, skip_kinds=skip):
+                if tied["id"] not in seen and len(tied["text"]) >= 25 and room > 0:
+                    seen.add(tied["id"])
+                    room -= 1
+                    fragments.append({"id": tied["id"], "text": tied["text"], "age": "OLDER", "strength": tied["strength"],
+                                      "kind": tied["kind"], "linked_to": origin, "via": "plates"})
     # What she saw lately, and older images it resembles.
     for seed in rng.sample(pictures, min(len(pictures), max(0, int(sc["dream_image_seeds"])))):
         seen.add(seed["id"])
@@ -465,7 +482,8 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
     result = {"text": text[:limit], "thoughts": thoughts, "connections": connections, "opens": opens,
               "fragments": [dict({"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])},
-                                 **({"image_id": f["image_id"]} if f.get("image_id") else {})) for f in fragments]}
+                                 **({"image_id": f["image_id"]} if f.get("image_id") else {}),
+                                 **({"via": f["via"]} if f.get("via") else {})) for f in fragments]}
     if dry_run:
         return result
     # Everything a dream produces is stored in the dream realm.  Its links to waking memories are

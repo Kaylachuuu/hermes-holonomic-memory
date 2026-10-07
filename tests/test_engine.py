@@ -163,3 +163,52 @@ def test_ollama_embedder_against_stub_server():
         srv.shutdown()
     with pytest.raises(EmbeddingError):
         OllamaEmbedder(host="http://127.0.0.1:9", timeout=1).embed(["x"])
+
+
+def test_echoes_look_at_age_before_taking_the_best_few(tmp_path):
+    """The likeliest candidates were taken first and their age checked afterwards.  With many recent memories
+    like the seed, they filled every place, and nothing older came back though something older fitted."""
+    import time
+    from conftest import track
+    from holonomic import HolonomicMemory, HashEmbedder
+    m = track(HolonomicMemory(tmp_path / "m", HashEmbedder()))
+    now = time.time()
+    old = m.remember("the lake at dusk with a heron standing in the shallows", kind="said_user", session="old", created_at=now - 30 * 86400)[0]
+    older_question = m.remember("the lake at dusk with a heron and a boat", kind="asked_user", session="old", created_at=now - 30 * 86400)[0]
+    recent = [m.remember(f"the lake at dusk with a heron standing near reed bed number {i}", kind="said_user", session=f"r{i}", created_at=now - 3600)[0]
+              for i in range(30)]
+    seed = m.remember("the lake at dusk with a heron standing quite still", kind="said_user", session="now", created_at=now)[0]
+    got = m.echoes(seed, older_than=now - 86400, k=2, low=0.05, high=0.999)
+    assert [e["id"] for e in got][:1] in ([old], [older_question]) and {e["id"] for e in got} == {old, older_question}
+    assert not set(recent) & {e["id"] for e in got}
+    # a kind the caller will not use is left out before the best are taken, not after
+    assert [e["id"] for e in m.echoes(seed, older_than=now - 86400, k=1, low=0.05, high=0.999, skip_kinds=("asked_user",))] == [old]
+    assert m.echoes(seed, older_than=now - 365 * 86400, k=2, low=0.05, high=0.999) == []      # nothing that old
+
+
+def test_a_plate_is_not_written_past_its_capacity(tmp_path):
+    """Capacity was a soft line: the room a write needed was estimated as though its terms were unrelated, and
+    the real energy measured afterwards.  Terms that agree add up to more, and a plate could end above it."""
+    from conftest import track
+    from holonomic import HolonomicMemory, HashEmbedder
+    m = track(HolonomicMemory(tmp_path / "m", HashEmbedder(), plate_capacity=24.0))
+    hub = m.remember("Kayla has a cat named Sushi", kind="said_user", session="s")[0]
+    for i in range(60):            # many near-identical conclusions bound to one source: the terms agree
+        m.remember(f"Kayla has a cat named Sushi, noted again {i % 3}", kind="fact", session="reflection", chain=False, links=[hub], salience=2.0)
+    loads = [float(r["load"]) for r in m._db.execute("SELECT load FROM plates ORDER BY id")]
+    assert len(loads) > 3 and max(loads) <= 24.0 + 1e-3
+    measured = [float(np.mean(np.abs(np.frombuffer(r["trace"], dtype=np.complex64)) ** 2)) for r in m._db.execute("SELECT trace FROM plates ORDER BY id")]
+    assert max(measured) <= 24.0 + 1e-3 and all(abs(a - b) < 1e-2 for a, b in zip(loads, measured))
+    # all but the last are closed, and the log still gives every plate back though one memory's terms may lie on two
+    assert [r["sealed"] for r in m._db.execute("SELECT sealed FROM plates ORDER BY id")][:-1] == [1] * (len(loads) - 1)
+    from holonomic import audit
+    v = audit.verify(m)
+    assert v["checked"] == v["agree"] == len(loads) and v["worst"] < 1e-4
+    assert len({r["plate_id"] for r in m._db.execute("SELECT plate_id FROM bindings")}) == len(loads)
+    # recall still works when a conversation runs across many small plates
+    lines = [m.remember(f"line {i}: {w} is discussed at length here", kind="said_user", session="talk")[0]
+             for i, w in enumerate(["tomatoes", "the lake", "assembly", "the boot sector", "sunsets", "a heron", "graphics cards", "glasses",
+                                    "network cables", "the mountain", "fireworks", "a tabby cat", "pine trees", "the airport", "coffee", "the moon"] * 3)]
+    found = sum(1 for x, y in zip(lines, lines[1:]) if x in {h.id for h in m.associates(y, k=10)})
+    assert found >= 0.9 * (len(lines) - 1) and m.stats()["plates"] > len(loads)
+    assert max(float(r["load"]) for r in m._db.execute("SELECT load FROM plates")) <= 24.0 + 1e-3

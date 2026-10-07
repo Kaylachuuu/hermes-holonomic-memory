@@ -548,17 +548,35 @@ class HolonomicMemory:
     def _write(self, realm: str, bindings: list[tuple]) -> None:
         """bindings: (cue, target phasor, target row, weight, cue memory id or None, cue key or None).
 
-        Every term added to the plate is also written to the log, in the transaction the caller holds open:
-        either both are kept or neither is."""
+        Every term added to a plate is also written to the log, in the transaction the caller holds open:
+        either both are kept or neither is.
+
+        A plate's capacity is kept to, term by term.  It used to be a soft line: the room a batch needed was
+        estimated from its weights before writing, as though the terms were unrelated, and the true energy
+        was measured only afterwards.  Terms that agree add up to more than that estimate, so a plate could
+        end above its capacity.  Now each term is tried against the plate as it stands; one that would take
+        the plate past capacity closes that plate and goes on the next."""
         if not bindings:
             return
-        i = self._plate_for(realm, sum(b[3] * b[3] for b in bindings))
-        pid = int(self._pid.a[i])
+        i = self._plate_for(realm, 0.0)
         now = time.time()
-        log = []
+        log, touched = [], []
         for cue, target, row, w, cue_memory, cue_key in bindings:
-            self._trace.a[i] += np.complex64(w) * cue * target
+            term = np.complex64(w) * cue * target
+            trace = self._trace.a[i] + term
+            load = float(np.mean(np.abs(trace) ** 2))
+            if load > self.plate_capacity and self._pload.a[i] > 0:      # full: this term starts the next plate
+                self._db.execute("UPDATE plates SET sealed = 1 WHERE id = ?", (int(self._pid.a[i]),))
+                self._open.pop(int(self._prealm.a[i]), None)
+                i = self._plate_for(realm, 0.0)
+                trace = self._trace.a[i] + term
+                load = float(np.mean(np.abs(trace) ** 2))
+            self._trace.a[i] = trace
             self._gate.a[i] += np.complex64(w) * cue
+            self._pload.a[i] = load
+            if i not in touched:
+                touched.append(i)
+            pid = int(self._pid.a[i])
             log.append((pid, cue_memory, cue_key, int(self._ids.a[row]), float(w), self._encoding, now))
             if row not in self._members[i]:
                 self._members[i].add(row)
@@ -569,10 +587,10 @@ class HolonomicMemory:
         # Load is the plate's measured energy, not a count of bindings: many similar
         # targets under one key add up coherently and use far more of the plate's
         # capacity than the same number of unrelated associations.
-        self._pload.a[i] = float(np.mean(np.abs(self._trace.a[i]) ** 2))
-        self._pgate.a[i] = float(np.mean(np.abs(self._gate.a[i]) ** 2))
-        self._db.execute("UPDATE plates SET trace = ?, gate = ?, load = ? WHERE id = ?",
-                         (self._trace.a[i].tobytes(), self._gate.a[i].tobytes(), float(self._pload.a[i]), pid))
+        for i in touched:
+            self._pgate.a[i] = float(np.mean(np.abs(self._gate.a[i]) ** 2))
+            self._db.execute("UPDATE plates SET trace = ?, gate = ?, load = ? WHERE id = ?",
+                             (self._trace.a[i].tobytes(), self._gate.a[i].tobytes(), float(self._pload.a[i]), int(self._pid.a[i])))
 
     def find_by_text(self, text: str, *, kind: str | None = None, realm: str = "waking") -> list[int]:
         sql, params = "SELECT id FROM memories WHERE forgotten = 0 AND realm = ? AND text = ?", [realm, text.strip()]
@@ -1120,10 +1138,15 @@ class HolonomicMemory:
 
     @_locked
     def echoes(self, memory_id: int, *, older_than: float, low: float = 0.25, high: float = 0.7, k: int = 3,
-               kinds: tuple[str, ...] | list[str] = (), realm: str = "waking") -> list[dict]:
+               kinds: tuple[str, ...] | list[str] = (), realm: str = "waking",
+               skip_kinds: tuple[str, ...] | list[str] = ()) -> list[dict]:
         """Older memories that resemble this one somewhat: related, but not the same thing
         said again.  Faded memories are included; this is how a dream reaches back.  Works
-        from the stored vectors, so it costs no embedding calls and strengthens nothing."""
+        from the stored vectors, so it costs no embedding calls and strengthens nothing.
+
+        Age and kind are decided before the best `k` are taken.  They used to be decided after: the likeliest
+        few candidates were taken first, and if those were all recent, or all of a kind the caller would not
+        use, nothing came back although older memories that fitted were a little further down."""
         row = self._row.get(memory_id)
         code = self._realm_codes.get(realm)
         if row is None or code is None:
@@ -1132,20 +1155,53 @@ class HolonomicMemory:
         ok = (self._realm.v == code) & (self._trust.v >= 0.15) & (sims >= low) & (sims <= high)
         if kinds:
             ok &= np.isin(self._kind.v, [self._kind_codes[x] for x in kinds if x in self._kind_codes])
-        candidates = [int(r) for r in np.argsort(-sims) if ok[r] and int(r) != row][:k * 6]
+        if skip_kinds:
+            ok &= ~np.isin(self._kind.v, [self._kind_codes[x] for x in skip_kinds if x in self._kind_codes])
+        ok[row] = False
+        if not ok.any():
+            return []
+        old = np.zeros(self._X.n, dtype=bool)
+        with self._lock:
+            for r in self._db.execute("SELECT id FROM memories WHERE forgotten = 0 AND realm = ? AND created_at < ?", (realm, older_than)):
+                at = self._row.get(r["id"])
+                if at is not None:
+                    old[at] = True
+        ok &= old
+        candidates = [int(r) for r in np.argsort(-sims) if ok[r]][:k]
         if not candidates:
             return []
         ids = [int(self._ids.a[r]) for r in candidates]
-        rows = {r["id"]: dict(r) for r in self._db.execute(
-            f"SELECT id, text, kind, session, created_at, strength FROM memories WHERE created_at < ? "
-            f"AND id IN ({','.join('?' * len(ids))})", [older_than] + ids)}
-        out = []
-        for r, mid in zip(candidates, ids):
-            if mid in rows:
-                out.append(dict(rows[mid], similarity=float(sims[r])))
-            if len(out) >= k:
-                break
-        return out
+        with self._lock:
+            rows = {r["id"]: dict(r) for r in self._db.execute(
+                f"SELECT id, text, kind, session, created_at, strength FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        return [dict(rows[mid], similarity=float(sims[r])) for r, mid in zip(candidates, ids) if mid in rows]
+
+    def linked(self, memory_id: int, *, older_than: float | None = None, k: int = 2, realm: str = "waking",
+               skip_kinds: tuple[str, ...] | list[str] = ()) -> list[dict]:
+        """What the plates tie to this memory, strongest first: read off the plates with the memory as the cue.
+        With `older_than`, only memories from before then.  Faded memories are included and nothing is
+        strengthened: this is for dreaming, which reaches back without disturbing what it finds."""
+        with self._lock, _single_threaded():
+            self._sync()
+            row = self._row.get(memory_id)
+            code = self._realm_codes.get(realm)
+            if row is None or code is None:
+                return []
+            found = self._probe(self._cue(self._phasor_of(row)), [code])
+            skip = {self._kind_codes[x] for x in skip_kinds if x in self._kind_codes}
+            rows = [(r, sc) for r, sc in found.items()
+                    if r != row and self._trust.a[r] >= 0.15 and int(self._kind.a[r]) not in skip]
+            if not rows:
+                return []
+            ids = [int(self._ids.a[r]) for r, _ in rows]
+            sql = f"SELECT id, text, kind, session, created_at, strength FROM memories WHERE forgotten = 0 AND id IN ({','.join('?' * len(ids))})"
+            params: list = list(ids)
+            if older_than is not None:
+                sql, params = sql + " AND created_at < ?", params + [older_than]
+            kept = {r["id"]: dict(r) for r in self._db.execute(sql, params)}
+            out = [dict(kept[int(self._ids.a[r])], link=float(min(1.0, sc))) for r, sc in sorted(rows, key=lambda t: -t[1])
+                   if int(self._ids.a[r]) in kept]
+            return out[:k]
 
     @_locked
     def set_trust(self, memory_id: int, trust: float) -> bool:

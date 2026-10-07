@@ -650,6 +650,28 @@ hermes holonomic forget 52 --yes
 recalled memories, what was seen in an attached image, what was recognised. When she does not act on
 something, look there first to see whether she was told it.
 
+## Three things a reading of the engine turned up
+
+**Older memories were crowded out of dreams.** A dream reaches back through `echoes()`: older memories that
+resemble a recent one. It took the likeliest few candidates first and checked their age afterwards, so when
+those were all recent, nothing older came back though something older fitted further down. Age, and the kinds
+a dream does not use, are now decided before the best few are taken.
+
+**Dreams can follow the plates (an experiment, off by default).** A dream reached the past by likeness alone,
+without reading a plate. With `dream_links` above 0 it also takes, for each recent memory, up to that many
+older memories the plates tie to it or to one of its echoes: likeness finds an old memory, the plates bring
+what was said around it. Try it without keeping anything:
+
+    hermes holonomic sleep now --only dream --dry-run --links 1
+
+The report says which fragments were reached through the plates.
+
+**A plate's capacity is kept to.** It was a soft line: the room a write needed was estimated from its weights,
+as though its terms were unrelated, and the true energy measured afterwards. Terms that agree add up to more,
+so a plate could end above capacity (in one real store, 133 against 128). Each term is now tried against the
+plate as it stands, and one that would take it past capacity closes that plate and goes on the next. A
+memory's terms may therefore lie on two plates; the write log records the plate of each.
+
 ## Seeing what happens in the background
 
 Unattended reflection, sleep and the describing of images are done by a worker inside Hermes, while Hermes is
