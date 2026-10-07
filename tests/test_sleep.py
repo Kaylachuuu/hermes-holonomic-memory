@@ -516,6 +516,19 @@ def test_the_background_worker_says_what_it_is_doing_and_why_not(tmp_path):
         failed = note()
         assert failed["last_sleep_error"] == "RuntimeError: the dream model fell over" and failed["doing"] is None
         assert "the last attempt failed; it will try again in" in failed["sleep_waits_for"]
+        # one task falling over does not stop the others being tried, and is said
+        r._sleep_retry_at = 0.0
+        ran = []
+        sl.sleep_once = lambda engine, cfg_, **kw: ran.append(1) or {"errors": [], "episodes": [], "dream": None}
+        real_images = r.images_if_due
+        r.images_if_due = lambda: (_ for _ in ()).throw(KeyError("faces"))
+        r.once()
+        assert ran == [1] and r.stumbles["describing images"].startswith("KeyError: 'faces' (at ")
+        r.note()
+        assert "describing images" in note()["stumbles"]
+        r.images_if_due = real_images
+        r.once()
+        assert "describing images" not in r.stumbles
     finally:
         sl.sleep_once = real
         r.stop()
@@ -549,6 +562,10 @@ def test_cli_status_shows_the_background_worker(tmp_path):
         worker._begin("sleeping")
         text = run("sleep", "status")
         assert "it is sleeping now, and has been for" in text and "the last sleep reported: RuntimeError: the dream model fell over" in text
+        worker.stumbles["describing images"] = "KeyError: 'faces' (at images.py:1)"
+        worker.note()
+        assert "describing images cannot even be checked, every half minute: KeyError" in run("sleep", "status")
+        worker.stumbles.clear()
         worker._end()
         # Hermes closed: the last word from the worker is old, and the status says nobody is there
         p.shutdown()

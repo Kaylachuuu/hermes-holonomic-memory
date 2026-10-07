@@ -211,6 +211,8 @@ def _worker(engine, what: str) -> None:
         name = "sleep" if what == "sleep" else "reflection"
         if not state.get("doing"):
             print(f"    {name} is due and should start within half a minute" if not why else f"    {name} is waiting: {why}")
+    for task, error in (state.get("stumbles") or {}).items():
+        print(f"    {task} cannot even be checked, every half minute: {error}")
     for key, label in (("last_sleep_error", "the last sleep"), ("last_reflection_error", "the last reflection"),
                        ("last_image_error", "describing images")):
         if state.get(key) and (what == "sleep" or key != "last_sleep_error"):

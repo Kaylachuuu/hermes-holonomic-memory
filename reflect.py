@@ -1122,6 +1122,7 @@ class IdleReflector:
         self.last_sleep_error = ""
         self._images_retry_at = 0.0
         self._sleep_retry_at = 0.0
+        self.stumbles: Dict[str, str] = {}           # task -> the error that stopped it being checked at all
         self.doing: Optional[str] = None             # "sleeping", "reflecting", "describing images", or nothing
         self.doing_since = 0.0
         self._stop = threading.Event()
@@ -1172,12 +1173,13 @@ class IdleReflector:
                 "doing": self.doing, "doing_since": self.doing_since if self.doing else None,
                 "sleep_waits_for": sleep_why, "reflection_waits_for": reflect_why,
                 "last_sleep_error": self.last_sleep_error, "last_reflection_error": self.last_error,
-                "last_image_error": self.last_image_error}
+                "last_image_error": self.last_image_error, "stumbles": dict(self.stumbles)}
 
     def note(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         try:
             path = Path(self.engine.path) / "worker.json"
-            tmp = path.with_suffix(".json.part")
+            # A name of its own for the half-written file: two writers sharing one wrote over each other.
+            tmp = path.with_name(f"worker.{os.getpid()}.{threading.get_ident()}.part")
             tmp.write_text(json.dumps(self.state(cfg)), encoding="utf-8")
             os.replace(tmp, path)
         except Exception as exc:
@@ -1278,13 +1280,21 @@ class IdleReflector:
             self._busy.release()
             self._end()
 
+    def once(self) -> None:
+        """One round of the worker.  Each task stands alone: the three used to share one guard, so a task that
+        raised stopped the ones after it from ever being tried, round after round, and said nothing."""
+        for name, task in (("describing images", self.images_if_due), ("reflection", self.run_if_due), ("sleep", self.sleep_if_due)):
+            try:
+                task()
+                self.stumbles.pop(name, None)
+            except Exception as exc:                   # never let the worker die, and never let one task stop another
+                import traceback
+                where = traceback.extract_tb(exc.__traceback__)[-1]
+                self.stumbles[name] = f"{exc.__class__.__name__}: {exc} (at {Path(where.filename).name}:{where.lineno})"[:400]
+                logger.warning("holonomic: %s could not be checked: %s", name, self.stumbles[name])
+
     def _loop(self) -> None:
         self.note()
         while not self._stop.wait(self.poll_seconds):
-            try:
-                self.images_if_due()
-                self.run_if_due()
-                self.sleep_if_due()
-            except Exception as exc:                   # never let the worker die
-                logger.debug("holonomic: reflector loop error: %s", exc)
+            self.once()
             self.note()
