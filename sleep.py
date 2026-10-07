@@ -806,14 +806,28 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
     return report
 
 
-def sleep_due(engine, cfg: Dict[str, Any], last_activity: float, now: Optional[float] = None) -> bool:
+def sleep_wait(engine, cfg: Dict[str, Any], last_activity: float, now: Optional[float] = None) -> str:
+    """Why unattended sleep is not due yet, in words; empty when it is due.  Said out loud because a sleep that
+    does not come is otherwise a guess: is it switched off, too soon, not quiet enough, or is nobody there?"""
     sc = sleep_config(cfg)
     rc = _reflect.reflect_config(cfg)
     now = time.time() if now is None else now
-    if not sc["sleep_enabled"] or not rc["reflect_model"]:
-        return False
+    if not sc["sleep_enabled"]:
+        return "unattended sleep is switched off"
+    if not rc["reflect_model"]:
+        return "no reflection model is set"
     last = float(engine.kv_get("sleep:last_run", "0") or 0)
-    if now - last_activity < float(sc["sleep_idle_seconds"]) or now - last < float(sc["sleep_min_hours"]) * 3600:
-        return False
+    need = float(sc["sleep_min_hours"]) * 3600
+    if now - last < need:
+        return f"the last sleep was {(now - last) / 3600:.1f} hours ago, and there are at least {sc['sleep_min_hours']} hours between sleeps"
+    quiet, wanted = now - last_activity, float(sc["sleep_idle_seconds"])
+    if quiet < wanted:
+        return f"it has been quiet for {quiet / 60:.1f} of the {wanted / 60:.0f} minutes it waits for"
     newest = engine.recent(1)
-    return bool(newest) and newest[0]["created_at"] > last          # something has happened since the last sleep
+    if not newest or newest[0]["created_at"] <= last:
+        return "nothing has happened since the last sleep"
+    return ""
+
+
+def sleep_due(engine, cfg: Dict[str, Any], last_activity: float, now: Optional[float] = None) -> bool:
+    return not sleep_wait(engine, cfg, last_activity, now)

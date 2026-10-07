@@ -461,3 +461,103 @@ def test_cli_relabel(tmp_path):
     finally:
         embed.OllamaEmbedder = keep
         sys.modules.pop("hermes_constants", None)
+
+
+def test_the_background_worker_says_what_it_is_doing_and_why_not(tmp_path):
+    """Sleep did not come, and nothing could say why: the command runs in another program and could not see
+    whether Hermes was there, whether it was quiet enough, or whether a sleep had been tried and failed."""
+    from holonomic import reflect, sleep as sl
+    m = store(tmp_path)
+    talk(m, "s-old", time.time() - 2 * DAY, OS)
+    cfg = {"sleep_enabled": True, "reflect_enabled": True, "reflect_model": "gemma", "sleep_idle_seconds": 300, "sleep_min_hours": 12,
+           "reflect_min_new": 500}
+    r = reflect.IdleReflector(m, lambda: cfg, poll_seconds=3600)
+    real = sl.sleep_once
+    try:
+        note = lambda: json.loads((m.path / "worker.json").read_text())
+        r.note()
+        first = note()
+        assert first["doing"] is None and first["pid"] > 0 and abs(first["at"] - time.time()) < 5
+        assert "it has been quiet for 0.0 of the 5 minutes" in first["sleep_waits_for"]              # she has only just spoken
+        assert "new memories are waiting, and it starts at 500" in first["reflection_waits_for"]
+        assert sl.sleep_wait(m, dict(cfg, sleep_enabled=False), 0) == "unattended sleep is switched off"
+        assert sl.sleep_wait(m, dict(cfg, reflect_model=""), 0) == "no reflection model is set"
+        assert r.sleep_if_due() is None                                                          # not quiet yet
+        # quiet long enough: it sleeps, and says so while it does
+        r.last_activity = time.time() - 600
+        r.note()
+        assert note()["sleep_waits_for"] == ""
+        during = {}
+
+        def asleep(engine, cfg_, **kw):
+            during.update(note())
+            return real(engine, cfg_, llm=lambda system, user, step: {
+                "propose": EMPTY_REFLECTION, "check": EMPTY_REFLECTION, "profiles": EMPTY_REFLECTION,
+                "consolidate": json.dumps({"summary": "We talked about the operating system she began twenty years ago and wants to resume."}),
+                "dream": json.dumps({"dream": "The operating system is a house and every room boots slowly, one sector at a time, while a child sleeps upstairs."}),
+                "wake": json.dumps({"thoughts": "Mostly odd.", "connections": []})}[step], rng=random.Random(1), **kw)
+        sl.sleep_once = asleep
+        report = r.sleep_if_due()
+        assert report and report["dream"]["id"] and during["doing"] == "sleeping" and during["doing_since"]
+        after = note()
+        assert after["doing"] is None and "hours ago, and there are at least 12 hours between sleeps" in after["sleep_waits_for"]
+        assert after["last_sleep_error"] == "" and m.kv_get("sleep:last_run")
+        # a sleep that fails outright is recorded, and not tried again every half minute
+        m.kv_set("sleep:last_run", "0")
+        m.remember("Something new to sleep on about the garden", kind="said_user", session="s2")
+        r.last_activity = time.time() - 600
+        calls = []
+
+        def broken(engine, cfg_, **kw):
+            calls.append(1)
+            raise RuntimeError("the dream model fell over")
+        sl.sleep_once = broken
+        assert r.sleep_if_due() is None and r.sleep_if_due() is None and len(calls) == 1
+        failed = note()
+        assert failed["last_sleep_error"] == "RuntimeError: the dream model fell over" and failed["doing"] is None
+        assert "the last attempt failed; it will try again in" in failed["sleep_waits_for"]
+    finally:
+        sl.sleep_once = real
+        r.stop()
+
+
+def test_cli_status_shows_the_background_worker(tmp_path):
+    if not HAVE_HERMES: return
+    import argparse, contextlib, io
+    p = make(tmp_path)
+    p.sync_turn("My name is Kayla and I build memory systems for fun", "Nice to meet you, Kayla.", session_id="s1")
+    home = tmp_path / "home"
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    try:
+        import holonomic.cli as cli, holonomic.embed as embed
+        from holonomic.provider import reflector_for
+        keep = embed.OllamaEmbedder
+        embed.OllamaEmbedder = lambda *x, **k: HashEmbedder()
+        parser = argparse.ArgumentParser(); cli.register_cli(parser)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                args = parser.parse_args(list(argv)); args.func(args)
+            return out.getvalue()
+        worker = reflector_for(p._engine)
+        worker.note({"sleep_enabled": True, "reflect_model": "gemma", "sleep_idle_seconds": 300, "reflect_enabled": True})
+        text = run("sleep", "status")
+        assert "in the background: Hermes is running" in text and "sleep is waiting: it has been quiet for" in text
+        assert "reflection is waiting:" in run("reflect", "status")
+        worker.last_sleep_error = "RuntimeError: the dream model fell over"
+        worker._begin("sleeping")
+        text = run("sleep", "status")
+        assert "it is sleeping now, and has been for" in text and "the last sleep reported: RuntimeError: the dream model fell over" in text
+        worker._end()
+        # Hermes closed: the last word from the worker is old, and the status says nobody is there
+        p.shutdown()
+        state = json.loads((home / "holonomic" / "worker.json").read_text())
+        state["at"] -= 3600
+        (home / "holonomic" / "worker.json").write_text(json.dumps(state))
+        assert "no Hermes is running with this memory right now" in run("sleep", "status")
+        (home / "holonomic" / "worker.json").unlink()
+        assert "in the background: nothing on record" in run("sleep", "status")
+    finally:
+        embed.OllamaEmbedder = keep
+        sys.modules.pop("hermes_constants", None)

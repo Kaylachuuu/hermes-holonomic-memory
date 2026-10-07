@@ -29,11 +29,13 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import re
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -1117,7 +1119,11 @@ class IdleReflector:
         self.last_activity = time.time()
         self.last_error = ""
         self.last_image_error = ""
+        self.last_sleep_error = ""
         self._images_retry_at = 0.0
+        self._sleep_retry_at = 0.0
+        self.doing: Optional[str] = None             # "sleeping", "reflecting", "describing images", or nothing
+        self.doing_since = 0.0
         self._stop = threading.Event()
         self._busy = threading.Lock()
         maker = spawn or (lambda target, name: threading.Thread(target=target, name=name, daemon=True))
@@ -1130,16 +1136,66 @@ class IdleReflector:
     def stop(self) -> None:
         self._stop.set()
 
-    def due(self, cfg: Dict[str, Any]) -> bool:
+    def wait(self, cfg: Dict[str, Any]) -> str:
+        """Why reflection is not due yet, in words; empty when it is due."""
         rc = reflect_config(cfg)
-        return (bool(rc["reflect_enabled"]) and bool(rc["reflect_model"])
-                and time.time() - self.last_activity >= float(rc["reflect_idle_seconds"])
-                and pending(self.engine) >= int(rc["reflect_min_new"]))
+        if not rc["reflect_enabled"]:
+            return "unattended reflection is switched off"
+        if not rc["reflect_model"]:
+            return "no reflection model is set"
+        waiting, wanted = pending(self.engine), int(rc["reflect_min_new"])
+        if waiting < wanted:
+            return f"{waiting} new memories are waiting, and it starts at {wanted}"
+        quiet, need = time.time() - self.last_activity, float(rc["reflect_idle_seconds"])
+        if quiet < need:
+            return f"it has been quiet for {quiet / 60:.1f} of the {need / 60:.0f} minutes it waits for"
+        return ""
+
+    def due(self, cfg: Dict[str, Any]) -> bool:
+        return not self.wait(cfg)
+
+    # ---- being seen from outside.  The commands run in another program and cannot look inside this one, so
+    # ---- what this worker is doing, and why it is not doing something, is written where they can read it.
+
+    def state(self, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from . import sleep as _sleep
+        cfg = cfg if cfg is not None else self.load_cfg()
+        now = time.time()
+        try:
+            sleep_why = _sleep.sleep_wait(self.engine, cfg, self.last_activity, now)
+            if not sleep_why and now < self._sleep_retry_at:
+                sleep_why = f"the last attempt failed; it will try again in {(self._sleep_retry_at - now) / 60:.0f} minutes"
+            reflect_why = self.wait(cfg)
+        except Exception as exc:
+            sleep_why = reflect_why = f"could not be worked out ({exc})"
+        return {"at": now, "pid": os.getpid(), "poll_seconds": self.poll_seconds, "last_activity": self.last_activity,
+                "doing": self.doing, "doing_since": self.doing_since if self.doing else None,
+                "sleep_waits_for": sleep_why, "reflection_waits_for": reflect_why,
+                "last_sleep_error": self.last_sleep_error, "last_reflection_error": self.last_error,
+                "last_image_error": self.last_image_error}
+
+    def note(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            path = Path(self.engine.path) / "worker.json"
+            tmp = path.with_suffix(".json.part")
+            tmp.write_text(json.dumps(self.state(cfg)), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.debug("holonomic: could not note the worker's state: %s", exc)
+
+    def _begin(self, what: str) -> None:
+        self.doing, self.doing_since = what, time.time()
+        self.note()
+
+    def _end(self) -> None:
+        self.doing = None
+        self.note()
 
     def run_if_due(self) -> Optional[Dict[str, Any]]:
         cfg = self.load_cfg()
         if not self.due(cfg) or not self._busy.acquire(blocking=False):
             return None
+        self._begin("reflecting")
         try:
             report = reflect_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
             self.last_error = ""
@@ -1152,25 +1208,33 @@ class IdleReflector:
             return None
         finally:
             self._busy.release()
+            self._end()
 
     def sleep_if_due(self) -> Optional[Dict[str, Any]]:
         """The long-idle cycle (see sleep.py): reflect, consolidate, fade, dream."""
         from . import sleep as _sleep                  # sleep imports this module, so not at the top
         cfg = self.load_cfg()
+        if time.time() < self._sleep_retry_at:
+            return None
         if not _sleep.sleep_due(self.engine, cfg, self.last_activity) or not self._busy.acquire(blocking=False):
             return None
+        self._begin("sleeping")
         try:
             report = _sleep.sleep_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
-            self.last_error = "; ".join(report["errors"])
+            self.last_sleep_error = "; ".join(report["errors"])
             logger.info("holonomic: slept: %d conversation(s) summarised, dream %s",
                         len(report["episodes"]), "yes" if (report.get("dream") or {}).get("id") else "no")
             return report
         except Exception as exc:
-            self.last_error = str(exc)
+            # A sleep that fails outright is not tried again every half minute: it would run the reflection
+            # model flat out, and the reason would be gone before anyone looked.
+            self.last_sleep_error = f"{exc.__class__.__name__}: {exc}"[:500]
+            self._sleep_retry_at = time.time() + 600.0
             logger.warning("holonomic: sleep failed: %s", exc)
             return None
         finally:
             self._busy.release()
+            self._end()
 
     def images_if_due(self) -> Optional[Dict[str, Any]]:
         """Describe images that are waiting (see images.py): any whose description failed when it was shown,
@@ -1191,6 +1255,7 @@ class IdleReflector:
         prints = prints or (_faces.faces_on(cfg) and (_faces.waiting(self.engine) or self.engine.kv_get("faces:look_again") == "1"))
         if not (waiting["images"] or (ic["image_sections"] and waiting["sections"]) or prints) or not self._busy.acquire(blocking=False):
             return None
+        self._begin("describing images")
         try:
             report = _images.process(self.engine, cfg, key_fn=self.key_fn, should_stop=lambda: self._stop.is_set() or not idle())
             self.last_image_error = "; ".join(report["errors"])
@@ -1211,8 +1276,10 @@ class IdleReflector:
             return None
         finally:
             self._busy.release()
+            self._end()
 
     def _loop(self) -> None:
+        self.note()
         while not self._stop.wait(self.poll_seconds):
             try:
                 self.images_if_due()
@@ -1220,3 +1287,4 @@ class IdleReflector:
                 self.sleep_if_due()
             except Exception as exc:                   # never let the worker die
                 logger.debug("holonomic: reflector loop error: %s", exc)
+            self.note()

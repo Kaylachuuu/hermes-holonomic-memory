@@ -187,6 +187,36 @@ def _library_cmd(engine, cfg, args) -> None:
         lib.close_all(root)
 
 
+def _worker(engine, what: str) -> None:
+    """What the background worker inside Hermes last said about itself.  These commands run in a program of
+    their own and cannot look inside Hermes, so the worker writes its state down every half minute."""
+    import json
+    try:
+        state = json.loads((engine.path / "worker.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("  in the background: nothing on record. Unattended work is done by Hermes while it is open; "
+              "no Hermes with this version has run yet.")
+        return
+    age = time.time() - float(state.get("at", 0))
+    fresh = age <= 3 * float(state.get("poll_seconds", 30)) + 30 or state.get("doing")
+    if not fresh:
+        print(f"  in the background: no Hermes is running with this memory right now (last heard from {_when(state['at'])}, "
+              f"{age / 60:.0f} minutes ago). Unattended work only happens while Hermes is open.")
+    else:
+        quiet = (float(state["at"]) - float(state.get("last_activity", state["at"]))) / 60
+        print(f"  in the background: Hermes is running (heard from {age:.0f} s ago); the conversation has been quiet for {quiet:.1f} minutes")
+        if state.get("doing"):
+            print(f"    it is {state['doing']} now, and has been for {(time.time() - float(state['doing_since'])) / 60:.1f} minutes")
+        why = state.get("sleep_waits_for" if what == "sleep" else "reflection_waits_for")
+        name = "sleep" if what == "sleep" else "reflection"
+        if not state.get("doing"):
+            print(f"    {name} is due and should start within half a minute" if not why else f"    {name} is waiting: {why}")
+    for key, label in (("last_sleep_error", "the last sleep"), ("last_reflection_error", "the last reflection"),
+                       ("last_image_error", "describing images")):
+        if state.get(key) and (what == "sleep" or key != "last_sleep_error"):
+            print(f"    {label} reported: {state[key]}")
+
+
 def _plates_cmd(engine, cfg, args) -> None:
     """Read-only: whether the write log accounts for the plates, and what the plates do at recall."""
     from . import audit
@@ -1236,6 +1266,7 @@ def _sleep(engine, cfg, args) -> None:
         print(f"  dream model: {sc['dream_model'] or cfg.get('reflect_model') or '(not set)'}")
         print(f"  waiting: {pending(engine)} memories to reflect on, {len(unfinished_business(engine, cfg))} conversation(s) to summarise")
         print(f"  last sleep: {_when(float(last)) if last else 'never'}")
+        _worker(engine, "sleep")
         return
     steps = [s.strip() for s in args.only.split(",")] if args.only else None
     t0 = time.perf_counter()
@@ -1443,6 +1474,7 @@ def _reflect(engine, cfg, args) -> None:
     print(f"  runs when: {rc['reflect_min_new']} new memories and {rc['reflect_idle_seconds']} s of quiet")
     print(f"  memories waiting: {pending(engine)}")
     print(f"  last run: {_when(float(last_run)) if last_run else 'never'}")
+    _worker(engine, "reflect")
 
 
 def register_cli(subparser) -> None:

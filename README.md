@@ -650,6 +650,20 @@ hermes holonomic forget 52 --yes
 recalled memories, what was seen in an attached image, what was recognised. When she does not act on
 something, look there first to see whether she was told it.
 
+## Seeing what happens in the background
+
+Unattended reflection, sleep and the describing of images are done by a worker inside Hermes, while Hermes is
+open. The commands run in a program of their own and cannot look inside Hermes, so the worker writes down,
+every half minute, what it is doing and why it is not doing something else (`<data>/worker.json`).
+`hermes holonomic sleep status` and `reflect status` read it:
+
+    in the background: Hermes is running (heard from 12 s ago); the conversation has been quiet for 3.2 minutes
+      sleep is waiting: it has been quiet for 3.2 of the 5 minutes it waits for
+
+or that it is sleeping now and for how long, or what the last sleep reported, or that no Hermes is running
+with this memory at all. A sleep that fails outright is recorded and tried again after ten minutes, not every
+half minute.
+
 ## The write log, and looking into the plates
 
 Every term added to a plate is recorded: which plate, what the cue was made from (a memory, or a key's text),
