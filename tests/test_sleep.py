@@ -727,3 +727,41 @@ def test_the_worker_outlives_the_agent_and_the_quiet_clock_outlives_the_worker(t
     finally:
         prov.KEEP_WORKER = keep
         prov.close_everything()
+
+
+def test_awake_she_does_not_call_the_users_life_her_own(tmp_path):
+    """After a dream made from the user's operating system and the user's cat she said it was 'a strange blend of my
+    technical work and my personal life'.  And the dream itself named things the_way_code_does."""
+    from holonomic.sleep import sleep_once, dreams, plain_words, claims_her_life
+    assert plain_words("into the_hidden_layers for a ritual_of_passage, _truly_, at 0x21") == "into the hidden layers for a ritual of passage, truly, at 0x21"
+    assert claims_her_life("a strange blend of my technical work and my personal life") == "my technical work"
+    assert claims_her_life("It put my cat on a server.") == "my cat"
+    for hers in ("It mixed my memories of her 52-byte optimization with her cat Sushi.", "I liked my dream.", "Kayla's work, as I remember it."):
+        assert claims_her_life(hers) == ""
+    m = store(tmp_path)
+    talk(m, "s-old", NOW - 20 * DAY, OS)
+    talk(m, "s-new", NOW - DAY, [("said_user", "I planted an assembly of herbs in the garden twenty steps from the door"),
+                                 ("said_user", "The garden project started again after years of waiting")])
+    dream_text = "I am kneeling in the_hidden_garden and the herbs grow in rows of assembly, each leaf a ritual_of_passage. " * 2
+    asked = []
+    AGAIN = "wake (again: it called the user's life its own)"
+
+    def wake(user):
+        asked.append(user)
+        if len(asked) == 1:
+            return json.dumps({"thoughts": "It was a strange blend of my technical work and my personal life.", "connections": []})
+        return json.dumps({"thoughts": "It was a strange blend of Kayla's operating system and her garden.", "connections": []})
+    report = sleep_once(m, {}, llm=fake({"dream": json.dumps({"dream": dream_text.strip()}), "wake": wake, AGAIN: wake}), steps=["dream"],
+                        rng=random.Random(3), now=NOW)
+    assert len(asked) == 2 and 'Your last answer said "my technical work"' in asked[1] and not report["errors"]
+    kept = dreams(m, 1)[0]
+    assert kept["thoughts"] == "It was a strange blend of Kayla's operating system and her garden."
+    assert "_" not in kept["text"] and "the hidden garden" in kept["text"] and "ritual of passage" in kept["text"]
+    # if she says it again, what she said is kept and the slip is reported, not hidden
+    m2 = track(HolonomicMemory(tmp_path / "m2", HashEmbedder()))
+    talk(m2, "s-old", NOW - 20 * DAY, OS)
+    talk(m2, "s-new", NOW - DAY, GARDEN)
+    said = json.dumps({"thoughts": "It was a strange blend of my technical work and my garden.", "connections": []})
+    stuck = fake({"dream": json.dumps({"dream": dream_text.strip()}), "wake": said, AGAIN: said})
+    report = sleep_once(m2, {}, llm=stuck, steps=["dream"], rng=random.Random(3), now=NOW)
+    assert any('she spoke of "my technical work" as her own' in e for e in report["errors"]) and report["dream"]["id"]

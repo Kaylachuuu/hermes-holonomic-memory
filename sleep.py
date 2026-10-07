@@ -152,13 +152,16 @@ in a dream you may find yourself inside them.
 Write "dream": the dream you have, in the first person and the present tense, 100 to 180 words. Let the fragments \
 blend, shift and stand in for one another the way they do in dreams: places change, one thing becomes another, an \
 old memory walks into a new one. It should feel like a dream, not a summary, and it does not have to make sense. \
-Do not explain it and do not list the fragments."""
+Do not explain it and do not list the fragments. Write ordinary prose: never join words with underscores the way \
+code names things."""
 
 _WAKE = """\
 You are an AI assistant, now awake, rereading a dream you just had. Below are the dream and the numbered memory \
 fragments it was made from. RECENT fragments are from the last few days; OLDER ones are from before. Each is marked \
-with whose words it is: things "said to me" are the user's own life and work, not yours. Awake, keep that straight, \
-and never write "the user": call them by their name, which is in what you know about them below.
+with whose words it is: things "said to me" are the user's own life and work, not yours. Awake, keep that straight: \
+their work, their projects, their home, their animals and their photos are theirs, so never "my work" or "my life" \
+for those. What is yours is the dream and your memory of what you were told. Never write "the user": call them by \
+their name, which is in what you know about them below.
 
 Write:
 - "thoughts": one or two plain sentences, first person, on what you make of the dream now that you are awake, said \
@@ -237,6 +240,26 @@ def _lines(memories: List[dict], max_chars: int = 9000) -> str:
         out.append(line)
         used += len(line) + 1
     return "\n".join(out)
+
+
+def plain_words(text: str) -> str:
+    """Words joined with underscores, written apart.  After reading a library of source code the dreamer wrote
+    phrases the way code names things: 'the_hidden_layers', 'ritual_of_passage'."""
+    text = re.sub(r"(?<=[A-Za-z])_+(?=[A-Za-z])", " ", text)
+    return re.sub(r"(?<![A-Za-z0-9])_+(?=[A-Za-z])|(?<=[A-Za-z])_+(?![A-Za-z0-9])", "", text)
+
+
+# Awake, the dreamer sometimes speaks of the user's life as its own: 'a strange blend of my technical work and my
+# personal life', of a dream made from the user's operating system and the user's cat.  The fragments are marked
+# with whose they are and the prompt says so; this is the check that it held.
+_MINE = re.compile(r"\bmy\s+(?:own\s+)?(?:[a-z-]+\s+){0,2}?(work|life|project|projects|code|job|career|cat|cats|pet|pets|home|house|family|"
+                   r"photo|photos|pictures|childhood|past|youth|hardware|computer|server|os|operating system)\b", re.I)
+
+
+def claims_her_life(thoughts: str) -> str:
+    """The words in which the user's life is called the dreamer's own, or '' if there are none."""
+    found = _MINE.search(thoughts or "")
+    return found.group(0) if found else ""
 
 
 def _ask_text(call: Callable[..., str], step: str, system: str, prompt: str, schema: dict, max_tokens: int, key: str,
@@ -461,6 +484,7 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
         text = _ask_text(call, "dream" + label, "You are dreaming. Reply with JSON only. " + NO_DOUBLE_QUOTES,
                          _DREAM.replace("100 to 180 words", f"{low} to {high} words") + variety + "\n\nFRAGMENTS:\n" + listing,
                          _DREAM_SCHEMA, max(700, high * 4), "dream", float(sc["dream_temperature"]))
+        text = plain_words(text)
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
         numbered = "\n".join(f"[{f['id']}] {f['age']} ({_voice(f['kind'])}): {' '.join(f['text'].split())}" for f in fragments)
@@ -480,6 +504,22 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
             woke, thoughts = (again, retry) if is_complete(retry) else (woke, trim_to_sentence(thoughts))
         except ReflectionError:
             thoughts = trim_to_sentence(thoughts)
+    slip = claims_her_life(thoughts)
+    if slip:                                         # the user's life called her own: ask once more, saying which words
+        try:
+            again = _parse(call("wake (again: it called the user's life its own)", _reflect._SYSTEM, wake_prompt
+                                + f"\n\nYour last answer said \"{slip}\". That is not yours: the work, the life, the animals and the "
+                                "photos in the fragments belong to the person you talk with. Write it again, naming them or "
+                                "saying her, his or their. What is yours is the dream and your memory of what you were told.",
+                                _WAKE_SCHEMA, 500, 0.2))
+            retry = trim_to_sentence(" ".join(str(again.get("thoughts") or "").split())[:500])
+            if retry and not claims_her_life(retry):
+                woke, thoughts = again, retry
+            else:
+                report["errors"].append(f"dream{label}: awake, she spoke of \"{slip}\" as her own, and again when asked to put it right")
+        except ReflectionError:
+            report["errors"].append(f"dream{label}: awake, she spoke of \"{slip}\" as her own; asking again failed")
+    thoughts = plain_words(thoughts)
     connections = [c for c in _reflect._clean_items(woke.get("connections"), recent_ids | older_ids, 2)
                    if set(c["sources"]) & recent_ids and set(c["sources"]) & older_ids]      # must bridge new and old
     result = {"text": text[:limit], "thoughts": thoughts, "connections": connections, "opens": opens,

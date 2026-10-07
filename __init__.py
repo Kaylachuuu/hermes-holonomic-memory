@@ -10,7 +10,7 @@ provider's dependencies after it has been chosen, so the package has to load
 before numpy is there.
 """
 
-__version__ = "0.19.3"
+__version__ = "0.19.4"
 __all__ = ["HolonomicMemory", "Recollection", "OllamaEmbedder", "HashEmbedder", "EmbeddingError", "register"]
 
 _LAZY = {"HolonomicMemory": "engine", "Recollection": "engine",
