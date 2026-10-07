@@ -12,6 +12,14 @@ next morning's talk.
     <data>/libraries/<name>/library.json       where it came from and which files are in it
     <data>/libraries/open.json                 which libraries each conversation has open
 
+A library can leave files out: a file called .libraryignore in its folder lists them, one pattern to a line
+(*.pas, CH01/, EX13_1.IN; a line starting with # is a remark).
+
+A library has pictures of its own.  An image a file refers to the Markdown way, ![what it shows](figures/x.png),
+is kept in the library's store, apart from the images she has been shown, and tied to the passage that refers to
+it: when the passage is given she is told the figure is there and where its file is, so she can show it to the
+user or look at it herself.  Other image files in the folder are kept too, findable by name.
+
 Each library also holds a notebook: her own notes on the material, in the same store on plates of their own, bound
 to the passages they are about (see notebook.py).  The reference material itself is never written to.
 """
@@ -175,6 +183,7 @@ def summary(root: Path, name: str) -> dict:
     files = data.get("files") or {}
     out = {"name": name, "about": data.get("about", ""), "folder": data.get("folder", ""), "files": len(files),
            "pieces": sum(len(f.get("ids") or []) for f in files.values()),
+           **({"ignored": len(data["ignored"])} if data.get("ignored") else {}),
            "built": time.strftime("%Y-%m-%d %H:%M", time.localtime(data["built"])) if data.get("built") else "not yet"}
     running = build_state(root, name)
     if running:
@@ -489,12 +498,51 @@ def pieces_of(text: str, name: str, size: int = 1100) -> List[Tuple[str, str]]:
 
 # ----------------------------------------------------------------- building
 
-def _files_in(folder: Path, limit: int) -> List[Path]:
+IGNORE_FILE = ".libraryignore"
+_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+_FIGURE = re.compile(r"!\[([^\]\n]*)\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+
+
+def ignore_patterns(folder: Path) -> List[str]:
+    """What the folder's own .libraryignore says to leave out."""
+    try:
+        lines = (Path(folder) / IGNORE_FILE).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [ln.strip().replace("\\", "/") for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def ignored(rel: str, patterns: List[str]) -> bool:
+    """Whether a file (its path within the folder, with forward slashes) is left out.  A pattern ending in / is
+    a folder and everything in it; one with a / in it is matched against the whole path; any other against the
+    file's name and against each folder on the way to it.  Case does not matter."""
+    import fnmatch
+    rel = rel.lower()
+    parts = rel.split("/")
+    for raw in patterns:
+        pat = raw.lower().lstrip("/")
+        if pat.endswith("/"):
+            base = pat.rstrip("/")
+            if any(fnmatch.fnmatchcase("/".join(parts[:i]), base) or fnmatch.fnmatchcase(parts[i - 1], base) for i in range(1, len(parts))):
+                return True
+        elif "/" in pat:
+            if fnmatch.fnmatchcase(rel, pat):
+                return True
+        elif any(fnmatch.fnmatchcase(part, pat) for part in parts):
+            return True
+    return False
+
+
+def _files_in(folder: Path, limit: int, patterns: Optional[List[str]] = None, left: Optional[List[str]] = None) -> List[Path]:
     found = []
     for base, dirs, files in os.walk(folder):
         dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS and not d.startswith("."))
         for f in sorted(files):
             if f.startswith(".") or f.startswith("~$"):
+                continue
+            if patterns and ignored((Path(base) / f).relative_to(folder).as_posix(), patterns):
+                if left is not None:
+                    left.append((Path(base) / f).relative_to(folder).as_posix())
                 continue
             found.append(Path(base) / f)
             if len(found) > limit:
@@ -547,11 +595,18 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
     lib = store(root, name, embedder, cfg)
     size = int(cfg.get("library_piece_chars", 1100))
     max_bytes = int(float(cfg.get("library_max_file_mb", 40)) * 1_000_000)
-    found = _files_in(folder, int(cfg.get("library_max_files", 5000)))
+    patterns, left = ignore_patterns(folder), []
+    found = _files_in(folder, int(cfg.get("library_max_files", 5000)), patterns, left)
+    pictures = [p for p in found if p.suffix.lower() in _IMAGES]
+    found = [p for p in found if p.suffix.lower() not in _IMAGES]
     files: Dict[str, dict] = data.setdefault("files", {})
     report = {"name": name, "added": 0, "changed": 0, "removed": 0, "unchanged": 0, "pieces": 0, "skipped": [],
-              "total": len(found), "done": 0, "stopped": False}
+              "total": len(found), "done": 0, "stopped": False, "ignored": len(left), "figures": 0, "pictures": 0}
+    data["ignored"] = left[:2000]
+    if data.get("patterns") != patterns:                 # what is left out has changed: files once read may now be ignored
+        data["patterns"] = patterns
     here = {p.relative_to(folder).as_posix(): p for p in found}
+    referred: set = set(data.get("figure_files") or [])  # pictures some file refers to, by their place in the folder
 
     def drop(rel: str) -> None:
         for mid in files.get(rel, {}).get("ids") or []:
@@ -606,8 +661,9 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
             for n, (heading, piece) in enumerate(cut):
                 # The heading leads the piece: it is what a question about the piece would mention.
                 lead = f"{rel} > {heading}" if heading else rel
+                piece, figures = _take_figures(lib, cfg, folder, path, piece, report, referred)
                 ids += lib.remember(f"{lead}\n{piece}", kind=PIECE, session=f"{rel}#{heading}", whole=True, trust=1.0,
-                                    meta={"file": rel, "section": heading, "n": n})
+                                    meta={"file": rel, "section": heading, "n": n, **({"figures": figures} if figures else {})})
         except Exception as exc:                      # the embedding server went away: keep what is done, say so
             for mid in ids:
                 lib.forget(int(mid))
@@ -618,6 +674,18 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
         _save_info(root, name, data)                  # after each file, so a stopped build loses nothing
         if progress:
             progress(report)
+    if not report["stopped"]:                         # pictures no file refers to are kept as well, under their names
+        for pic in pictures:
+            rel = pic.relative_to(folder).as_posix()
+            if rel in referred or rel in (data.get("pictures") or {}):
+                continue
+            try:
+                got = _keep_picture(lib, cfg, pic, Path(rel).stem.replace("_", " ").replace("-", " "), "picture:" + rel)
+                data.setdefault("pictures", {})[rel] = got
+                report["pictures"] += 1
+            except Exception as exc:
+                report["skipped"].append({"file": rel, "why": f"the picture could not be kept ({str(exc)[:120]})"})
+    data["figure_files"] = sorted(referred)
     data["left_out"] = report["skipped"][:2000]       # kept, so that it can be looked at after the build has scrolled away
     if not report["stopped"]:
         try:                                          # her notes are bound again to the passages that now stand there
@@ -631,6 +699,86 @@ def build(root: Path, name: str, embedder, cfg: Dict[str, Any], *, progress: Opt
     _save_info(root, name, data)
     report["in_library"] = {"files": len(files), "pieces": sum(len(f.get("ids") or []) for f in files.values())}
     return report
+
+
+def _keep_picture(lib, cfg: Dict[str, Any], path: Path, caption: str, where: str) -> int:
+    """Put an image file into the library's own image store.  The same file twice is kept once."""
+    from . import images as _images
+    img = _images.add_image(lib, path.read_bytes(), dict(cfg, image_sections=False), origin=path.name, caption=caption,
+                            session=where, source="library", count=False, folder="images")
+    return int(img["id"])
+
+
+def _take_figures(lib, cfg: Dict[str, Any], folder: Path, path: Path, piece: str, report: dict, referred: set) -> Tuple[str, List[int]]:
+    """The images a piece of text refers to, kept in the library's store.  In the text each reference becomes
+    '[figure N: what it shows]', N being the number she asks for it by."""
+    figures: List[int] = []
+
+    def keep(found) -> str:
+        alt, target = " ".join(found.group(1).split()), found.group(2)
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or Path(target).suffix.lower() not in _IMAGES:
+            return found.group(0)                          # a web address, or not a picture
+        try:
+            pic = (path.parent / target.replace("%20", " ")).resolve()
+            pic.relative_to(folder.resolve())             # nothing from outside the library's own folder
+            if not pic.is_file():
+                return f"[figure, its file is missing: {alt or target}]"
+            image_id = _keep_picture(lib, cfg, pic, alt or pic.stem, "figure:" + path.relative_to(folder).as_posix())
+        except ValueError:
+            return found.group(0)
+        except Exception as exc:
+            report["skipped"].append({"file": target, "why": f"the figure could not be kept ({str(exc)[:120]})"})
+            return f"[figure, not kept: {alt or target}]"
+        referred.add(pic.relative_to(folder.resolve()).as_posix())
+        if image_id not in figures:
+            figures.append(image_id)
+            report["figures"] += 1
+        return f"[figure {image_id}: {alt}]" if alt else f"[figure {image_id}]"
+    return _FIGURE.sub(keep, piece), figures
+
+
+def figure(root: Path, name: str, embedder, cfg: Dict[str, Any], figure_id: Any) -> Optional[dict]:
+    """One picture of a library: what it shows, its file, and the passages that refer to it."""
+    lib = store(root, name, embedder, cfg)
+    try:
+        from . import images as _images
+        row = _images._row(lib, int(figure_id))
+    except Exception:
+        return None
+    if row is None or row["forgotten"]:
+        return None
+    return {"figure": int(row["id"]), "library": name, "caption": row["caption"], "file": str(Path(lib.path) / (row["view"] or row["file"])),
+            "original": str(Path(lib.path) / row["file"]), "name": row["origin"], "size": f"{row['width']}x{row['height']}",
+            "from": row["session"].split(":", 1)[1] if ":" in row["session"] else ""}
+
+
+def figures(root: Path, name: str, embedder, cfg: Dict[str, Any], query: str = "", limit: int = 200) -> List[dict]:
+    """The pictures a library holds; with `query`, those whose caption, name or source file has all its words."""
+    lib = store(root, name, embedder, cfg)
+    try:
+        from . import images as _images
+        with lib._lock:
+            rows = _images._db(lib).execute("SELECT id FROM images WHERE forgotten = 0 ORDER BY id").fetchall()
+    except Exception:
+        return []
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower())]
+    out = []
+    for r in rows:
+        f = figure(root, name, embedder, cfg, r["id"])
+        if f and all(w in f"{f['caption']} {f['name']} {f['from']}".lower() for w in words):
+            out.append(f)
+    return out[:limit]
+
+
+def look_at(root: Path, name: str, embedder, cfg: Dict[str, Any], figure_id: Any, question: str, see=None) -> str:
+    """Have the vision model look at a library's picture and answer a question about it."""
+    from . import images as _images
+    if figure(root, name, embedder, cfg, figure_id) is None:
+        raise LibraryError(f"Library '{name}' has no figure {figure_id}.")
+    try:
+        return _images.look(store(root, name, embedder, cfg), cfg, int(figure_id), question, see=see)
+    except _images.ImageError as exc:
+        raise LibraryError(str(exc)) from exc
 
 
 def build_in_background(root: Path, name: str, embedder, cfg: Dict[str, Any],
@@ -842,6 +990,7 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
             meta = hit.meta or {}
             text = hit.text.split("\n", 1)[1] if "\n" in hit.text else hit.text       # without the heading that leads it
             found.append({"library": name, "file": meta.get("file", ""), "section": meta.get("section", ""),
+                          "figure_ids": [int(i) for i in meta.get("figures") or []],
                           "source": _source(meta), "text": text, "score": round(float(hit.score), 3),
                           "linked": float(hit.direct) < floor <= float(hit.score), "id": hit.id})
     found.sort(key=lambda f: -f["score"])
@@ -870,6 +1019,7 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
     for f in kept:
         f.pop("_words")
         f["notes"], f["noted_in"] = [], []
+        f["figures"] = [g for g in (figure(root, f["library"], embedder, cfg, i) for i in f.pop("figure_ids", [])) if g]
         if not notes:
             f.pop("_ids")
             continue
@@ -919,6 +1069,7 @@ def search(root: Path, which: List[str], query: str, embedder, cfg: Dict[str, An
             meta = piece["meta"] or {}
             text = piece["text"].split("\n", 1)[1] if "\n" in piece["text"] else piece["text"]
             new = {"library": pick[0], "file": meta.get("file", ""), "section": meta.get("section", ""), "source": _source(meta),
+                   "figures": [g for g in (figure(root, pick[0], embedder, cfg, i) for i in meta.get("figures") or []) if g],
                    "text": text, "score": f["score"], "linked": False, "id": int(piece["id"]), "also_in": [], "notes": [], "noted_in": [],
                    "brought_by": {"library": n["library"], "note": n["id"], "with": f"{f['library']}: {f['source']}"}}
             kept.insert(kept.index(f) + 1, new)
@@ -982,7 +1133,7 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
     if not found:
         notes.append("nothing in them matched this message")
         return head + "Nothing in it matched this message. Look something up with holonomic_library (action 'search') if you need it." + tail, notes
-    budget, lines = int(cfg.get("library_context_chars", 3600)), []
+    budget, lines, any_figures = int(cfg.get("library_context_chars", 3600)), [], [False]
     for f in found:
         text = f["text"].strip()
         room = budget - sum(len(x) for x in lines)
@@ -1001,12 +1152,20 @@ def context_block(root: Path, session: str, query: str, embedder, cfg: Dict[str,
             notes.append(f"{f['library']}: {f['source']} was brought in by note {by['note']} of {by['library']}")
         elsewhere = "".join(f"A note of yours in the notebook of '{o}' refers to this passage; {o} is not open in this conversation.\n"
                             for o in f.get("noted_in", []))
-        lines.append(f"[{f['library']}: {f['source']}] (passage {f['id']}){also}\n{text}\n"
+        shown = "".join(f"Figure {g['figure']}" + (f" ({g['caption'][:120]})" if g["caption"] else "") + f" is kept at: {g['file']}\n"
+                        for g in f.get("figures", []) if f"[figure {g['figure']}" in text)
+        if shown:
+            any_figures[0] = True
+        lines.append(f"[{f['library']}: {f['source']}] (passage {f['id']}){also}\n{text}\n" + shown
                      + ("Your notes on this passage (yours, not the reference material):\n" + "\n".join(hers) + "\n" if hers else "")
                      + elsewhere)
     notes.append("pieces given: " + "; ".join(f"{f['library']}: {f['source']} ({f['score']})" for f in found[:len(lines)]))
+    about_figures = (" Where a passage has a figure, the words about it are a description, not the figure: to show the user the "
+                     "figure itself write MEDIA: followed by its file path on a line of its own; to check a detail in it yourself, "
+                     "use holonomic_library action 'look' with the library, the figure number and your question."
+                     if any_figures[0] else "")
     return (head + "This is reference material, not something you remember. Rely on it for exact details over your "
-            "own recollection, and say which file a detail came from if asked.\n\n" + "\n".join(lines).rstrip() + tail), notes
+            "own recollection, and say which file a detail came from if asked." + about_figures + "\n\n" + "\n".join(lines).rstrip() + tail), notes
 
 
 def prompt_block(root: Path, session: str, cfg: Dict[str, Any]) -> str:

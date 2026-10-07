@@ -326,13 +326,18 @@ LIBRARY_TOOL = {
         "- confirm_note: note `note_id` is now 'tested' (with `evidence`) or the user confirmed it (provenance "
         "'user' with their `quote`); its words stay as they are.\n"
         "- retire_note: note `note_id` was wrong or is no longer needed (`reason`). It leaves recall and stays on record.\n"
-        "- notes: your notes in library `name`, or those matching `query`."
+        "- notes: your notes in library `name`, or those matching `query`.\n"
+        "FIGURES. A library keeps the pictures its files refer to. A passage that has one says '[figure N: ...]' and gives "
+        "the file. To show the user the figure, write MEDIA: and that file path on a line of its own.\n"
+        "- look: look at figure `figure` of library `name` yourself and answer `question` about it (what a label "
+        "reads, how two parts are connected). Use it when the words about a figure do not settle a detail.\n"
+        "- figures: the pictures library `name` holds, or those whose caption matches `query`."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["list", "create", "update", "status", "open", "close", "search",
-                                                  "note", "revise_note", "confirm_note", "retire_note", "notes"]},
+                                                  "note", "revise_note", "confirm_note", "retire_note", "notes", "look", "figures"]},
             "name": {"type": "string", "description": "A library's name: letters, digits, - or _ (create, update, status)."},
             "names": {"type": "array", "items": {"type": "string"}, "description": "Library names (open, close, search)."},
             "folder": {"type": "string", "description": "Full path of the folder holding the material (create)."},
@@ -348,6 +353,8 @@ LIBRARY_TOOL = {
             "quote": {"type": "string", "description": "For 'user': the user's exact words from this conversation."},
             "note_id": {"type": "integer", "description": "A note's number (revise_note, confirm_note, retire_note)."},
             "reason": {"type": "string", "description": "Why a note is retired (retire_note)."},
+            "figure": {"type": "integer", "description": "A figure's number, as a passage gives it (look)."},
+            "question": {"type": "string", "description": "What you want to know about the figure (look)."},
         },
         "required": ["action"],
     },
@@ -1213,6 +1220,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                 out = {"searched": which, "count": len(found), "results": [
                     {"library": f["library"], "source": f["source"], "passage": f["id"], "text": f["text"], "score": f["score"],
                      **({"same_passage_also_in": f["also_in"]} if f.get("also_in") else {}),
+                     **({"figures": [{"figure": g["figure"], "caption": g["caption"], "file": g["file"]} for g in f["figures"]]}
+                        if f.get("figures") else {}),
                      **({"your_notes_on_this_passage": [
                          (f"(from your notebook in {n['library']}) " if n["library"] != f["library"] else "")
                          + _notebook.line(n, engine, shelf=shelf, open_in=which)[2:] for n in f["notes"]]} if f.get("notes") else {}),
@@ -1231,6 +1240,28 @@ class HolonomicMemoryProvider(MemoryProvider):
                                    "will reach you unless you look again or the user asks for it to be opened. Say which library "
                                    "an answer came from.")
                 return json.dumps(out)
+            if action in ("look", "figures"):
+                now = _library.opened(root, sid)
+                name = str(args.get("name") or (args.get("names") or [""])[0] or (now[0] if len(now) == 1 else "")).strip()
+                if not name:
+                    return _error("Say which library, with 'name'." + (f" Open here: {', '.join(now)}." if now else ""))
+                name = _library._need(root, name)[0]
+                if action == "figures":
+                    found = _library.figures(root, name, engine.embedder, self._cfg, args.get("query") or "",
+                                             limit=max(1, min(int(args.get("limit") or 12), 40)))
+                    return json.dumps({"library": name, "count": len(found), "figures": [
+                        {"figure": g["figure"], "caption": g["caption"], "file": g["file"], "from": g["from"]} for g in found]})
+                if not args.get("figure"):
+                    return _error("look needs 'figure': the number a passage gives, as in [figure 12: ...]")
+                question = " ".join(str(args.get("question") or "").split()) or "What does this figure show? Read out every label."
+                got = _library.figure(root, name, engine.embedder, self._cfg, args["figure"])
+                if got is None:
+                    return _error(f"Library '{name}' has no figure {args['figure']}.")
+                answer = _library.look_at(root, name, engine.embedder, self._cfg, args["figure"], question)
+                return json.dumps({"library": name, "figure": got["figure"], "caption": got["caption"], "file": got["file"],
+                                   "question": question, "what_you_saw": answer,
+                                   "note": "This is your own reading of the picture just now, not the reference text. If it matters and "
+                                           "you are unsure, show the user the figure (MEDIA: and the file path) and ask."})
             if action in ("note", "revise_note", "confirm_note", "retire_note", "notes"):
                 return self._notebook_action(engine, root, action, args, sid)
             return _error(f"Unknown action: {action}")

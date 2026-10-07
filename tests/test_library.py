@@ -940,3 +940,141 @@ def test_she_ties_two_libraries_together_through_her_tool(tmp_path):
     hit = next(r for r in found["results"] if r["source"].endswith("Reading the kernel"))
     assert hit["also_noted"] == ["A note of yours in the notebook of 'x86' refers to this passage; x86 was not searched."]
     p.shutdown()
+
+
+# ----------------------------------------------------------------- leaving files out, and pictures
+
+def test_a_folder_says_what_to_leave_out(tmp_path):
+    """A source tree holds things that are text and are not reference material: a tool's own source, a data file."""
+    assert lib.ignored("CH01/HEXCONV/HEXCONVU.PAS", ["*.pas"]) and lib.ignored("ch13/EX13_1.IN", ["EX13_1.IN"])
+    assert lib.ignored("CH01/HEXCONV/x.asm", ["CH01/"]) and lib.ignored("a/CH01/x.asm", ["ch01/"]) and not lib.ignored("CH010/x.asm", ["CH01/"])
+    assert lib.ignored("include/conv.a6", ["INCLUDE/*.A6"]) and not lib.ignored("include/conv.a", ["INCLUDE/*.A6"])
+    assert not lib.ignored("src/pas.asm", ["*.pas"]) and not lib.ignored("CH01.asm", ["CH01/"])
+    src = folder(tmp_path)
+    (src / "tool").mkdir()
+    (src / "tool" / "gui.pas").write_text("program gui;\nbegin\n  writeln('a window with buttons');\nend.\n", encoding="utf-8")
+    (src / "big.in").write_text("data " * 400, encoding="utf-8")
+    root = tmp_path / "store" / "libraries"
+    lib.create(root, "x86", str(src))
+    first = lib.build(root, "x86", HashEmbedder(), CFG)
+    assert first["ignored"] == 0 and {"tool/gui.pas", "big.in"} <= set(lib.info(root, "x86")["files"])
+    (src / lib.IGNORE_FILE).write_text("# the lab tool, and its data\ntool/\n*.in\n", encoding="utf-8")
+    again = lib.build(root, "x86", HashEmbedder(), CFG)
+    data = lib.info(root, "x86")
+    assert again["ignored"] == 2 and again["removed"] == 2 and sorted(data["ignored"]) == ["big.in", "tool/gui.pas"]
+    assert not {"tool/gui.pas", "big.in", lib.IGNORE_FILE} & set(data["files"]) and "boot.md" in data["files"]
+    assert lib.summary(root, "x86")["ignored"] == 2
+    assert not [f for f in lib.search(root, ["x86"], "a window with buttons", HashEmbedder(), CFG, floor=0.0) if f["file"] == "tool/gui.pas"]
+    (src / lib.IGNORE_FILE).write_text("*.in\n", encoding="utf-8")                  # and what is let back in is read again
+    assert lib.build(root, "x86", HashEmbedder(), CFG)["added"] == 1 and "tool/gui.pas" in lib.info(root, "x86")["files"]
+
+
+def figure_folder(tmp_path):
+    from test_images import picture
+    src = folder(tmp_path)
+    (src / "figures").mkdir()
+    (src / "figures" / "bus.png").write_bytes(picture(320, 200, colour=(250, 240, 10)))
+    (src / "figures" / "flags.gif").write_bytes(picture(300, 60, colour=(10, 10, 10), fmt="GIF"))
+    (src / "cover.jpg").write_bytes(picture(200, 300, colour=(90, 10, 200)))
+    (tmp_path / "elsewhere.png").write_bytes(picture(64, 64, colour=(1, 2, 3)))
+    (src / "bus.md").write_text(
+        "# The system bus\n\nThe CPU reaches memory over the address bus and the data bus.\n\n"
+        "![Figure 3.5: Eight-bit CPU and memory joined by an address bus and a data bus](figures/bus.png)\n\n"
+        "The figure shows a box labelled CPU on the left and a column of memory cells on the right.\n\n"
+        "## Flags\n\nThe flags register holds the carry and zero flags among others.\n\n![](figures/flags.gif)\n\n"
+        "A picture that is not there: ![gone](figures/none.png). One from outside: ![out](../elsewhere.png). "
+        "One on the web: ![web](http://example.com/x.png).\n", encoding="utf-8")
+    return src
+
+
+def test_a_library_keeps_its_own_pictures(tmp_path):
+    """Diagrams belong with the material they are part of, apart from the images she has been shown.  A passage
+    that refers to one says so and gives its file, so she can show the user the figure itself or look at it."""
+    from holonomic import images
+    if not images._pil():
+        return
+    src = figure_folder(tmp_path)
+    root = tmp_path / "store" / "libraries"
+    lib.create(root, "x86", str(src))
+    report = lib.build(root, "x86", HashEmbedder(), CFG)
+    assert report["figures"] == 2 and report["pictures"] == 1 and not [s for s in report["skipped"] if "figure" in s["why"]]
+    store = lib.store(root, "x86", HashEmbedder(), CFG)
+    held = lib.figures(root, "x86", HashEmbedder(), CFG)
+    assert [(g["name"], g["from"]) for g in held] == [("bus.png", "bus.md"), ("flags.gif", "bus.md"), ("cover.jpg", "cover.jpg")]
+    bus, flags, cover = held
+    assert bus["caption"].startswith("Figure 3.5: Eight-bit CPU") and flags["caption"] == "flags" and cover["caption"] == "cover"
+    # kept inside the library's own folder, and the one a chat window cannot show has a copy it can
+    for g in held:
+        assert str(root / "x86" / "images") in g["file"] and open(g["file"], "rb").read()
+    assert flags["file"].endswith(".view.jpg") and flags["original"].endswith(".gif") and bus["file"].endswith(".png")
+    assert [g["figure"] for g in lib.figures(root, "x86", HashEmbedder(), CFG, "address bus")] == [bus["figure"]]
+    # the passage names the figure where the reference stood, and carries it
+    found = lib.search(root, ["x86"], "the CPU reaches memory over the address bus and the data bus", HashEmbedder(),
+                       dict(CFG, library_score_band=9.0), k=12, floor=0.0)
+    hit = next(f for f in found if f"[figure {bus['figure']}: Figure 3.5" in f["text"])
+    assert [g["figure"] for g in hit["figures"]] == [bus["figure"]] and "figures/bus.png" not in hit["text"]
+    other = next(f for f in found if f"[figure {flags['figure']}]" in f["text"])
+    assert "[figure, its file is missing: gone]" in other["text"] and "![out](../elsewhere.png)" in other["text"] and "![web](http://example.com/x.png)" in other["text"]
+    assert all(not f["figures"] for f in found if "[figure " not in f["text"])
+    lib.open_for(root, "s1", ["x86"])
+    block, _ = lib.context_block(root, "s1", "the CPU reaches memory over the address bus and the data bus", HashEmbedder(), CFG)
+    assert f"Figure {bus['figure']} (Figure 3.5: Eight-bit CPU" in block and f"is kept at: {bus['file']}" in block
+    assert "write MEDIA: followed by its file path" in block and "action 'look'" in block
+    plain, _ = lib.context_block(root, "s1", "FAT12 keeps cluster numbers in 12 bits, packed three bytes to two entries", HashEmbedder(), dict(CFG, library_k=1))
+    assert "MEDIA" not in plain                                                        # no figure given: nothing said about figures
+    # she can look at it herself
+    asked = []
+
+    def see(step, system, prompt, jpeg, schema, max_tokens):
+        asked.append((prompt, len(jpeg)))
+        return json.dumps({"answer": "A box labelled CPU joined to memory by two yellow bands."})
+    assert lib.look_at(root, "x86", HashEmbedder(), CFG, bus["figure"], "What joins the CPU to memory?", see=see).startswith("A box labelled CPU")
+    assert "What joins the CPU to memory?" in asked[0][0] and asked[0][1] > 100
+    with pytest.raises(lib.LibraryError, match="no figure 999"):
+        lib.look_at(root, "x86", HashEmbedder(), CFG, 999, "anything", see=see)
+    # read again, every passage is new and the pictures are the same pictures
+    again = lib.build(root, "x86", HashEmbedder(), CFG, fresh=True)
+    assert again["figures"] == 2 and again["pictures"] == 0 and len(lib.figures(root, "x86", HashEmbedder(), CFG)) == 3
+    assert next(f for f in lib.search(root, ["x86"], "the CPU reaches memory over the address bus", HashEmbedder(), CFG, k=6, floor=0.0)
+                if "[figure " in f["text"] and "Figure 3.5" in f["text"])["figures"][0]["figure"] == bus["figure"]
+    assert lib.build(root, "x86", HashEmbedder(), CFG)["pictures"] == 0                 # nothing changed: nothing taken in twice
+    # pictures can be left out like anything else
+    (src / lib.IGNORE_FILE).write_text("cover.jpg\n", encoding="utf-8")
+    (src / "more.png").write_bytes(__import__("test_images").picture(50, 50, colour=(7, 7, 7)))
+    r = lib.build(root, "x86", HashEmbedder(), CFG)
+    assert r["ignored"] == 1 and r["pictures"] == 1
+
+
+def test_a_librarys_pictures_are_not_hers(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic import images
+    if not images._pil():
+        return
+    src = figure_folder(tmp_path)
+    p = make(tmp_path)
+    root = lib.root_of(p._engine)
+    lib.create(root, "x86", str(src))
+    lib.build(root, "x86", p._engine.embedder, p._cfg)
+    assert images.count_images(p._engine) == 0 and images.list_images(p._engine) == [] and images.pending(p._engine)["images"] == 0
+    assert "FIGURES." in __import__("holonomic.provider", fromlist=["LIBRARY_TOOL"]).LIBRARY_TOOL["description"]
+    p.prefetch("Use the x86 library for this.", session_id="s1")
+    assert lib_tool(p, action="open", names=["x86"])["opened"] is True
+    held = lib_tool(p, action="figures")
+    assert held["count"] == 3 and held["figures"][0]["caption"].startswith("Figure 3.5")
+    assert [g["from"] for g in lib_tool(p, action="figures", query="flags")["figures"]] == ["bus.md"]
+    found = lib_tool(p, action="search", query="the CPU reaches memory over the address bus and the data bus", limit=6)
+    hit = next(r for r in found["results"] if r.get("figures"))
+    assert hit["figures"][0]["file"].startswith(str(root / "x86" / "images")) and "[figure " in hit["text"]
+    assert "look needs 'figure'" in lib_tool(p, action="look")["error"] and "no figure 999" in lib_tool(p, action="look", figure=999)["error"]
+    keep = images._seer
+    images._seer = lambda ic, report: (lambda step, system, prompt, jpeg, schema, max_tokens: json.dumps({"answer": "Two bands, labelled Address and Data."}))
+    try:
+        seen = lib_tool(p, action="look", figure=hit["figures"][0]["figure"], question="What are the bands labelled?")
+    finally:
+        images._seer = keep
+    assert seen["what_you_saw"] == "Two bands, labelled Address and Data." and seen["file"] == hit["figures"][0]["file"]
+    assert "your own reading" in seen["note"]
+    context = p.prefetch("How does the CPU reach memory over the address bus and the data bus?", session_id="s1")
+    assert "is kept at: " + hit["figures"][0]["file"] in context
+    assert images.count_images(p._engine) == 0                                         # still none of hers
+    p.shutdown()

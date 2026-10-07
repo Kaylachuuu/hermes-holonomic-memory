@@ -88,6 +88,11 @@ def _library_cmd(engine, cfg, args) -> None:
             print(f"  left out: {skipped['file']}  ({skipped['why']})")
         if len(r["skipped"]) > 40:
             print(f"  ... and {len(r['skipped']) - 40} more left out")
+        if r.get("ignored"):
+            print(f"  {r['ignored']} file(s) left out by the folder's {lib.IGNORE_FILE}.")
+        if r.get("figures") or r.get("pictures"):
+            print(f"  Pictures kept with the library: {r.get('figures', 0)} figure(s) the files refer to"
+                  + (f", {r['pictures']} other picture(s) from the folder" if r.get("pictures") else "") + ".")
         nb = r.get("notes") or {}
         if nb.get("error"):
             print(f"  ! her notes could not be bound again to the passages: {nb['error']}")
@@ -154,6 +159,9 @@ def _library_cmd(engine, cfg, args) -> None:
             s = lib.summary(root, name)
             print(f"{name}: {s['pieces']} pieces from {s['files']} files, built {s['built']}\n  from {s['folder']}"
                   + (f"\n  {s['about']}" if s["about"] else ""))
+            if args.left_out and data.get("ignored"):
+                print(f"  {len(data['ignored'])} file(s) left out by {lib.IGNORE_FILE}: " + ", ".join(data["ignored"][:30])
+                      + (" ..." if len(data["ignored"]) > 30 else ""))
             if args.left_out:
                 gone = data.get("left_out") or []
                 print(f"  {len(gone)} file(s) left out:" if gone else "  No file was left out.")
@@ -183,6 +191,15 @@ def _library_cmd(engine, cfg, args) -> None:
                     print(f"    her note {n['id']} ({_nb.TYPES.get(n['type'], n['type'])}; {_nb.where_from(n)}): {_clip(n['text'], args.width)}")
         elif what == "notes":
             _library_notes(engine, cfg, lib, root, items, args)
+        elif what == "figures":
+            if not items:
+                print('Usage: hermes holonomic library figures NAME ["words"]       the pictures a library holds')
+                return
+            name = lib._need(root, items[0])[0]
+            found = lib.figures(root, name, engine.embedder, cfg, " ".join(items[1:]), limit=100000)
+            print(f"{len(found)} picture(s) in '{name}'" + (f" matching '{' '.join(items[1:])}'" if items[1:] else "") + (":" if found else "."))
+            for g in found[: args.n if items[1:] else 100000]:
+                print(f"  [{g['figure']}] {g['caption'] or g['name']}" + (f"   (in {g['from']})" if g["from"] else "") + f"\n      {g['file']}")
         elif what == "delete":
             if len(items) != 1:
                 print("Usage: hermes holonomic library delete NAME --yes")
@@ -1690,7 +1707,7 @@ def register_cli(subparser) -> None:
     fa.add_argument("--yes", action="store_true", help="With 'forget --all': actually do it")
     fa.add_argument("--width", type=int, default=110, help="Characters of text to show")
     lb = subs.add_parser("library", help="Reference libraries: material to work from, kept apart from memory")
-    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "rebuild", "show", "search", "delete", "notes"])
+    lb.add_argument("library_action", nargs="?", default="list", choices=["list", "create", "update", "rebuild", "show", "search", "delete", "notes", "figures"])
     lb.add_argument("items", nargs="*", help="A library name; for 'create' the folder too; for 'search' the words")
     lb.add_argument("--about", help="With 'create': one line saying what the library is for")
     lb.add_argument("--yes", action="store_true", help="With 'delete': actually do it")

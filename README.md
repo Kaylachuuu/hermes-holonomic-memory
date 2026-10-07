@@ -251,6 +251,27 @@ From the command line:
     hermes holonomic library search NAME "words"           what she would be given
     hermes holonomic library delete NAME --yes             remove the library (the folder of material is not touched)
 
+### Leaving files out, and pictures
+
+A file called `.libraryignore` in a library's folder lists what to leave out, one pattern to a line: `*.pas`,
+`CH01/` (a folder and everything in it), `INCLUDE/*.A6`, `EX13_1.IN`. Case does not matter; a line starting
+with `#` is a remark. `library update` applies a changed list: what is newly left out is taken out, what is let
+back in is read.
+
+A library keeps pictures of its own, in its own store, apart from the images she has been shown (they are not
+counted among those, not described part by part and never dreamt of).
+
+- An image a file refers to the Markdown way, `![what it shows](figures/x.png)`, is kept and tied to the
+  passage that refers to it. In the passage the reference reads `[figure 12: what it shows]`, and when the
+  passage is given she is told where the figure's file is. She shows it to you by writing `MEDIA:` and that
+  path; she can also look at it herself (`look`, with the figure's number and a question), which sends the
+  picture to the vision model and gives her its answer, marked as her own reading.
+- The words about a figure are whatever the file says beside it. Nothing describes pictures at build time.
+- Other image files in the folder are kept as well, findable by name. Pictures can be left out with
+  `.libraryignore` like anything else. A format a chat window cannot show (GIF, BMP, TIFF) gets a copy it can.
+
+    hermes holonomic library figures NAME ["words"]        the pictures a library holds
+
 ### Her notebook in a library
 
 A library is a shelf; its notebook is what she has learned by using it. While a library is open she can leave
