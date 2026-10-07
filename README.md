@@ -669,9 +669,16 @@ carried it can no longer be rebuilt, and the record of which plates those were i
 `plates check` uses memories as cues and reports how many plates answer a cue and whether the limit of 24 ever
 turns one away; how much of what the plates carry belongs to memories recall can no longer return; and whether
 those memories, still counted among a plate's members, change what is recalled. It reads the plates three
-ways (as recall does, with those members left out, and with no limit) and counts how many of a cue's *known*
-associates each finds: known from the log, or from the sources a conclusion was stored with. More results are
-not better in themselves, so it also counts returns that nothing on record explains.
+ways (as recall does, with those members left out, and with no limit).
+
+Everything that comes back is sorted by what is on record about it. *Known*: bound to the cue according to the
+write log, or to the sources a conclusion was stored with. *Explained*: linked by something less exact, such
+as the next line of a conversation or an image and its parts. *Unexplained*: nothing on record links it to the
+cue. Unexplained is not the same as wrong, and how much it means depends on the plate it was read from, so
+the two are reported apart: from a plate written before the log the record may simply be missing; from a plate
+with every write on record, nothing was written that would explain it. It also reports how strongly each sort
+comes back, and, since reading the plates is not yet recall, what she would actually be given: recall run as a
+message runs it, with how many of the results the plates brought and how those sort out.
 
 Not done: taking a retired or forgotten memory's terms back out of a plate. The log is what that would need.
 

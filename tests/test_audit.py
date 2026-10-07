@@ -153,6 +153,19 @@ def test_what_the_plates_do_at_recall_is_measured_without_changing_anything(tmp_
     assert r["as it is"]["expected"] == r["without them"]["expected"] == r["no limit"]["expected"] > 0
     assert 0 < r["as it is"]["found"] <= r["as it is"]["expected"] and r["no limit"]["found"] == r["as it is"]["found"]
     assert all(r[w]["unexplained"] <= r[w]["returned"] for w in r) and d["known_links"]["cues_with_any"] >= 6
+    assert all(r[w]["found"] + r[w]["explained"] + r[w]["unexplained"] == r[w]["returned"] for w in r)        # each return is one of the three
+    # by the kind of plate read from: every plate here has all its writes on record
+    assert d["plates"]["logged"] == d["plates"]["count"] and d["returned_by_plate"]["legacy"] == 0
+    assert d["unexplained_by_plate"]["legacy"] == 0 and d["unexplained_by_plate"]["logged"] == r["as it is"]["unexplained"]
+    assert d["returned_by_plate"]["logged"] == r["as it is"]["returned"]
+    # how strongly each kind comes back
+    assert d["strength"]["known"]["count"] == r["as it is"]["found"] and d["strength"]["known"]["median"] > 0
+    # and what she would actually be given
+    g = d["given"]
+    assert g["cues"] == 7 and g["given"] == g["by_likeness"] + g["by_association"] and g["given"] <= 7 * 6
+    assert g["known"] + g["explained"] + g["unexplained"] == g["by_association"]
+    assert g["unexplained_logged"] >= g["unexplained"] and g["unexplained_legacy"] == 0
+    assert all(set(e) == {"cue", "given", "read_from"} for e in g["examples"])
     # the retired twin is never counted as something to find, nor returned
     retired_seen = [e for e in d["examples"] if facts[0] in e["gained"] + e["lost"]]
     assert not retired_seen and audit.diagnose(store(tmp_path, "empty"))["cues"] == 0
@@ -182,7 +195,41 @@ def test_cli_plates(tmp_path):
         assert "have every write in the write log" in text and "1 of 1 plate(s) agree" in text and "hermes holonomic plates check" in text
         text = run("plates", "check", "-n", "20")
         assert "How many plates answer a cue" in text and "as recall does it now" in text and "with no limit on plates read" in text
-        assert "more returned is not better in itself" in text
+        assert "More returned is not better in itself" in text and "What she would be given" in text
+        assert "from plates with every write on record" in text and "That is not the same as wrong" in text
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
+
+
+def test_returns_are_told_apart_by_whether_their_plate_is_on_record(tmp_path):
+    """An unexplained return from a plate written before the log may only be a missing record; from a plate with
+    every write on record, nothing was written that would explain it."""
+    m = store(tmp_path)
+    old = [m.remember(f"Kayla has a cat and the cat sleeps on the couch, take {i}", kind="said_user", session=f"s{i}")[0] for i in range(8)]
+    for i in range(0, 8, 2):
+        m.remember(f"Kayla has a cat that sleeps on the couch, conclusion {i}", kind="fact", session="reflection", chain=False, links=[old[i]])
+    # these plates are from before the log: no rows, not marked, closed
+    m._db.execute("DELETE FROM bindings"); m._db.execute("UPDATE plates SET logged = 0, sealed = 1")
+    m.close()
+    m = store(tmp_path)
+    new = [m.remember(f"Kayla has a cat and the cat sleeps on the couch, later take {i}", kind="said_user", session=f"n{i}")[0] for i in range(4)]
+    m.remember("Kayla still has a cat that sleeps on the couch.", kind="fact", session="reflection", chain=False, links=[new[0]])
+    d = audit.diagnose(m, sample=50)
+    assert 0 < d["plates"]["logged"] < d["plates"]["count"]
+    by, back = d["unexplained_by_plate"], d["returned_by_plate"]
+    assert back["legacy"] > 0 and back["logged"] > 0 and by["legacy"] <= back["legacy"] and by["logged"] <= back["logged"]
+    assert by["legacy"] + by["logged"] >= d["recovery"]["as it is"]["unexplained"]             # read from both, counted under each
+    assert d["known_links"]["from_log"] == 2                                                   # the new conclusion and its source, both ways
+
+
+def test_an_image_and_its_parts_explain_one_another(tmp_path):
+    m = store(tmp_path)
+    said = m.remember("Here is a photo of Sushi on the pink blanket", kind="said_user", session="s1")[0]
+    whole = m.remember("A photo of a black and white cat on a pink blanket", kind="image", session="s1", chain=False, links=[said], meta={"image_id": 7})[0]
+    part = m.remember("A close-up of pink woven fabric", kind="image_part", session="s1", chain=False, links=[whole], meta={"image_id": 7})[0]
+    linked = audit._probably_linked(m)
+    assert part in linked[whole] and whole in linked[part]
+    d = audit.diagnose(m, sample=10)
+    r = d["recovery"]["as it is"]
+    assert r["expected"] > 0 and r["found"] + r["explained"] + r["unexplained"] == r["returned"]

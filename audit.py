@@ -136,6 +136,24 @@ def _probably_linked(engine) -> Dict[int, Set[int]]:
         for x in sources:
             out.setdefault(int(m["id"]), set()).add(x)
             out.setdefault(x, set()).add(int(m["id"]))
+    # An image and its parts, and the lines an image arrived with.
+    by_image: Dict[int, List[int]] = {}
+    for m in engine._db.execute("SELECT id, meta FROM memories WHERE forgotten = 0 AND meta LIKE '%\"image_id\"%'"):
+        try:
+            by_image.setdefault(int(json.loads(m["meta"] or "{}").get("image_id")), []).append(int(m["id"]))
+        except (ValueError, TypeError):
+            continue
+    try:
+        arrived = {int(r["id"]): [int(x) for x in (json.loads(r["meta"] or "{}").get("links") or []) if isinstance(x, (int, float))]
+                   for r in engine._db.execute("SELECT id, meta FROM images")}
+    except Exception:                                   # a store with no images in it
+        arrived = {}
+    for image_id, mids in by_image.items():
+        for a in mids:
+            for b in mids + arrived.get(image_id, []):
+                if a != b:
+                    out.setdefault(a, set()).add(b)
+                    out.setdefault(b, set()).add(a)
     previous: Dict[tuple, int] = {}
     for m in engine._db.execute("SELECT id, realm, session FROM memories WHERE forgotten = 0 ORDER BY id"):
         key = (m["realm"], m["session"])
@@ -146,9 +164,15 @@ def _probably_linked(engine) -> Dict[int, Set[int]]:
     return out
 
 
-def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking") -> dict:
+def _median(values: List[float]) -> Optional[float]:
+    values = sorted(values)
+    return values[len(values) // 2] if values else None
+
+
+def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking", cfg: Optional[Dict[str, Any]] = None) -> dict:
     np = _np()
     db = engine._db
+    cfg = cfg or {}
     with engine._lock:
         engine._sync()
         code = engine._realm_codes.get(realm)
@@ -160,6 +184,7 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking") ->
         retired_rows = {r for r in rows_all if engine._trust.a[r] < OUT_OF_RECALL}
         ids = {r: int(engine._ids.a[r]) for r in rows_all}
         live_ids = {ids[r] for r in live_rows}
+        logged = {int(p["id"]): bool(p["logged"]) for p in db.execute("SELECT id, logged FROM plates")}
 
         # ---- what the plates carry
         plates = []
@@ -169,52 +194,110 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking") ->
             if engine._prealm.a[i] != code:
                 continue
             members = engine._members[i]
-            plates.append({"plate": int(engine._pid.a[i]), "members": len(members),
+            plates.append({"plate": int(engine._pid.a[i]), "members": len(members), "logged": logged.get(int(engine._pid.a[i]), False),
                            "out_of_recall": len([r for r in members if r in retired_rows]),
                            "forgotten": gone.get(int(engine._pid.a[i]), 0), "load": float(engine._pload.a[i])})
         forgotten_total = int(db.execute("SELECT COUNT(*) AS n FROM memories WHERE forgotten != 0 AND realm = ?", (realm,)).fetchone()["n"])
         forgotten_placed = int(db.execute("SELECT COUNT(DISTINCT memory_id) AS n FROM plate_members WHERE gone = 1").fetchone()["n"])
 
-        # ---- what a cue brings back, three ways
         known = _known_links(engine, live_ids)
         probable = _probably_linked(engine)
+
+        def sort_out(back: Set[int], cue_ids: List[int]) -> Dict[str, Set[int]]:
+            """What came back, by what is on record about it: known to be bound to a cue, explained by something
+            else on record, or explained by nothing."""
+            expected: Set[int] = set()
+            explained: Set[int] = set()
+            for c in cue_ids:
+                expected |= known.get(c, set())
+                explained |= {i for i in probable.get(c, set()) if i in live_ids}
+            return {"known": back & expected, "explained": (back & explained) - expected, "unexplained": back - expected - explained,
+                    "expected": expected}
+
+        def where(plate_ids: Set[int]) -> List[str]:
+            """A return read from a plate with every write on record is one thing; from a plate written before
+            the log, another.  Read from both, it counts under each."""
+            return sorted({"logged" if logged.get(p) else "legacy" for p in plate_ids}) or ["legacy"]
+
+        # ---- what a cue brings back off the plates, three ways
         cues = sorted(live_rows)
         random.Random(seed).shuffle(cues)
         cues = cues[:max(1, int(sample))]
         ways = {"as it is": {}, "without them": {"leave_out": retired_rows}, "no limit": {"max_plates": 10 ** 9}}
-        totals = {w: {"expected": 0, "found": 0, "returned": 0, "unexplained": 0} for w in ways}
+        totals = {w: {"expected": 0, "found": 0, "returned": 0, "explained": 0, "unexplained": 0} for w in ways}
+        unexplained_by = {"legacy": 0, "logged": 0}
+        returned_by = {"legacy": 0, "logged": 0}
+        scores: Dict[str, List[float]] = {"known": [], "explained": [], "unexplained": []}
         resonated: List[int] = []
-        turned_away = 0
+        turned_away = differ = 0
         changed: List[dict] = []
-        differ = 0
         for r in cues:
             cue = engine._cue(engine._phasor_of(r))
-            expected = known.get(ids[r], set())
-            explained = expected | {i for i in probable.get(ids[r], set()) if i in live_ids}
             got: Dict[str, Set[int]] = {}
             for way, options in ways.items():
-                info: Dict[str, int] = {}
+                info: Dict[str, Any] = {}
                 found = engine._probe(cue, codes, info=info, **options)
-                back = {ids[row] for row in found if row in live_rows and row != r}
+                # As read, not capped at 1 the way recall caps it: capped, a strong return and a very strong one look alike.
+                strength = {ids[row]: float(sc) for row, sc in found.items() if row in live_rows and row != r}
+                back = set(strength)
                 got[way] = back
+                sorted_out = sort_out(back, [ids[r]])
                 t = totals[way]
-                t["expected"] += len(expected)
-                t["found"] += len(expected & back)
+                t["expected"] += len(sorted_out["expected"])
+                t["found"] += len(sorted_out["known"])
                 t["returned"] += len(back)
-                t["unexplained"] += len(back - explained)
+                t["explained"] += len(sorted_out["explained"])
+                t["unexplained"] += len(sorted_out["unexplained"])
                 if way == "as it is":
                     resonated.append(info.get("resonated", 0))
                     turned_away += 1 if info.get("turned_away", 0) else 0
+                    read_from = {ids[row]: plate_ids for row, plate_ids in (info.get("plates") or {}).items() if row in ids}
+                    for group in scores:
+                        scores[group] += [strength[i] for i in sorted_out[group]]
+                    for i in back:
+                        for kind in where(read_from.get(i, set())):
+                            returned_by[kind] += 1
+                            if i in sorted_out["unexplained"]:
+                                unexplained_by[kind] += 1
             if got["without them"] != got["as it is"]:
                 differ += 1
-            if got["without them"] != got["as it is"] and len(changed) < 8:
-                gained, lost = got["without them"] - got["as it is"], got["as it is"] - got["without them"]
-                changed.append({"cue": ids[r], "gained": sorted(gained), "lost": sorted(lost),
-                                "gained_expected": len(gained & expected), "lost_expected": len(lost & expected)})
+                if len(changed) < 8:
+                    gained, lost = got["without them"] - got["as it is"], got["as it is"] - got["without them"]
+                    expected = known.get(ids[r], set())
+                    changed.append({"cue": ids[r], "gained": sorted(gained), "lost": sorted(lost),
+                                    "gained_expected": len(gained & expected), "lost_expected": len(lost & expected)})
+
+        # ---- what she would be given: recall as a message does it, the memory standing in for the message
+        k = int(cfg.get("recall_k", 6))
+        options = {"k": k, "min_score": float(cfg.get("min_score", 0.2)), "min_trust": OUT_OF_RECALL,
+                   "min_strength": float(cfg.get("fade_threshold", 0.35)), "skip_kinds": ("asked_user",),
+                   "kind_weights": {"said_assistant": float(cfg.get("assistant_weight", 0.75)), "dreamtalk_assistant": 0.5,
+                                    "dreamtalk_user": 0.75, "image_part": 0.9}}
+        given = {"cues": 0, "given": 0, "by_likeness": 0, "by_association": 0, "known": 0, "explained": 0, "unexplained": 0,
+                 "unexplained_legacy": 0, "unexplained_logged": 0, "examples": []}
+        for r in cues:
+            info = {}
+            hits = [h for h in engine.recall(vector=engine._X.a[r].copy(), realms=(realm,), info=info, **options) if h.id != ids[r]]
+            given["cues"] += 1
+            given["given"] += len(hits)
+            # It is there for its likeness to the message, or because the plates brought it: whichever counted for more.
+            brought = [h for h in hits if 0.85 * h.assoc > h.direct]
+            given["by_likeness"] += len(hits) - len(brought)
+            given["by_association"] += len(brought)
+            sorted_out = sort_out({h.id for h in brought}, info.get("hops") or [ids[r]])
+            read_from = {ids[row]: plate_ids for row, plate_ids in (info.get("plates") or {}).items() if row in ids}
+            for group in ("known", "explained", "unexplained"):
+                given[group] += len(sorted_out[group])
+            for i in sorted_out["unexplained"]:
+                for kind in where(read_from.get(i, set())):
+                    given["unexplained_" + kind] += 1
+                if len(given["examples"]) < 6:
+                    given["examples"].append({"cue": ids[r], "given": i, "read_from": where(read_from.get(i, set()))})
     resonated.sort()
     return {
         "cues": len(cues), "live": len(live_rows), "out_of_recall": len(retired_rows),
-        "plates": {"count": len(plates), "with_out_of_recall": len([p for p in plates if p["out_of_recall"]]),
+        "plates": {"count": len(plates), "logged": len([p for p in plates if p["logged"]]),
+                   "with_out_of_recall": len([p for p in plates if p["out_of_recall"]]),
                    "members": sum(p["members"] for p in plates), "members_out_of_recall": sum(p["out_of_recall"] for p in plates),
                    "worst": sorted(plates, key=lambda p: -(p["out_of_recall"] + p["forgotten"]))[:5]},
         "forgotten": {"total": forgotten_total, "on_record": forgotten_placed, "plates_unknown": max(0, forgotten_total - forgotten_placed)},
@@ -222,5 +305,9 @@ def diagnose(engine, sample: int = 300, seed: int = 1, realm: str = "waking") ->
                       "limit": 24, "cues_with_plates_turned_away": turned_away},
         "known_links": {"cues_with_any": len([r for r in cues if known.get(ids[r])]), "from_log": int(
             db.execute("SELECT COUNT(*) AS n FROM bindings WHERE cue_memory IS NOT NULL").fetchone()["n"])},
-        "recovery": totals, "cues_where_leaving_them_out_changed_the_result": differ, "examples": changed,
+        "recovery": totals,
+        "unexplained_by_plate": unexplained_by, "returned_by_plate": returned_by,
+        "strength": {group: {"count": len(v), "median": _median(v)} for group, v in scores.items()},
+        "given": given,
+        "cues_where_leaving_them_out_changed_the_result": differ, "examples": changed,
     }

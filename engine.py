@@ -693,6 +693,8 @@ class HolonomicMemory:
             gain = float(self._pgain.a[i])
             for row, sc in zip(rows[keep], scores[keep]):
                 out[int(row)] = max(out.get(int(row), 0.0), float(sc) * gain)
+                if info is not None:                     # which plate each memory was read from
+                    info.setdefault("plates", {}).setdefault(int(row), set()).add(int(self._pid.a[i]))
         return out
 
     def _lexical(self, query: str, mask: np.ndarray) -> dict[int, float]:
@@ -724,7 +726,7 @@ class HolonomicMemory:
                dual: bool = False, skip_kinds: tuple[str, ...] | list[str] = (), lexical: float = 0.0,
                kind_weights: dict[str, float] | None = None,
                only_kinds: tuple[str, ...] | list[str] = (), min_trust: float = 0.0,
-               min_strength: float = 0.0, reach: int = 1) -> list[Recollection]:
+               min_strength: float = 0.0, reach: int = 1, info: dict | None = None) -> list[Recollection]:
         """Recall memories for a text query, a prepared vector, discrete keys, or any mix.
 
         The best direct matches ("hops") are each used as an exact cue on the
@@ -803,7 +805,9 @@ class HolonomicMemory:
                     if direct[r] < max(hop_min, hop_ratio * d_top):
                         continue
                     relevance = float(direct[r]) / d_top
-                    for row, sc in self._probe(dither(self._cue(self._phasor_of(r))), codes, aperture=aperture).items():
+                    if info is not None:                 # for measuring: which memories were used as cues
+                        info.setdefault("hops", []).append(int(self._ids.a[r]))
+                    for row, sc in self._probe(dither(self._cue(self._phasor_of(r))), codes, aperture=aperture, info=info).items():
                         if row != r:
                             assoc[row] = max(assoc.get(row, 0.0), min(1.0, sc) * relevance)
                 # Follow links outward from what was just found.  Each further step is weaker,

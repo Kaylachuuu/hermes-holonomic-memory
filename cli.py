@@ -187,7 +187,7 @@ def _library_cmd(engine, cfg, args) -> None:
         lib.close_all(root)
 
 
-def _plates_cmd(engine, args) -> None:
+def _plates_cmd(engine, cfg, args) -> None:
     """Read-only: whether the write log accounts for the plates, and what the plates do at recall."""
     from . import audit
     st = audit.log_status(engine)
@@ -211,7 +211,7 @@ def _plates_cmd(engine, args) -> None:
     if args.plates_action != "check":
         print("For what the plates do at recall: hermes holonomic plates check")
         return
-    d = audit.diagnose(engine, sample=args.n)
+    d = audit.diagnose(engine, sample=args.n, cfg=cfg)
     if not d["cues"]:
         print(d.get("note", "Nothing to measure."))
         return
@@ -233,18 +233,38 @@ def _plates_cmd(engine, args) -> None:
     def line(name: str, key: str) -> None:
         t = rc[key]
         share = f"{100 * t['found'] / t['expected']:.0f}%" if t["expected"] else "n/a"
-        print(f"  {name:<46} known associates found: {t['found']}/{t['expected']} ({share});  returned in all: {t['returned']};  "
-              f"of those, linked by nothing on record: {t['unexplained']}")
+        print(f"  {name:<38} known found: {t['found']}/{t['expected']} ({share});  returned: {t['returned']} "
+              f"= {t['found']} known + {t['explained']} explained + {t['unexplained']} unexplained")
+    print("\nRead straight off the plates (everything above the noise, before any ranking):")
     line("as recall does it now", "as it is")
     line("with out-of-recall members left out", "without them")
     line("with no limit on plates read", "no limit")
+    st_ = d["strength"]
+    mid = lambda g: "n/a" if st_[g]["median"] is None else f"{st_[g]['median']:.2f}"
+    print(f"  how strongly they come back (typical; 1 is a full-strength link, recall treats anything above as 1): "
+          f"known {mid('known')}, explained {mid('explained')}, unexplained {mid('unexplained')}")
+    ub, rb = d["unexplained_by_plate"], d["returned_by_plate"]
+    print(f"  unexplained, by the plate they were read from: {ub['legacy']} of {rb['legacy']} from plates written before the log "
+          f"(records are missing there, which may be all it is);")
+    print(f"      {ub['logged']} of {rb['logged']} from plates with every write on record (there, nothing was written that would explain them).")
     print(f"Cues whose result changed when out-of-recall members were left out: {d['cues_where_leaving_them_out_changed_the_result']}.")
     for e in d["examples"]:
         print(f"    cue #{e['cue']}: gained {e['gained'] or 'nothing'} ({e['gained_expected']} known), "
               f"lost {e['lost'] or 'nothing'} ({e['lost_expected']} known)")
-    print("Reading this: more returned is not better in itself. What counts is known associates found, and how many\n"
-          "returns nothing on record explains. A conversation's neighbouring lines are linked too but were not recorded\n"
-          "before the log, so they are never 'known', only explained.")
+    g = d["given"]
+    print(f"\nWhat she would be given (recall as a message does it, each memory standing in for a message; up to {cfg.get('recall_k', 6)} each):")
+    print(f"  {g['given']} given over {g['cues']} cues: {g['by_likeness']} for their likeness to the message, {g['by_association']} brought by the plates.")
+    print(f"  of those the plates brought: {g['known']} known, {g['explained']} explained, {g['unexplained']} unexplained "
+          f"({g['unexplained_legacy']} read from plates written before the log, {g['unexplained_logged']} from plates on record).")
+    for e in g["examples"]:
+        print(f"    for #{e['cue']} she would be given #{e['given']} (read from a {' and a '.join(e['read_from'])} plate): hermes holonomic show {e['cue']} {e['given']}")
+    print("\nReading this:\n"
+          "  known       bound to the cue according to the write log, or to the sources a conclusion was stored with.\n"
+          "  explained   linked by something on record that is less exact: the next line of a conversation, an image and its parts.\n"
+          "  unexplained nothing on record links it to the cue. That is not the same as wrong. From a plate written before\n"
+          "              the log it may only mean the record is missing; from a plate with every write on record it is\n"
+          "              evidence that something was attributed that was never written for that cue.\n"
+          "  More returned is not better in itself.")
 
 
 def _backup_cmd(args) -> None:
@@ -331,7 +351,7 @@ def holonomic_command(args) -> None:
         elif action == "library":
             _library_cmd(engine, cfg, args)
         elif action == "plates":
-            _plates_cmd(engine, args)
+            _plates_cmd(engine, cfg, args)
         elif action == "context":
             try:
                 print((engine.path / "last_context.txt").read_text(encoding="utf-8").rstrip())
