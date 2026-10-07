@@ -1112,13 +1112,28 @@ class IdleReflector:
 
     def __init__(self, engine, load_cfg: Callable[[], Dict[str, Any]], key_fn: Optional[Callable[[str], List[str]]] = None,
                  spawn: Optional[Callable[..., threading.Thread]] = None, poll_seconds: float = 30.0,
-                 foundation_fn: Optional[Callable[[], str]] = None):
+                 foundation_fn: Optional[Callable[[], str]] = None, settle_seconds: float = 90.0):
         self.engine, self.load_cfg, self.key_fn = engine, load_cfg, key_fn
         self.foundation_fn = foundation_fn or (lambda: "")
         self.poll_seconds = poll_seconds
         self.last_activity = time.time()
         self.started = self.last_activity
         self.last_cause = "Hermes started this worker"
+        # The quiet clock belongs to the memory, not to this worker.  Hermes Desktop was seen ending a worker
+        # two minutes after starting it, with the app still open: each new worker began its count at nought, so a
+        # sleep that waits five quiet minutes, let alone sixty, could never come due.  The time of the last
+        # activity is kept on disk and a new worker carries on from it.  It then waits `settle_seconds` before
+        # starting anything, since a worker is often started because a message is on its way.
+        self.settle_until = self.started + max(0.0, settle_seconds)
+        self.holders: Optional[int] = None           # how many agents hold the memory open, when the provider says
+        self.ended: Optional[float] = None
+        try:
+            kept = json.loads(self._activity_path().read_text(encoding="utf-8"))
+            if 0 < float(kept["at"]) < self.started:
+                self.last_activity = float(kept["at"])
+                self.last_cause = str(kept.get("cause") or "something in the conversation") + " (before this worker started)"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         self.last_error = ""
         self.last_image_error = ""
         self.last_sleep_error = ""
@@ -1138,13 +1153,27 @@ class IdleReflector:
         nobody at the keyboard, and nothing could say what had started it."""
         self.last_activity = time.time()
         self.last_cause = cause or "something in the conversation"
+        try:
+            path = self._activity_path()
+            tmp = path.with_name(f"activity.{os.getpid()}.{threading.get_ident()}.part")
+            tmp.write_text(json.dumps({"at": self.last_activity, "cause": self.last_cause, "pid": os.getpid()}), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.debug("holonomic: could not keep the time of the last activity: %s", exc)
 
-    def stop(self) -> None:
+    def _activity_path(self) -> Path:
+        return Path(self.engine.path) / "activity.json"
+
+    def settling(self) -> float:
+        """Seconds this worker still waits after starting before it begins anything."""
+        return max(0.0, self.settle_until - time.time())
+
+    def stop(self, because: str = "") -> None:
+        """The worker ends.  Its note stays, saying when and why: a worker that vanished without a word was
+        indistinguishable from one that had never run."""
         self._stop.set()
-        try:                                             # gone, not merely silent
-            self._note_path().unlink()
-        except OSError:
-            pass
+        self.ended, self.ended_because = time.time(), because or "it was told to stop"
+        self.note()
 
     def wait(self, cfg: Dict[str, Any]) -> str:
         """Why reflection is not due yet, in words; empty when it is due."""
@@ -1178,7 +1207,13 @@ class IdleReflector:
             reflect_why = self.wait(cfg)
         except Exception as exc:
             sleep_why = reflect_why = f"could not be worked out ({exc})"
-        return {"at": now, "pid": os.getpid(), "started": self.started, "poll_seconds": self.poll_seconds,
+        settling = self.settling()
+        if settling:
+            sleep_why = sleep_why or f"this worker has only just started; it waits another {settling:.0f} s in case a message is on its way"
+            reflect_why = reflect_why or sleep_why
+        ended = {"ended": self.ended, "ended_because": getattr(self, "ended_because", "")} if self.ended else {}
+        return {**ended, "holders": self.holders, "settling": settling,
+                "at": now, "pid": os.getpid(), "started": self.started, "poll_seconds": self.poll_seconds,
                 "last_activity": self.last_activity, "last_cause": self.last_cause,
                 "doing": self.doing, "doing_since": self.doing_since if self.doing else None,
                 "sleep_waits_for": sleep_why, "reflection_waits_for": reflect_why,
@@ -1298,6 +1333,8 @@ class IdleReflector:
     def once(self) -> None:
         """One round of the worker.  Each task stands alone: the three used to share one guard, so a task that
         raised stopped the ones after it from ever being tried, round after round, and said nothing."""
+        if self.settling():
+            return
         for name, task in (("describing images", self.images_if_due), ("reflection", self.run_if_due), ("sleep", self.sleep_if_due)):
             try:
                 task()

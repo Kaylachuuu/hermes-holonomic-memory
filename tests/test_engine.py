@@ -1,3 +1,4 @@
+import time
 import numpy as np, pytest
 from conftest import TopicEmbedder, track
 from holonomic import HolonomicMemory, HashEmbedder
@@ -212,3 +213,71 @@ def test_a_plate_is_not_written_past_its_capacity(tmp_path):
     found = sum(1 for x, y in zip(lines, lines[1:]) if x in {h.id for h in m.associates(y, k=10)})
     assert found >= 0.9 * (len(lines) - 1) and m.stats()["plates"] > len(loads)
     assert max(float(r["load"]) for r in m._db.execute("SELECT load FROM plates")) <= 24.0 + 1e-3
+
+
+def test_a_capacity_too_small_for_one_association_is_refused(tmp_path):
+    """One association at weight w puts w squared on a plate.  The term-by-term rule lets any term onto an empty
+    plate, so a capacity below the largest single term would have been broken by the first bright write."""
+    from conftest import track
+    from holonomic import HolonomicMemory, HashEmbedder
+    from holonomic import engine as eng
+    assert eng.MIN_PLATE_CAPACITY == eng.MAX_WEIGHT ** 2 == 4.0
+    for bad in (3.9, 0.0, -1.0, float("nan")):
+        try:
+            HolonomicMemory(tmp_path / f"bad{bad}", HashEmbedder(), plate_capacity=bad)
+            raise AssertionError(f"a capacity of {bad} was accepted")
+        except ValueError as exc:
+            assert "at least 4" in str(exc)
+        assert not (tmp_path / f"bad{bad}" / "projection.npy").exists()          # refused before anything was set up
+    # the least allowed holds exactly one association at full weight, and is never exceeded
+    m = track(HolonomicMemory(tmp_path / "least", HashEmbedder(), plate_capacity=4.0))
+    a = m.remember("the first thing said", kind="said_user", session="s", salience=5.0)[0]       # salience is held to 2
+    m.remember("the second thing said", kind="said_user", session="s", salience=5.0)
+    loads = [float(r["load"]) for r in m._db.execute("SELECT load FROM plates ORDER BY id")]
+    assert len(loads) == 2 and max(loads) <= 4.0 + 1e-4
+    # a term larger than a whole plate is a fault in the caller: refused, and nothing of it is kept
+    row = m._row[a]
+    p = m._phasor_of(row)
+    before = (m._db.execute("SELECT COUNT(*) FROM bindings").fetchone()[0], [float(r["load"]) for r in m._db.execute("SELECT load FROM plates")])
+    m._db.execute("BEGIN IMMEDIATE")
+    try:
+        m._write("waking", [(m._cue(p), p, row, 3.0, a, None)])
+        raise AssertionError("a term of energy 9 went onto a plate that holds 4")
+    except ValueError as exc:
+        assert "more than a whole plate holds" in str(exc)
+    finally:
+        m._db.execute("ROLLBACK")
+        m._load()
+    assert before == (m._db.execute("SELECT COUNT(*) FROM bindings").fetchone()[0], [float(r["load"]) for r in m._db.execute("SELECT load FROM plates")])
+    # a store that somehow holds a smaller value says so when it is opened
+    m._db.execute("UPDATE meta SET value = '2.0' WHERE key = 'plate_capacity'")
+    m.close()
+    try:
+        HolonomicMemory(tmp_path / "least", HashEmbedder())
+        raise AssertionError("a store with capacity 2 was opened")
+    except ValueError as exc:
+        assert "below the least" in str(exc)
+
+
+def test_what_is_turned_down_does_not_use_up_the_shortlist(tmp_path):
+    """linked() and echoes() took their best k and the caller then turned some down (already used, too short),
+    so a usable memory just below them was never seen."""
+    m = mem(tmp_path)
+    now = time.time()
+    old = now - 40 * 86400
+    hub = m.remember("We planted tomatoes along the south fence in spring", kind="said_user", session="a", created_at=old)[0]
+    tied = [m.remember(t, kind="said_user", session=f"b{i}", chain=False, links=[hub], created_at=old + i)[0]
+            for i, t in enumerate(("ok", "The neighbour's dog dug up half of them", "We put wire around the whole bed", "yes"))]
+    order = [x["id"] for x in m.linked(hub, k=10)]
+    assert set(order) == set(tied)
+    first = order[0]
+    assert [x["id"] for x in m.linked(hub, k=1)] == [first]
+    assert [x["id"] for x in m.linked(hub, k=1, skip_ids={first})] == [order[1]]            # the next one down, not nothing
+    long = [i for i in order if len(m.get(i)["text"]) >= 25]
+    assert len(long) == 2 and [x["id"] for x in m.linked(hub, k=2, min_chars=25)] == long
+    assert [x["id"] for x in m.linked(hub, k=1, min_chars=25, skip_ids={long[0]})] == [long[1]]
+    assert m.linked(hub, k=3, skip_ids=set(tied)) == []
+    seed = m.remember("The tomatoes along the fence are ripe", kind="said_user", session="now", created_at=now)[0]
+    likes = [e["id"] for e in m.echoes(seed, older_than=now - 86400, k=10, low=0.01, high=0.999)]
+    assert len(likes) >= 2
+    assert [e["id"] for e in m.echoes(seed, older_than=now - 86400, k=1, low=0.01, high=0.999, skip_ids={likes[0]})] == [likes[1]]

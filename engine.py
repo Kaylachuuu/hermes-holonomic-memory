@@ -324,6 +324,12 @@ def normalize_key(key: str) -> str:
     return re.sub(r"\s+", " ", key.strip().lower())
 
 
+MIN_WEIGHT, MAX_WEIGHT = 0.25, 2.0          # how faintly and how brightly a memory may be written
+# One association written at weight w puts w squared of energy on a plate (cue and target are unit phasors).
+# A plate must hold at least one at full weight.
+MIN_PLATE_CAPACITY = MAX_WEIGHT ** 2
+
+
 class HolonomicMemory:
     def __init__(self, path: str | Path, embedder, *, dim: int = 4096, plate_capacity: float = 128.0,
                  max_chars: int = 1200):
@@ -372,6 +378,9 @@ class HolonomicMemory:
         proj_path = self.path / "projection.npy"
         stored = self._meta_get("embedder")
         if stored is None:
+            if not float(plate_capacity) >= MIN_PLATE_CAPACITY:      # before anything is created
+                raise ValueError(f"plate_capacity is {float(plate_capacity):g}; it must be at least {MIN_PLATE_CAPACITY:g}, "
+                                 "so that a single association written at full weight fits on an empty plate. The default is 128.")
             calib = np.asarray(self.embedder.embed(_CALIBRATION, "document"), dtype=np.float32)
             embed_dim = int(calib.shape[1])
             center = calib.mean(axis=0)
@@ -388,6 +397,9 @@ class HolonomicMemory:
         self.dim = int(self._meta_get("dim"))
         self.embed_dim = int(self._meta_get("embed_dim"))
         self.plate_capacity = float(self._meta_get("plate_capacity"))
+        if not self.plate_capacity >= MIN_PLATE_CAPACITY:        # also turns away a value that is not a number
+            raise ValueError(f"This store's plate capacity is {self.plate_capacity:g}, below the least a plate can have "
+                             f"({MIN_PLATE_CAPACITY:g}): a single association written at full weight would not fit on an empty plate.")
         center = np.frombuffer(self._meta_get("center"), dtype=np.float32)
         if not proj_path.exists():
             raise FileNotFoundError(f"{proj_path} is missing; the plates cannot be read without it.")
@@ -571,6 +583,12 @@ class HolonomicMemory:
                 i = self._plate_for(realm, 0.0)
                 trace = self._trace.a[i] + term
                 load = float(np.mean(np.abs(trace) ** 2))
+            if load > self.plate_capacity * (1 + 1e-6):
+                # Only a term too large for an empty plate gets here.  Stores are refused a capacity that small and
+                # weights are held to MAX_WEIGHT, so this is a fault in the caller: refuse it, and the caller's
+                # transaction is rolled back, sooner than keep a plate above its capacity.
+                raise ValueError(f"one association of weight {float(w):g} has energy {load:.3g}, more than a whole plate "
+                                 f"holds ({self.plate_capacity:g})")
             self._trace.a[i] = trace
             self._gate.a[i] += np.complex64(w) * cue
             self._pload.a[i] = load
@@ -619,7 +637,7 @@ class HolonomicMemory:
             phasors = self.proj.phasor(X)
         now = time.time() if created_at is None else created_at
         all_keys = list(dict.fromkeys(normalize_key(k) for k in keys if k and k.strip()))
-        w = float(min(max(salience, 0.25), 2.0))
+        w = float(min(max(salience, MIN_WEIGHT), MAX_WEIGHT))
         ids: list[int] = []
         with self._lock, _single_threaded():
             self._db.execute("BEGIN IMMEDIATE")      # take the write lock first, then check for foreign writes
@@ -1139,12 +1157,12 @@ class HolonomicMemory:
     @_locked
     def echoes(self, memory_id: int, *, older_than: float, low: float = 0.25, high: float = 0.7, k: int = 3,
                kinds: tuple[str, ...] | list[str] = (), realm: str = "waking",
-               skip_kinds: tuple[str, ...] | list[str] = ()) -> list[dict]:
+               skip_kinds: tuple[str, ...] | list[str] = (), skip_ids=()) -> list[dict]:
         """Older memories that resemble this one somewhat: related, but not the same thing
         said again.  Faded memories are included; this is how a dream reaches back.  Works
         from the stored vectors, so it costs no embedding calls and strengthens nothing.
 
-        Age and kind are decided before the best `k` are taken.  They used to be decided after: the likeliest
+        Age, kind and `skip_ids` (memories the caller already has) are decided before the best `k` are taken.  They used to be decided after: the likeliest
         few candidates were taken first, and if those were all recent, or all of a kind the caller would not
         use, nothing came back although older memories that fitted were a little further down."""
         row = self._row.get(memory_id)
@@ -1158,6 +1176,10 @@ class HolonomicMemory:
         if skip_kinds:
             ok &= ~np.isin(self._kind.v, [self._kind_codes[x] for x in skip_kinds if x in self._kind_codes])
         ok[row] = False
+        for mid in skip_ids:
+            at = self._row.get(mid)
+            if at is not None:
+                ok[at] = False
         if not ok.any():
             return []
         old = np.zeros(self._X.n, dtype=bool)
@@ -1177,10 +1199,14 @@ class HolonomicMemory:
         return [dict(rows[mid], similarity=float(sims[r])) for r, mid in zip(candidates, ids) if mid in rows]
 
     def linked(self, memory_id: int, *, older_than: float | None = None, k: int = 2, realm: str = "waking",
-               skip_kinds: tuple[str, ...] | list[str] = ()) -> list[dict]:
+               skip_kinds: tuple[str, ...] | list[str] = (), skip_ids=(), min_chars: int = 0) -> list[dict]:
         """What the plates tie to this memory, strongest first: read off the plates with the memory as the cue.
         With `older_than`, only memories from before then.  Faded memories are included and nothing is
-        strengthened: this is for dreaming, which reaches back without disturbing what it finds."""
+        strengthened: this is for dreaming, which reaches back without disturbing what it finds.
+
+        Everything the caller would turn down (`skip_kinds`, `skip_ids`, text shorter than `min_chars`, too
+        recent) is left out before the strongest `k` are taken, so what is turned down never takes the place
+        of something usable further down."""
         with self._lock, _single_threaded():
             self._sync()
             row = self._row.get(memory_id)
@@ -1189,8 +1215,10 @@ class HolonomicMemory:
                 return []
             found = self._probe(self._cue(self._phasor_of(row)), [code])
             skip = {self._kind_codes[x] for x in skip_kinds if x in self._kind_codes}
+            have = set(skip_ids)
             rows = [(r, sc) for r, sc in found.items()
-                    if r != row and self._trust.a[r] >= 0.15 and int(self._kind.a[r]) not in skip]
+                    if r != row and self._trust.a[r] >= 0.15 and int(self._kind.a[r]) not in skip
+                    and int(self._ids.a[r]) not in have]
             if not rows:
                 return []
             ids = [int(self._ids.a[r]) for r, _ in rows]
@@ -1200,7 +1228,7 @@ class HolonomicMemory:
                 sql, params = sql + " AND created_at < ?", params + [older_than]
             kept = {r["id"]: dict(r) for r in self._db.execute(sql, params)}
             out = [dict(kept[int(self._ids.a[r])], link=float(min(1.0, sc))) for r, sc in sorted(rows, key=lambda t: -t[1])
-                   if int(self._ids.a[r]) in kept]
+                   if int(self._ids.a[r]) in kept and len(kept[int(self._ids.a[r])]["text"]) >= min_chars]
             return out[:k]
 
     @_locked

@@ -370,8 +370,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         seed = pool.pop(pick)[0]
         seeds.append(seed)
         used_sessions.add(seed["session"])
-    fragments, seen = [], set(exclude)
-    spare = len(exclude)                                 # ask for that many more, so what is passed over can be replaced
+    fragments, seen = [], set(exclude)                   # `seen` is handed to each look into the past, which leaves it out
     for seed in seeds:
         if seed["id"] in seen:
             continue
@@ -379,7 +378,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"],
                           "kind": seed["kind"]})
         echoed = []
-        for echo in engine.echoes(seed["id"], older_than=since, k=2 + spare, skip_kinds=skip):
+        for echo in engine.echoes(seed["id"], older_than=since, k=2, skip_kinds=skip, skip_ids=seen):
             if echo["id"] not in seen and len(echoed) < 2:
                 seen.add(echo["id"])
                 echoed.append(echo["id"])
@@ -389,7 +388,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         for origin in [seed["id"]] + echoed:             # what the plates tie to the memory itself, then to its echoes
             if room <= 0:
                 break
-            for tied in engine.linked(origin, older_than=since, k=room + spare, skip_kinds=skip):
+            for tied in engine.linked(origin, older_than=since, k=room, skip_kinds=skip, skip_ids=seen, min_chars=25):
                 if tied["id"] not in seen and len(tied["text"]) >= 25 and room > 0:
                     seen.add(tied["id"])
                     room -= 1
@@ -400,7 +399,7 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
         seen.add(seed["id"])
         fragments.append({"id": seed["id"], "text": seed["text"], "age": "RECENT", "strength": seed["strength"], "kind": IMAGE,
                           "image_id": _image_of(engine, seed["id"])})
-        for echo in engine.echoes(seed["id"], older_than=since, k=1 + spare, kinds=(IMAGE,)):
+        for echo in engine.echoes(seed["id"], older_than=since, k=1, kinds=(IMAGE,), skip_ids=seen):
             if echo["id"] not in seen:
                 seen.add(echo["id"])
                 fragments.append({"id": echo["id"], "text": echo["text"], "age": "OLDER", "strength": echo["strength"],

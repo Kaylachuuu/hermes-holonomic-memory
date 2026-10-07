@@ -380,8 +380,37 @@ def _acquire_engine(data_dir: Path, cfg: Dict[str, Any]):
                                       spawn=lambda target, name: spawn_context_thread(target, name=name),
                                       foundation_fn=lambda: read_foundation(home))
             entry = _ENGINES[key] = [engine, 0, reflector]
+            _close_at_exit()
         entry[1] += 1
+        entry[2].holders = entry[1]
         return entry[0]
+
+
+# Whether the engine and its background worker stay when the last agent lets go of them.  They do: Hermes
+# Desktop shuts an agent's memory down a couple of minutes after a reply while the app stays open, and a worker
+# that ended with it never lived long enough for a quiet period to pass, so nothing unattended ever ran.  Both
+# are closed when the program exits.  (The tests turn this off: they open and close hundreds of stores.)
+KEEP_WORKER = True
+_AT_EXIT = False
+
+
+def _close_at_exit() -> None:
+    global _AT_EXIT
+    if not _AT_EXIT:
+        import atexit
+        atexit.register(close_everything, "Hermes exited")
+        _AT_EXIT = True
+
+
+def close_everything(because: str = "it was told to stop") -> None:
+    with _ENGINES_LOCK:
+        for key, entry in list(_ENGINES.items()):
+            del _ENGINES[key]
+            try:
+                entry[2].stop(because)
+                entry[0].close()
+            except Exception as exc:
+                logger.debug("holonomic: close failed: %s", exc)
 
 
 def reflector_for(engine) -> Optional[IdleReflector]:
@@ -393,12 +422,19 @@ def _release_engine(engine) -> None:
     with _ENGINES_LOCK:
         for key, entry in list(_ENGINES.items()):
             if entry[0] is engine:
-                entry[1] -= 1
+                entry[1] = max(0, entry[1] - 1)
+                entry[2].holders = entry[1]
                 if entry[1] <= 0:
-                    del _ENGINES[key]
-                    entry[2].stop()
                     try:
                         _library.close_all(_library.root_of(engine))
+                    except Exception as exc:
+                        logger.debug("holonomic: libraries not closed: %s", exc)
+                    if KEEP_WORKER:                      # the worker carries on; the next agent finds it running
+                        entry[2].note()
+                        continue
+                    del _ENGINES[key]
+                    entry[2].stop("Hermes shut the memory down")
+                    try:
                         engine.close()
                     except Exception as exc:
                         logger.debug("holonomic: close failed: %s", exc)

@@ -471,7 +471,7 @@ def test_the_background_worker_says_what_it_is_doing_and_why_not(tmp_path):
     talk(m, "s-old", time.time() - 2 * DAY, OS)
     cfg = {"sleep_enabled": True, "reflect_enabled": True, "reflect_model": "gemma", "sleep_idle_seconds": 300, "sleep_min_hours": 12,
            "reflect_min_new": 500}
-    r = reflect.IdleReflector(m, lambda: cfg, poll_seconds=3600)
+    r = reflect.IdleReflector(m, lambda: cfg, poll_seconds=3600, settle_seconds=0)
     real = sl.sleep_once
     try:
         note = lambda: json.loads(r._note_path().read_text())
@@ -579,7 +579,14 @@ def test_cli_status_shows_the_background_worker(tmp_path):
         assert "a message came in: 'What is my name, do you remember it?'" in run("sleep", "status")
         # Hermes closed: the last word from the worker is old, and the status says nobody is there
         p.shutdown()
-        assert not list((home / "holonomic").glob("worker*.json"))                           # a worker that stops takes its note with it
+        # a worker that stops leaves word of when and why: one that vanished could not be told from one that never ran
+        left = [json.loads(f.read_text()) for f in (home / "holonomic").glob("worker*.json")]
+        assert len(left) == 1 and left[0]["ended"] and left[0]["ended_because"] == "Hermes shut the memory down"
+        text = run("sleep", "status")
+        assert "no Hermes is running with this memory right now" in text and "Hermes shut the memory down" in text
+        assert "the last activity on record was at" in text and "a message came in: 'What is my name" in text
+        for f in (home / "holonomic").glob("worker*.json"):
+            f.unlink()
         assert "in the background: nothing on record" in run("sleep", "status")
         # a program that died without tidying up: its last word is old, and the status says nobody is there
         state = dict(saved, at=time.time() - 3600)
@@ -652,3 +659,58 @@ def test_an_old_memory_is_dreamt_of_once_a_night(tmp_path):
     again = {f["id"] for f in second}
     assert not again & {f["id"] for f in first}                      # nothing from the first dream, old or new
     assert again & (set(old) - older)                                # and the past is still reached: other old memories step in
+
+
+def test_the_worker_outlives_the_agent_and_the_quiet_clock_outlives_the_worker(tmp_path):
+    """Hermes Desktop was seen ending the memory's worker two minutes after starting it, with the app still open.
+    Each new worker counted quiet from its own start, so a sleep that waits five quiet minutes never came due."""
+    if not HAVE_HERMES: return
+    import holonomic.provider as prov
+    from pathlib import Path
+    from holonomic import sleep
+    from holonomic.reflect import IdleReflector
+    keep = prov.KEEP_WORKER
+    prov.KEEP_WORKER = True
+    try:
+        p = make(tmp_path)
+        engine = p._engine
+        worker = prov.reflector_for(engine)
+        assert worker.holders == 1
+        p.sync_turn("My name is Kayla and I build memory systems for fun", "Nice to meet you, Kayla.", session_id="s1")
+        told = worker.last_activity
+        p.shutdown()                                                 # the agent lets go; Hermes itself is still running
+        assert prov.reflector_for(engine) is worker and not worker._stop.is_set() and worker.holders == 0
+        note = json.loads(worker._note_path().read_text())
+        assert note["holders"] == 0 and "ended" not in note
+        assert engine.stats()["memories"] >= 2                       # still open
+        q = make(tmp_path)                                           # the next agent finds the same engine and worker
+        assert q._engine is engine and prov.reflector_for(engine) is worker and worker.holders == 1
+        assert worker.last_activity == told                          # and the clock was not started over
+        q.shutdown()
+        # a new worker, as in a new program, carries on from the last activity on record
+        kept = json.loads((Path(engine.path) / "activity.json").read_text())
+        assert kept["at"] == told and "a turn was stored" in kept["cause"]
+        (Path(engine.path) / "activity.json").write_text(json.dumps(dict(kept, at=time.time() - 400)))
+        cfg = {"sleep_enabled": True, "sleep_idle_seconds": 300, "sleep_min_hours": 0, "reflect_model": "gemma"}
+        ran = []
+        nxt = IdleReflector(engine, lambda: cfg, spawn=lambda target, name: types.SimpleNamespace(start=lambda: None), settle_seconds=60)
+        try:
+            assert 395 < time.time() - nxt.last_activity < 410 and "(before this worker started)" in nxt.last_cause
+            assert sleep.sleep_due(engine, cfg, nxt.last_activity)   # quiet long enough already
+            # but it starts nothing in its first moments: a worker is often started because a message is on its way
+            nxt.images_if_due = nxt.run_if_due = nxt.sleep_if_due = lambda: ran.append(1)
+            nxt.once()
+            assert ran == [] and "only just started" in nxt.state(cfg)["sleep_waits_for"]
+            nxt.settle_until = time.time() - 1
+            nxt.once()
+            assert len(ran) == 3 and nxt.state(cfg)["sleep_waits_for"] == ""
+            nxt.touch("a message came in: 'hi'")                     # and a message starts the count again, for everyone after
+            assert json.loads((Path(engine.path) / "activity.json").read_text())["cause"] == "a message came in: 'hi'"
+        finally:
+            nxt.stop("the test is over")
+        assert json.loads(nxt._note_path().read_text())["ended_because"] == "the test is over"
+        prov.close_everything("Hermes exited")
+        assert json.loads(worker._note_path().read_text())["ended_because"] == "Hermes exited" and prov.reflector_for(engine) is None
+    finally:
+        prov.KEEP_WORKER = keep
+        prov.close_everything()

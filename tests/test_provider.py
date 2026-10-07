@@ -18,6 +18,10 @@ except Exception:
 
 from holonomic import HolonomicMemory, HashEmbedder
 
+if HAVE_HERMES:                          # a store and its worker close with the last agent, as the tests expect;
+    import holonomic.provider as _provider       # in Hermes they stay until the program exits
+    _provider.KEEP_WORKER = False
+
 
 def make(tmp_path, **kwargs):
     from holonomic.provider import HolonomicMemoryProvider

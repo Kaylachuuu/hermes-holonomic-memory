@@ -209,11 +209,31 @@ def _worker(engine, what: str) -> None:
         print("  in the background: nothing on record. Unattended work is done by Hermes while it is open; "
               "no Hermes with this version has run yet.")
         return
-    live = [st for st in states if st["age"] <= 3 * float(st.get("poll_seconds", 30)) + 30 or st.get("doing")]
+    clock = lambda t: time.strftime("%H:%M:%S", time.localtime(float(t)))       # noqa: E731
+
+    def gone(st) -> str:
+        up = (float(st.get("ended") or st["at"]) - float(st.get("started", st["at"]))) / 60
+        if st.get("ended"):
+            return (f"process {st.get('pid')} ran from {clock(st.get('started', st['at']))} to {clock(st['ended'])} "
+                    f"({up:.0f} minutes): {st.get('ended_because') or 'it was told to stop'}")
+        return (f"process {st.get('pid')} started at {clock(st.get('started', st['at']))} and was last heard from at {clock(st['at'])} "
+                f"({up:.0f} minutes); it ended without saying so, as a program does when it is closed abruptly")
+
+    live = [st for st in states if not st.get("ended")
+            and (st["age"] <= 3 * float(st.get("poll_seconds", 30)) + 30 or st.get("doing"))]
+    over = sorted((st for st in states if st not in live), key=lambda st: -float(st.get("ended") or st["at"]))
     if not live:
-        last = min(states, key=lambda st: st["age"])
-        print(f"  in the background: no Hermes is running with this memory right now (last heard from {_when(last['at'])}, "
-              f"{last['age'] / 60:.0f} minutes ago). Unattended work only happens while Hermes is open.")
+        print("  in the background: no Hermes is running with this memory right now. Unattended work only happens while Hermes is open.")
+        for st in over[:3]:
+            print(f"    {gone(st)}")
+        if len(over) > 3:
+            print(f"    and {len(over) - 3} more in the last day")
+        try:
+            kept = json.loads((engine.path / "activity.json").read_text(encoding="utf-8"))
+            print(f"    the last activity on record was at {_when(kept['at'])}: {kept.get('cause')}. "
+                  "The next worker counts the quiet from then.")
+        except (OSError, ValueError, KeyError):
+            pass
         return
     name = "sleep" if what == "sleep" else "reflection"
     if len(live) > 1:
@@ -224,6 +244,8 @@ def _worker(engine, what: str) -> None:
         print(f"  in the background: Hermes is running (process {state.get('pid')}, up {up:.0f} minutes, heard from {state['age']:.0f} s ago)")
         print(f"    quiet for {quiet:.1f} minutes, since {time.strftime('%H:%M:%S', time.localtime(float(state.get('last_activity', state['at']))))}: "
               f"{state.get('last_cause') or 'something in the conversation'}")
+        if state.get("holders") == 0:
+            print("    no conversation holds the memory open just now; the worker carries on regardless")
         if state.get("doing"):
             print(f"    it is {state['doing']} now, and has been for {(time.time() - float(state['doing_since'])) / 60:.1f} minutes")
         else:
@@ -235,6 +257,11 @@ def _worker(engine, what: str) -> None:
                            ("last_image_error", "describing images")):
             if state.get(key) and (what == "sleep" or key != "last_sleep_error"):
                 print(f"    {label} reported: {state[key]}")
+    recent = [st for st in over if time.time() - float(st.get("ended") or st["at"]) < 3600]
+    for st in recent[:3]:
+        print(f"    before it: {gone(st)}")
+    if len(recent) > 3:
+        print(f"    and {len(recent) - 3} more in the last hour")
 
 
 def _plates_cmd(engine, cfg, args) -> None:
