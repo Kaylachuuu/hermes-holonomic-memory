@@ -123,6 +123,7 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_style": "dreamlike, soft light, slightly out of focus",
     "dream_image_negative": "",
     "dream_image_timeout": 600,
+    "dream_image_retry_wait": 30,     # seconds to wait before asking again when the image server drops out; 0 = give up at once
 }
 DREAM_IMAGE_MODES = ("off", "words", "pictures", "from_images")
 
@@ -582,7 +583,8 @@ _SCENES_SCHEMA = {"type": "object", "properties": {"scenes": {"type": "array", "
 
 
 def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], one: dict, *, dry_run: bool,
-                    paint: Optional[Callable[..., bytes]], label: str, only_whole: bool = False) -> List[dict]:
+                    paint: Optional[Callable[..., bytes]], label: str, only_whole: bool = False,
+                    no_whole: bool = False) -> List[dict]:
     """Pictures of a dream.  The dream's author says which moments and what they look like; an image generator
     draws them.  In 'from_images' mode a moment that resembles images she has seen is drawn starting from those.
     A failure here never loses the dream: it is reported and the dream stands without pictures."""
@@ -628,6 +630,8 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
     whole = str(sc["dream_image_whole"] or "off").strip().lower()
     if only_whole and whole != "scene":              # asked for outright, so drawn even where it is off for new dreams
         whole = "text"
+    if no_whole:                                     # the moments of a dream from before, which has that picture already
+        whole = "off"
     if whole == "scene":
         try:
             seen = _parse(call("whole scene" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES,
@@ -660,7 +664,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
             for d, one_attempt in jobs:
                 try:
                     began = time.time()
-                    d["new"] = [one_attempt() for _ in range(attempts)]
+                    d["new"] = _patiently(lambda: [one_attempt() for _ in range(attempts)], sc, report, label)
                     report["calls"].append({"step": what.format(n=attempts), "seconds": time.time() - began, "drawing": True})
                 except Exception as exc:             # the server is off, or sent back something that is not a picture
                     report["errors"].append(f"dream pictures{label}: {exc}")
@@ -744,7 +748,8 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
                 began = time.time()
                 try:
                     w, h = d["shape"] if sized else size
-                    d["kept"] = enlarge(d["tries"][d["best"]], (int(round(w * factor)), int(round(h * factor))))
+                    d["kept"] = _patiently(lambda d=d, w=w, h=h: enlarge(d["tries"][d["best"]], (int(round(w * factor)), int(round(h * factor)))),
+                                           sc, report, label)
                     d["enlarged"] = (int(round(w * factor)), int(round(h * factor)))
                     report["calls"].append({"step": "enlarge the one she kept", "seconds": time.time() - began, "drawing": True})
                 except Exception as exc:         # the picture stands at the size it was drawn
@@ -767,6 +772,28 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
                          **({"redrawn": d["redrawn"]} if d.get("redrawn") else {}),
                          **({"enlarged": list(d["enlarged"])} if d.get("enlarged") else {})))
     return made
+
+
+_wait = time.sleep                               # tests put something quicker here
+
+
+def _patiently(work: Callable[[], Any], sc: Dict[str, Any], report: Dict[str, Any], label: str) -> Any:
+    """Do `work`; if the image server is not there, wait and ask again, twice at most.
+
+    An image server that crashes is usually started again by whatever runs it, within seconds.  Before this, one
+    crash while a model loaded cost a night's pictures: the first failed as the server went down and the next was
+    refused while it was coming back."""
+    from . import paint as _paint
+    wait = max(0.0, float(sc.get("dream_image_retry_wait") or 0))
+    for again in (1, 2, None):
+        try:
+            return work()
+        except _paint.Unreachable as exc:
+            if not wait or again is None:
+                raise
+            pause = wait * again
+            report.setdefault("waited", []).append(f"dream pictures{label}: {exc}. Waited {pause:.0f} s and asked again.")
+            _wait(pause)
 
 
 def _looser(painter: Callable[..., bytes], given: Optional[Callable[..., bytes]], sc: Dict[str, Any],
@@ -856,26 +883,42 @@ def dreams(engine, n: int = 5) -> List[dict]:
 
 def draw_whole(engine, cfg: Dict[str, Any], dream_ids: List[int], *, llm: Optional[Callable[..., str]] = None,
                paint: Optional[Callable[..., bytes]] = None, again: bool = False,
-               tell: Optional[Callable[[dict], None]] = None) -> Dict[str, Any]:
-    """The picture of the whole dream, for dreams she has already had.  Nothing about a dream changes: it gains a
-    picture, kept in the folder of the sleep it came from.  A dream that has one is passed over unless `again`."""
+               tell: Optional[Callable[[dict], None]] = None, moments: bool = False) -> Dict[str, Any]:
+    """Pictures for dreams she has already had.  Nothing about a dream changes: it gains pictures, kept in the
+    folder of the sleep it came from.
+
+    By default the one picture of the whole dream; a dream that has one is passed over unless `again`.  With
+    `moments`, the pictures of its moments as a new dream would get them, drawing on the same images she had
+    seen (a dream whose pictures were lost to an image server that fell over); a dream that has any is passed over
+    unless `again`, and the picture of the whole dream is drawn too if it has none."""
     report: Dict[str, Any] = {"calls": [], "errors": [], "drawn": [], "had": [], "missing": []}
     sc = sleep_config(cfg)
     if sc["dream_images"] not in ("pictures", "from_images"):
         report["errors"].append("pictures of dreams are switched off. Turn them on with: hermes holonomic dreams images pictures")
         return report
-    call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True) if sc["dream_image_whole"] == "scene" else None
+    needs_words = moments or sc["dream_image_whole"] == "scene"
+    call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True) if needs_words else None
     for dream_id in dream_ids:
         d = engine.get(int(dream_id))
         if not d or d.get("kind") != DREAM:
             report["missing"].append(int(dream_id))
             continue
-        if not again and any(p.get("whole") for p in _pictures_of(engine, int(dream_id))):
+        has = _pictures_of(engine, int(dream_id))
+        has_whole = any(p.get("whole") for p in has)
+        if not again and (any(not p.get("whole") for p in has) if moments else has_whole):
             report["had"].append(int(dream_id))
             continue
+        fragments = []
+        if moments:
+            for fid in (d.get("meta") or {}).get("fragments") or []:
+                try:
+                    fragments.append({"id": int(fid), "image_id": _image_of(engine, int(fid))})
+                except Exception:
+                    pass
         before = len(report["errors"])
-        made = _dream_pictures(engine, cfg, call, report, {"id": int(dream_id), "text": d["text"], "fragments": []},
-                               dry_run=False, paint=paint, label=f" #{int(dream_id)}", only_whole=True)
+        made = _dream_pictures(engine, cfg, call, report, {"id": int(dream_id), "text": d["text"], "fragments": fragments},
+                               dry_run=False, paint=paint, label=f" #{int(dream_id)}", only_whole=not moments,
+                               no_whole=moments and has_whole)
         for p in made:
             report["drawn"].append(dict(p, dream=int(dream_id)))
             if tell:

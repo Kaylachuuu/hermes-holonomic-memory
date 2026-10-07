@@ -32,6 +32,11 @@ class PaintError(RuntimeError):
     pass
 
 
+class Unreachable(PaintError):
+    """The image server is not there: off, restarting, or it dropped the connection or the job part way.  Worth
+    waiting and asking again, which a refusal or a bad picture is not."""
+
+
 def _post(url: str, body: Optional[bytes], content_type: str, timeout: float, raw: bool = False) -> Any:
     """POST `body`, or GET when there is none.  Returns the parsed JSON reply, or the bytes when `raw`."""
     req = urllib.request.Request(url, data=body, headers={"Content-Type": content_type} if body is not None else {})
@@ -46,7 +51,7 @@ def _post(url: str, body: Optional[bytes], content_type: str, timeout: float, ra
     except (urllib.error.URLError, OSError, ValueError) as exc:
         if "timed out" in str(exc).lower():
             raise PaintError(f"The image server did not finish within {timeout:.0f} s") from exc
-        raise PaintError(f"Could not reach the image server at {url}: {exc}") from exc
+        raise Unreachable(f"Could not reach the image server at {url}: {exc}") from exc
 
 
 def _decode(value: Any) -> bytes:
@@ -100,6 +105,7 @@ def _comfy_run(host: str, graph: Dict[str, Any], timeout: float, poll: float) ->
     if not job:
         raise PaintError(f"ComfyUI did not accept the job: {json.dumps(queued)[:300]}")
     deadline = time.time() + timeout
+    look = time.time() + 10
     while time.time() < deadline:
         entry = (_post(f"{host}/history/{job}", None, "", min(timeout, 60)) or {}).get(job)
         if entry:
@@ -111,6 +117,15 @@ def _comfy_run(host: str, graph: Dict[str, Any], timeout: float, poll: float) ->
             status = entry.get("status") or {}
             if status.get("completed") or status.get("status_str") == "error":
                 raise PaintError(f"ComfyUI finished without a picture: {json.dumps(status)[:300]}")
+        elif time.time() >= look:
+            # A server that crashed and came back answers again, but knows nothing of the job: without this the
+            # wait would run to the full timeout for a picture that is never coming.
+            look = time.time() + 10
+            waiting = _post(f"{host}/queue", None, "", min(timeout, 60)) or {}
+            known = any(job in map(str, item) for part in ("queue_running", "queue_pending") for item in (waiting.get(part) or [])
+                        if isinstance(item, (list, tuple)))
+            if not known and not (_post(f"{host}/history/{job}", None, "", min(timeout, 60)) or {}).get(job):
+                raise Unreachable("The image server no longer knows of the picture it was drawing; it has probably restarted")
         time.sleep(poll)
     raise PaintError(f"The image server did not finish within {timeout:.0f} s")
 

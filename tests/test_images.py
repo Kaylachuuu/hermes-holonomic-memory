@@ -2453,3 +2453,133 @@ def test_the_whole_picture_for_dreams_she_already_had(tmp_path):
     report = draw_whole(m, cfg, [first["id"], second["id"]], paint=broken, again=True)
     assert report["drawn"] == [] and len(report["errors"]) == 1 and "Could not reach the image server" in report["errors"][0]
     assert "switched off" in draw_whole(m, dict(cfg, dream_images="words"), [first["id"]], paint=paint)["errors"][0]
+
+
+class _Patch:
+    """What pytest's monkeypatch does, for the plain runner too."""
+
+    def __init__(self):
+        self.was = []
+
+    def setattr(self, obj, name, value):
+        self.was.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def undo(self):
+        for obj, name, value in reversed(self.was):
+            setattr(obj, name, value)
+
+
+def _patched(fn):
+    def run(tmp_path):
+        mp = _Patch()
+        try:
+            fn(tmp_path, mp)
+        finally:
+            mp.undo()
+    run.__name__ = fn.__name__
+    return run
+
+
+@_patched
+def test_an_image_server_that_falls_over_and_comes_back_does_not_cost_the_pictures(tmp_path, monkeypatch):
+    """ComfyUI crashed loading a model and was started again ten seconds later.  The picture being drawn failed as
+    it went down, the next was refused while it came back, and a night's pictures were lost."""
+    import random
+    from holonomic import paint as P, sleep as S
+    from holonomic.sleep import sleep_once
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=1, dream_image_style="", dream_image_candidates=1)
+    waits, calls = [], []
+    monkeypatch.setattr(S, "_wait", waits.append)
+
+    def paint(prompt, start, size=None):
+        calls.append(prompt)
+        if len(calls) <= 2:
+            raise P.Unreachable("Could not reach the image server at http://x: refused")
+        return picture(768, 512, colour=(40, 10, 10))
+    report = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+    assert len(report["dreams"][0]["pictures"]) == 1 and len(calls) == 3
+    assert waits == [30, 60] and len(report["waited"]) == 2 and not [e for e in report["errors"] if "image server" in e]
+    # still down after both waits: said, and the dream stands without pictures
+    calls.clear(), waits.clear()
+
+    def down(prompt, start, size=None):
+        calls.append(prompt)
+        raise P.Unreachable("Could not reach the image server at http://x: refused")
+    report = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(2), now=now + 9, paint=down)
+    assert report["dreams"][0]["pictures"] == [] and len(calls) == 3 and waits == [30, 60]
+    assert any("Could not reach" in e for e in report["errors"])
+    # told not to wait; and a refusal that is not the server being away is never waited on
+    calls.clear(), waits.clear()
+    sleep_once(m, dict(cfg, dream_image_retry_wait=0), llm=dreamer(), steps=["dream"], rng=random.Random(3), now=now + 20, paint=down)
+    assert len(calls) == 1 and waits == []
+
+    def refuses(prompt, start, size=None):
+        calls.append(prompt)
+        raise P.PaintError("The image server returned 400")
+    calls.clear()
+    sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(4), now=now + 30, paint=refuses)
+    assert len(calls) == 1 and waits == []
+
+
+@_patched
+def test_a_restarted_comfyui_is_noticed_and_not_waited_on_for_ten_minutes(tmp_path, monkeypatch):
+    from holonomic import paint as P
+    asked = []
+    clock = [1000.0]
+    monkeypatch.setattr(P.time, "time", lambda: clock[0])
+    monkeypatch.setattr(P.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + 6))
+
+    def post(url, body, ctype, timeout, raw=False):
+        asked.append(url.rsplit("/", 2)[-2] if "/history/" in url else url.rsplit("/", 1)[-1])
+        if url.endswith("/prompt"):
+            return {"prompt_id": "job1"}
+        if url.endswith("/queue"):
+            return {"queue_running": [], "queue_pending": []}
+        return {}                                             # history: it has never heard of the job
+    monkeypatch.setattr(P, "_post", post)
+    with pytest.raises(P.Unreachable, match="restarted"):
+        P._comfy_run("http://x", {}, 600, 1)
+    assert clock[0] - 1000 < 30 and "queue" in asked
+    # a job that is still in the queue is waited for
+    clock[0] = 1000.0
+    done = []
+
+    def busy(url, body, ctype, timeout, raw=False):
+        if url.endswith("/prompt"):
+            return {"prompt_id": "job1"}
+        if url.endswith("/queue"):
+            done.append(1)
+            return {"queue_running": [[3, "job1", {}]], "queue_pending": []}
+        if "/view" in url:
+            return b"PICTURE"
+        return {"job1": {"outputs": {"9": {"images": [{"filename": "a.png"}]}}}} if len(done) >= 2 else {}
+    monkeypatch.setattr(P, "_post", busy)
+    assert P._comfy_run("http://x", {}, 600, 1) == b"PICTURE"
+
+
+def test_the_pictures_of_a_dream_that_lost_them_can_be_drawn_afterwards(tmp_path):
+    import random
+    from holonomic.sleep import draw_whole, dreams, sleep_once
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="pictures", dream_image_count=1, dream_image_style="", dream_image_candidates=1,
+               dream_image_whole="text", dream_image_retry_wait=0)
+
+    def broken(prompt, start, size=None):
+        raise RuntimeError("Could not reach the image server")
+    lost = sleep_once(m, cfg, llm=dreamer(), steps=["dream"], rng=random.Random(1), now=now, paint=broken)["dreams"][0]
+    assert lost["pictures"] == []
+    text, n = m.get(lost["id"])["text"], [0]
+
+    def paint(prompt, start, size=None):
+        n[0] += 1
+        return picture(768, 512, colour=(n[0] * 30, 10, 10))
+    report = draw_whole(m, cfg, [lost["id"]], llm=dreamer(), paint=paint, moments=True)
+    assert not report["errors"] and sorted(bool(p.get("whole")) for p in report["drawn"]) == [False, True]
+    assert m.get(lost["id"])["text"] == text
+    assert len(next(d for d in dreams(m, 3) if d["id"] == lost["id"])["pictures"]) == 2
+    # it has them now: passed over, unless asked again, and then the picture of the whole dream is not repeated
+    assert draw_whole(m, cfg, [lost["id"]], llm=dreamer(), paint=paint, moments=True)["had"] == [lost["id"]] and n[0] == 2
+    more = draw_whole(m, cfg, [lost["id"]], llm=dreamer(), paint=paint, moments=True, again=True)
+    assert [bool(p.get("whole")) for p in more["drawn"]] == [False] and n[0] == 3

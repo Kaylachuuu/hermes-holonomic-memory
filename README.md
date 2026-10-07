@@ -355,6 +355,13 @@ recall its dreams and talk about them: the latest one is in its system prompt fo
 offered when the conversation turns to dreaming, and its memory tool has a `dreams` action. They are
 always labelled as dreams.
 
+**When the image server falls over.** If the server that draws dream pictures stops answering part way
+(off, restarting, or it has forgotten the picture it was drawing), the plugin waits and asks again, twice:
+after `dream_image_retry_wait` seconds (30) and then twice that. 0 gives up at once. A dream is never lost
+to this; if the pictures are, `hermes holonomic dreams redraw --id ID` draws them afterwards, from the same
+images the dream drew on (`dreams whole` draws only the one picture of the whole dream). Both pass over a
+dream that already has such pictures unless given `--again`.
+
 **Talking about dreams.** A conversation about a dream really happened, so it is stored as ordinary
 conversation, but what was said in it describes a dream. Such pieces are labelled as dream talk: either
 they say so ("in my dream", "did you dream") or they closely resemble a stored dream. Dream talk is
