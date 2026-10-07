@@ -1332,14 +1332,17 @@ def sort_dream_files(engine) -> dict:
     return report
 
 
-def add_dream_image(engine, data: bytes, cfg: Dict[str, Any], *, dream_id: int, scene: str, sources: List[int]) -> dict:
+def add_dream_image(engine, data: bytes, cfg: Dict[str, Any], *, dream_id: int, scene: str, sources: List[int],
+                    whole: bool = False) -> dict:
     """Keep a picture from a dream.  It lives in the dream realm: it is never listed among images she was
     shown, never described as one, and is found only through the dream it belongs to."""
     img = add_image(engine, data, dict(cfg, image_sections=False), caption=scene, session=f"dream:{int(dream_id)}",
-                    source="dream", realm="dream", folder=dream_folder(engine, int(dream_id)), stem=f"dream{int(dream_id)}")
+                    source="dream", realm="dream", folder=dream_folder(engine, int(dream_id)),
+                    stem=f"dream{int(dream_id)}" + ("_whole" if whole else ""))
     with engine._lock:
         _db(engine).execute("UPDATE images SET meta = ? WHERE id = ?",
-                            (json.dumps({"dream_id": int(dream_id), "from": [int(i) for i in sources]}), img["id"]))
+                            (json.dumps({"dream_id": int(dream_id), "from": [int(i) for i in sources], **({"whole": True} if whole else {})}),
+                             img["id"]))
     return img
 
 
@@ -1347,8 +1350,12 @@ def dream_pictures(engine, dream_id: int) -> List[dict]:
     with engine._lock:
         rows = _db(engine).execute("SELECT id, view, caption, meta FROM images WHERE forgotten = 0 AND realm = 'dream' AND session = ? "
                                    "ORDER BY id", (f"dream:{int(dream_id)}",)).fetchall()
-    return [{"id": int(r["id"]), "file": str(engine.path / r["view"]), "scene": r["caption"],
-             "from": json.loads(r["meta"] or "{}").get("from", [])} for r in rows]
+    out = []
+    for r in rows:
+        meta = json.loads(r["meta"] or "{}")
+        out.append({"id": int(r["id"]), "file": str(engine.path / r["view"]), "scene": r["caption"], "from": meta.get("from", []),
+                    **({"whole": True} if meta.get("whole") else {})})
+    return sorted(out, key=lambda p: (not p.get("whole"), p["id"]))          # the whole dream first, then its moments
 
 
 def label_forms(label: str) -> List[str]:

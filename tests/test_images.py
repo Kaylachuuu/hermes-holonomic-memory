@@ -7,7 +7,8 @@ from test_provider import HAVE_HERMES, make, tool
 from conftest import track
 from holonomic import HolonomicMemory, HashEmbedder
 
-CFG = {"image_enabled": True, "image_model": "eyes", "image_view_width": 1024, "image_view_height": 768, "dream_image_candidates": 1}
+CFG = {"image_enabled": True, "image_model": "eyes", "image_view_width": 1024, "image_view_height": 768, "dream_image_candidates": 1,
+       "dream_image_whole": "off"}          # the moments only; the picture of the whole dream has a test of its own
 
 
 def store(tmp_path):
@@ -557,6 +558,8 @@ def dreamer(scenes=None, seen=None):
             return json.dumps({"dream": "I am in a greenhouse in winter and the cat on the green couch is asleep among the tomato plants, and the car windows fog over with basil."})
         if step.startswith("wake"):
             return json.dumps({"thoughts": "An odd one, mostly the garden and the cat.", "connections": []})
+        if step.startswith("whole"):
+            return json.dumps({"picture": "A winter greenhouse holding a green couch, a sleeping cat and a fogged car all at once."})
         return json.dumps({"scenes": scenes if scenes is not None else [
             {"picture": "A black cat asleep on a green couch inside a winter greenhouse, tomato vines growing over the cushions.", "images": []}]})
     return llm
@@ -2363,3 +2366,48 @@ def test_dream_pictures_have_folders_of_their_own_by_sleep(tmp_path):
     # a picture whose dream has since been forgotten still gets a folder, by its own date
     m.forget(d3)
     assert im.dream_folder(m, d3, fallback=night2) == f"dream-images/{stamp(night2)}"
+
+
+def test_a_picture_of_the_whole_dream(tmp_path):
+    """Besides its moments a dream gets one picture of all of it: drawn from the dream as she dreamt it, or from a
+    single scene she composes of it.  From words alone; a whole dream draws on several images, not one."""
+    import random
+    from holonomic import images
+    from holonomic.sleep import WHOLE_CAPTION, dreams, sleep_config, sleep_once
+    assert sleep_config({})["dream_image_whole"] == "text"
+    m, ids, now = dream_store(tmp_path)
+    cfg = dict(CFG, dream_images="from_images", dream_image_count=1, dream_image_style="soft light", dream_image_whole="text",
+               dream_image_candidates=2)
+    painted, judged = [], []
+
+    def paint(prompt, start, size=None):
+        painted.append((prompt, start))
+        return picture(768, 512, colour=(len(painted) * 30, 10, 10))
+    keep = images.pick_best
+    images.pick_best = lambda cfg, scene, tries, **k: (judged.append(scene), (len(tries) - 1, "the last one"))[1]
+    try:
+        text = "I am in a greenhouse in winter and the cat on the green couch is asleep among the tomato plants, and the car windows fog over with basil."
+        scenes = [{"picture": "A black cat asleep on a green couch inside a winter greenhouse.", "images": [ids["cat"]]}]
+        dry = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, dry_run=True, paint=paint)
+        assert [(p["scene"], p.get("whole")) for p in dry["dreams"][0]["pictures"]] == [(WHOLE_CAPTION, True), (scenes[0]["picture"], None)]
+        assert painted == [] and "draw" not in dry["dreams"][0]["pictures"][0]
+        report = sleep_once(m, cfg, llm=dreamer(scenes), steps=["dream"], rng=random.Random(1), now=now, paint=paint)
+        whole, moment = report["dreams"][0]["pictures"]
+        assert not report["errors"] and whole["whole"] is True and whole["scene"] == WHOLE_CAPTION and whole["from"] == [] and "draw" not in whole
+        # the dream itself is what is drawn, twice, from words alone; and what her choice is judged against
+        assert painted[:2] == [(text + " soft light", None)] * 2 and painted[2][1] is not None and len(painted) == 4
+        assert judged == [text, scenes[0]["picture"]] and whole["chosen"] == 2
+        assert "_whole_" in whole["file"] and "_whole_" not in moment["file"] and open(whole["file"], "rb").read()
+        kept = dreams(m, 1)[0]["pictures"]
+        assert [p.get("whole") for p in kept] == [True, None] and kept[0]["file"] == whole["file"]
+        # a single scene she composes instead
+        painted.clear(); judged.clear()
+        report = sleep_once(m, dict(cfg, dream_image_whole="scene"), llm=dreamer(scenes), steps=["dream"], rng=random.Random(2), now=now + 9, paint=paint)
+        whole = report["dreams"][0]["pictures"][0]
+        assert whole["whole"] and whole["scene"].startswith("A winter greenhouse holding a green couch") and not report["errors"]
+        assert painted[0] == (whole["scene"] + ", soft light", None) and judged[0] == whole["scene"]
+        # and off: the moments only
+        report = sleep_once(m, dict(cfg, dream_image_whole="off"), llm=dreamer(scenes), steps=["dream"], rng=random.Random(3), now=now + 20, paint=paint)
+        assert [p.get("whole") for p in report["dreams"][0]["pictures"]] == [None]
+    finally:
+        images.pick_best = keep

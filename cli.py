@@ -9,7 +9,7 @@
     hermes holonomic sleep status | on | off | now [--dry-run] [--only reflect,consolidate,fade,dream]
     hermes holonomic dreams [-n 5]
     hermes holonomic dreams images [off|words|pictures|from_images] [--api comfyui|a1111|openai] [--host URL] [--model NAME]
-                                   [--size 768x512] [--count 3] [--people yes|no] [--strength 0.75] [--style "..."]
+                                   [--size 768x512] [--count 3] [--whole text|scene|off] [--people yes|no] [--strength 0.75] [--style "..."]
     hermes holonomic dreamtalk [--apply]          find stored conversation that is talk about a dream, and label it
     hermes holonomic relabel 63 64 --as said      correct a label: 'said' (ordinary conversation) or 'dream' (dream talk)
     hermes holonomic images                       image memory: status, and what is waiting to be described
@@ -526,7 +526,11 @@ def holonomic_command(args) -> None:
                 for c in d.get("connections", []):
                     print(f"  Connection she noticed: {c}")
                 for p in d.get("pictures", []):
-                    print(f"  Picture: {p['scene']}\n    {p['file']}")
+                    if p.get("whole"):
+                        from .sleep import WHOLE_CAPTION
+                        print("  Picture of the whole dream" + ("" if p["scene"] == WHOLE_CAPTION else f": {p['scene']}") + f"\n    {p['file']}")
+                    else:
+                        print(f"  Picture: {p['scene']}\n    {p['file']}")
         elif action in ("show", "forget"):
             found = [(mid, engine.get(mid)) for mid in args.ids]
             for mid, mem in found:
@@ -644,6 +648,8 @@ def _dream_images(cfg, args) -> None:
         values["dream_image_model"] = args.model
     if args.count:
         values["dream_image_count"] = args.count
+    if getattr(args, "whole", None):
+        values["dream_image_whole"] = args.whole
     if args.people:
         values["dream_image_use_people"] = args.people == "yes"
     if getattr(args, "who", None):
@@ -710,6 +716,8 @@ def _dream_images(cfg, args) -> None:
         print(f"  {sc['dream_image_count']} picture(s) per dream, {sc['dream_image_width']}x{sc['dream_image_height']}, "
               f"each drawn {sc['dream_image_candidates']} time(s)" + (" and she keeps the best" if int(sc["dream_image_candidates"]) > 1 else "")
               + (", reasoning before she chooses (--think off to stop)" if sc["dream_image_choose_think"] and int(sc["dream_image_candidates"]) > 1 else ""))
+        print("  and one picture of the whole dream: " + {"text": "drawn from the dream as she dreamt it", "scene": "drawn from a single "
+              "scene she composes of it"}.get(str(sc["dream_image_whole"]).lower(), "no") + "   (--whole text|scene|off)")
         if mode == "from_images" and int(sc["dream_image_redraw_below"] or 0) > 0 and int(sc["dream_image_candidates"]) >= 1:
             print(f"  a picture drawn from an image is drawn again, holding less to it, if her best attempt scores below "
                   f"{sc['dream_image_redraw_below']} of 10 (--redraw-below 0 to stop)")
@@ -1598,6 +1606,8 @@ def register_cli(subparser) -> None:
     drm.add_argument("--model", help="With 'images': model or checkpoint name, if the server needs one")
     drm.add_argument("--size", help="With 'images': picture size, e.g. 768x512")
     drm.add_argument("--count", type=int, help="With 'images': pictures per dream")
+    drm.add_argument("--whole", choices=["text", "scene", "off"], help="With 'images': one more picture, of the whole dream: drawn "
+                     "from the dream as she dreamt it (text), from a single scene she composes of it (scene), or not at all")
     drm.add_argument("--people", choices=["yes", "no"], help="With 'images': may images with real people in them be drawn from")
     drm.add_argument("--name-people", choices=["none", "me", "named"], help="With 'images': whether a dream is told who the people in "
                      "the images it draws on are, so they can be in it by name: nobody, only you, or anyone you have named")

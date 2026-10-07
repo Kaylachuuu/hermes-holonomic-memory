@@ -93,6 +93,12 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_image_vae": "",            # zimage: empty = ae.safetensors
     "dream_image_text_encoder_on": "",  # zimage: 'cpu' = read the prompt on the processor, leaving the card to the drawing model
     "dream_image_count": 3,           # pictures per dream
+    # One more picture, of the dream as a whole, drawn from words alone (a whole dream draws on several images, so
+    # there is no one image to start from):
+    #   text    the dream as she dreamt it is what the image generator is given
+    #   scene   she is asked for a single picture that holds the whole dream, and that is drawn
+    #   off     only the moments
+    "dream_image_whole": "text",
     # Each picture is drawn this many times and she keeps the one she thinks shows the moment best (needs a vision model).
     "dream_image_candidates": 3,
     # A picture drawn from an image stays close to it.  If the best attempt scores below this, the picture is drawn
@@ -558,6 +564,18 @@ _SCENE_REFS = """
 Below the dream are IMAGES you have really been shown, which the dream drew on. If a moment looks like one or two of \
 them, put their numbers in "images" for that moment so the artist can work from them. Otherwise leave "images" empty."""
 
+_WHOLE = """\
+You are an AI assistant, awake, with a dream you just had still vivid. Describe ONE picture that holds the whole \
+dream for an artist to paint: not one moment of it, but the places and things it moved through, brought into a \
+single image the way a dream is remembered all at once.
+
+"picture" is two to four sentences of what is seen: the subjects, the place, the light and the colours. Describe \
+only what would be visible, and keep the strangeness of the dream. Do not use anyone's name; say what they look like \
+instead."""
+
+_WHOLE_SCHEMA = {"type": "object", "properties": {"picture": {"type": "string"}}, "required": ["picture"]}
+WHOLE_CAPTION = "The whole dream, as she dreamt it."
+
 _SCENES_SCHEMA = {"type": "object", "properties": {"scenes": {"type": "array", "items": {"type": "object", "properties": {
     "picture": {"type": "string"}, "images": {"type": "array", "items": {"type": "integer"}}}, "required": ["picture", "images"]}}},
     "required": ["scenes"]}
@@ -605,8 +623,21 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
         if len(picture) >= 15:
             refs = [int(i) for i in (item.get("images") or []) if isinstance(i, int) and i in usable][:2]
             scenes.append({"scene": picture, "from": list(dict.fromkeys(refs))})
+    whole = str(sc["dream_image_whole"] or "off").strip().lower()
+    if whole == "scene":
+        try:
+            seen = _parse(call("whole scene" + label, "You describe pictures. Reply with JSON only. " + NO_DOUBLE_QUOTES,
+                               _WHOLE + f"\n\nDREAM:\n{one['text']}", _WHOLE_SCHEMA, 400, 0.6))
+            picture = " ".join(str(seen.get("picture") or "").split())[:900]
+            if len(picture) >= 15:
+                scenes.insert(0, {"scene": picture, "from": [], "whole": True})
+        except ReflectionError as exc:           # the moments are still drawn
+            report["errors"].append(f"dream pictures{label}: the picture of the whole dream: {exc}")
+    elif whole == "text" and len(one["text"]) >= 15:
+        # drawn from, and judged against, the dream itself; the caption does not repeat it
+        scenes.insert(0, {"scene": WHOLE_CAPTION, "from": [], "whole": True, "draw": " ".join(one["text"].split())})
     if dry_run or not one.get("id"):
-        return scenes
+        return [{k: v for k, v in sc_.items() if k != "draw"} for sc_ in scenes]
     size = (int(sc["dream_image_width"]), int(sc["dream_image_height"]))
     style = str(sc["dream_image_style"] or "").strip()
     attempts = max(1, min(int(sc["dream_image_candidates"] or 1), 8))
@@ -653,7 +684,9 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
         recalled = ""
         if start and sc["dream_image_describe_source"]:
             recalled = " ".join(" ".join(usable[i].split("Writing in the image:")[0].split())[:400] for i in s["from"] if i in usable)
-        if recalled:
+        if s.get("draw"):
+            words = s["draw"] + (" " + style if style else "")
+        elif recalled:
             words = s["scene"] + " As remembered: " + recalled.rstrip(". ") + (". " + style if style else "")
         else:
             words = s["scene"] + (", " + style if style else "")
@@ -667,7 +700,7 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
 
     def choose(d: dict, tries: List[bytes], earlier: Optional[dict] = None) -> tuple:
         notes: Dict[int, Dict[str, Any]] = {}
-        best, why = _images.pick_best(cfg, d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes, earlier=earlier,
+        best, why = _images.pick_best(cfg, d["scene"].get("draw") or d["scene"]["scene"], tries, remembered=d["recalled"], report=report, noted=notes, earlier=earlier,
                                       checks=d.setdefault("checks", []))
         return best, why, notes
 
@@ -719,11 +752,12 @@ def _dream_pictures(engine, cfg: Dict[str, Any], call: Callable[..., str], repor
     made = []
     for d in drawn:
         try:
-            img = _images.add_dream_image(engine, d.get("kept") or d["tries"][d["best"]], cfg, dream_id=one["id"], scene=d["scene"]["scene"], sources=d["from"])
+            img = _images.add_dream_image(engine, d.get("kept") or d["tries"][d["best"]], cfg, dream_id=one["id"], scene=d["scene"]["scene"],
+                                          sources=d["from"], whole=bool(d["scene"].get("whole")))
         except Exception as exc:
             report["errors"].append(f"dream pictures{label}: {exc}")
             continue
-        made.append(dict(d["scene"], id=img["id"], file=img["file"], **{"from": d["from"]},
+        made.append(dict({k: v for k, v in d["scene"].items() if k != "draw"}, id=img["id"], file=img["file"], **{"from": d["from"]},
                          **({"chosen": d["best"] + 1, "of": len(d["tries"]), "why": d["why"]} if len(d["tries"]) > 1 else {}),
                          **({"score": d["score"]} if d["score"] is not None else {}),
                          **({"redrawn": d["redrawn"]} if d.get("redrawn") else {}),
