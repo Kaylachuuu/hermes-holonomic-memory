@@ -839,6 +839,10 @@ python scripts/bench.py
 Provider tests need the Hermes source: set `HERMES_SRC` or keep a `hermes-agent` checkout next to
 this folder.
 
+Expected result: everything passes. One test, `test_hermes_real_plugin_loader_loads_the_folder`, loads the
+plugin through Hermes' own plugin loader, so it also needs Hermes' Python dependencies: run inside
+Hermes' environment, or with only a bare checkout it fails on a missing `ruamel`. Any other failure is real.
+
 ## Using a different model
 
 This plugin was developed and tuned against one setup. On anything very different, expect to
