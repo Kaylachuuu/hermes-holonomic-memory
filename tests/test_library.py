@@ -1092,3 +1092,43 @@ def test_an_assembly_include_file_ending_in_a_is_read_and_a_code_archive_is_not(
         assert False, "a code archive was read as text"
     except L.LibraryError as e:
         assert "not a text file" in str(e)
+
+
+def test_a_bare_yes_opens_a_library_she_offered(tmp_path):
+    # Hermes does not call prefetch on a bare acknowledgement ("yes", "ok", "go ahead"): is_trivial_prompt
+    # gates it before any provider is asked.  It calls on_turn_start with the message on every turn, so that is
+    # where the user's answer has to be seen, or her offer to open a library can only ever be refused.
+    if not HAVE_HERMES: return
+    from agent.memory_provider import is_trivial_prompt
+    src = folder(tmp_path)
+    p = make(tmp_path, session_id="monday")
+    turn = [0]
+
+    def hermes_turn(message):                     # what turn_context does with a user message, in that order
+        turn[0] += 1
+        p.on_turn_start(turn[0], message)
+        if not is_trivial_prompt(message):
+            p.prefetch(message, session_id="monday")
+
+    try:
+        lib_tool(p, action="create", name="x86", folder=str(src), about="Booting an x86 machine")
+        for _ in range(200):
+            if not lib_tool(p, action="status", name="x86")["building"]["running"]:
+                break
+            time.sleep(0.05)
+        for answer in ("yes", "ok", "go ahead", "sure"):
+            assert is_trivial_prompt(answer)
+            hermes_turn("I'd like to get back to the bootloader")
+            p.sync_turn("I'd like to get back to the bootloader", "Gladly. Would you like me to open the `x86` library for it?",
+                        session_id="monday")
+            hermes_turn(answer)
+            assert lib_tool(p, action="open", names=["x86"])["opened"] is True, answer
+            assert lib_tool(p, action="close")["open_in_this_conversation"] == []
+        # A bare "no" seen the same way still opens nothing.
+        hermes_turn("I'd like to get back to the bootloader")
+        p.sync_turn("I'd like to get back to the bootloader", "Gladly. Would you like me to open the `x86` library for it?",
+                    session_id="monday")
+        hermes_turn("no")
+        assert lib_tool(p, action="open", names=["x86"])["opened"] is False
+    finally:
+        p.shutdown()

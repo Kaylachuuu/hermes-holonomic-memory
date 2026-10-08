@@ -666,6 +666,11 @@ class HolonomicMemoryProvider(MemoryProvider):
             text = text[:max_chars].rsplit(" ", 1)[0] + "…"
         return f"- [#{hit.id}] ({when}, {label}{linked}) {text}"
 
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        # Hermes calls this on every turn, and prefetch only when the message is not a bare acknowledgement.  A bare
+        # "yes" is how the user agrees to a library being opened, so it has to be kept here or it is never seen.
+        self._said[self._session_id] = _images.strip_image_markers(message or "")
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._last_count = None
         # Kept before anything else: "yes" is a trivial prompt, and it is also how the user agrees to a library being opened.
