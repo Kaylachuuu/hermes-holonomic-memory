@@ -2397,7 +2397,8 @@ def test_a_picture_of_the_whole_dream(tmp_path):
         # the dream itself is what is drawn, twice, from words alone; and what her choice is judged against
         assert painted[:2] == [(text + " soft light", None)] * 2 and painted[2][1] is not None and len(painted) == 4
         assert judged == [text, scenes[0]["picture"]] and whole["chosen"] == 2
-        assert "_whole_" in whole["file"] and "_whole_" not in moment["file"] and open(whole["file"], "rb").read()
+        # the file name, not the path: pytest names the temporary folder after the test, which has "_whole_" in it
+        assert "_whole_" in Path(whole["file"]).name and "_whole_" not in Path(moment["file"]).name and open(whole["file"], "rb").read()
         kept = dreams(m, 1)[0]["pictures"]
         assert [p.get("whole") for p in kept] == [True, None] and kept[0]["file"] == whole["file"]
         # a single scene she composes instead
