@@ -353,6 +353,21 @@ _KIND_TITLE = {FACT: "fact about the user", PROJECT_FACT: "fact about a project 
                BOND_NOTE: "note about the two of them", INSIGHT: "insight"}
 
 
+# With a persona service running, nothing here writes in her voice (persona.py): no notes about herself or the two of
+# them, and no profile of either.  The same prompts with those parts taken out, so the model is not asked for them.
+_PROPOSE_PERSONA = (re.sub(r"- self_notes:.*?(?=- insights:)", "", _PROPOSE, flags=re.DOTALL)
+                    .replace(" That they talked about a dream may be worth a note about the two of them; what was in the dream is not knowledge.",
+                             " What was in the dream is not knowledge."))
+_PROPOSE_PERSONA_SCHEMA = {"type": "object", "properties": {k: v for k, v in _PROPOSE_SCHEMA["properties"].items()
+                                                           if k not in ("self_notes", "relationship_notes")},
+                           "required": [k for k in _PROPOSE_SCHEMA["required"] if k not in ("self_notes", "relationship_notes")]}
+_PROFILES_PERSONA = (re.sub(r"\n- self_profile:.*", "", _PROFILES, flags=re.DOTALL)
+                     .replace("Rewrite an AI assistant's four short profiles", "Rewrite two short profiles of an AI assistant's user"))
+_PROFILE_PERSONA_SCHEMA = {"type": "object", "properties": {k: v for k, v in _PROFILE_SCHEMA["properties"].items()
+                                                           if k in ("user_profile", "projects_profile")},
+                           "required": ["user_profile", "projects_profile"]}
+
+
 class ReflectionError(RuntimeError):
     pass
 
@@ -514,7 +529,8 @@ about it. That the user asked for a library to be opened is about the conversati
 
 
 def build_prompt(memories: List[dict], profiles: Optional[Dict[str, str]] = None, foundation: str = "",
-                 existing_facts: Optional[List[dict]] = None, depth: int = 3, libraries: Optional[List[str]] = None) -> str:
+                 existing_facts: Optional[List[dict]] = None, depth: int = 3, libraries: Optional[List[str]] = None,
+                 persona: bool = False) -> str:
     """The propose step.  (`profiles` is unused here; profiles are written in their own step.)"""
     facts = "\n".join(f"[{f['id']}] {' '.join(f['text'].split())}" for f in existing_facts or []) or "(none)"
     named = f" (there are these: {', '.join(libraries)})" if libraries else ""
@@ -523,7 +539,8 @@ def build_prompt(memories: List[dict], profiles: Optional[Dict[str, str]] = None
             "MEMORIES:\n" + "\n".join(_line(m) for m in memories))
     if depth <= 1:
         return _PROPOSE_BASIC.format(rules=_RULES, facts=_FACTS_RULE) + "\n\n" + tail
-    return _PROPOSE.format(rules=_RULES, facts=_FACTS_RULE) + f"\n\nFOUNDATION:\n{_foundation(foundation)}\n\n" + tail
+    return ((_PROPOSE_PERSONA if persona else _PROPOSE).format(rules=_RULES, facts=_FACTS_RULE)
+            + f"\n\nFOUNDATION:\n{_foundation(foundation)}\n\n" + tail)
 
 
 def unsupported_names(statement: str, cited_text: str, known_text: str = "") -> List[str]:
@@ -579,9 +596,15 @@ def build_check_prompt(items: List[dict], by_id: Dict[int, dict], known_text: st
 
 
 def build_profile_prompt(accepted: List[dict], superseded: List[dict], profiles: Dict[str, str], foundation: str,
-                         depth: int = 3) -> str:
+                         depth: int = 3, persona: bool = False) -> str:
     lines = [f"- ({_KIND_TITLE[item['kind']]}) {item['text']}" for item in accepted]
     lines += [f"- (no longer true) {s['was']}  Now: {s['replacement']}" for s in superseded]
+    if persona:
+        return (_PROFILES_PERSONA.format(rules=_RULES)
+                + f"\n\nFOUNDATION:\n{_foundation(foundation)}"
+                + f"\n\nCURRENT USER PROFILE:\n{profiles.get('user') or '(empty)'}"
+                + f"\n\nCURRENT PROJECTS PROFILE:\n{profiles.get('projects') or '(empty)'}"
+                + "\n\nNEWLY ACCEPTED STATEMENTS:\n" + ("\n".join(lines) or "(none)"))
     return (_PROFILES.format(rules=_RULES)
             + f"\n\nFOUNDATION:\n{_foundation(foundation) if depth > 1 else '(not shown at this depth; leave the self and relationship profiles as they are)'}"
             + f"\n\nCURRENT USER PROFILE:\n{profiles.get('user') or '(empty)'}"
@@ -669,7 +692,7 @@ def _wrap_test_llm(llm: Callable[..., str]) -> Callable[[str, str, str, dict, in
 def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None,
                  dry_run: bool = False, key_fn: Optional[Callable[[str], List[str]]] = None,
                  foundation: str = "", start_after: Optional[int] = None,
-                 earlier: Optional[List[dict]] = None) -> Dict[str, Any]:
+                 earlier: Optional[List[dict]] = None, persona: bool = False) -> Dict[str, Any]:
     """One reflection pass.  Returns a report; stores nothing when dry_run is set.
 
     Normally it reads what is new since the last pass.  `start_after` makes it read from just after that memory
@@ -677,7 +700,10 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     cats).  Going over old ground never moves the mark for what is new backwards.
 
     `earlier` is what earlier passes of the same run accepted (a report's "accepted").  The profiles are written
-    from those as well, so that what one pass learned is not left out by the next."""
+    from those as well, so that what one pass learned is not left out by the next.
+
+    `persona`: a persona service is running (persona.py), so nothing in her voice is written: no self or
+    relationship notes and no profile of either.  Facts, insights and the user's profiles are unchanged."""
     rc = reflect_config(cfg)
     depth = rc["reflect_depth"]
     report: Dict[str, Any] = {"read": 0, "stored": [], "reinforced": [], "profiles_updated": [], "dry_run": dry_run,
@@ -710,8 +736,9 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
 
     # ---- step 1: propose
     try:
-        data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth, libraries),
-                           _PROPOSE_BASIC_SCHEMA if depth <= 1 else _PROPOSE_SCHEMA, budget))
+        data = _parse(call("propose", _SYSTEM, build_prompt(batch, current, foundation, existing, depth, libraries, persona),
+                           _PROPOSE_BASIC_SCHEMA if depth <= 1 else _PROPOSE_PERSONA_SCHEMA if persona else _PROPOSE_SCHEMA,
+                           budget))
     except ReflectionError as exc:
         data = salvage(getattr(exc, "partial", ""))
         if not any(data[k] for k in data):
@@ -749,10 +776,11 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     about_work = [dict(f, sources=[s for s in f["sources"] if s in not_assistant])
                   for f in about_work if set(f["sources"]) & not_assistant]
     groups = [(FACT, facts), (PROJECT_FACT, about_work)]
-    if depth > 1:
+    if depth > 1 and not persona:
         groups += [(SELF_NOTE, _clean_items(data.get("self_notes"), valid, 4, report["cut_off"])),
-                   (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3, report["cut_off"])),
-                   (INSIGHT, _clean_items(data.get("insights"), valid, 3, report["cut_off"]))]
+                   (BOND_NOTE, _clean_items(data.get("relationship_notes"), valid, 3, report["cut_off"]))]
+    if depth > 1:
+        groups += [(INSIGHT, _clean_items(data.get("insights"), valid, 3, report["cut_off"]))]
     items = [dict(item, kind=kind) for kind, group in groups for item in group]
 
     # Names already established about the user (their own name above all).
@@ -807,10 +835,10 @@ def reflect_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str
     new_profiles = dict(current)
     if items or superseded:
         told = [e for e in (earlier or []) if e.get("text") and e["text"] not in {i["text"] for i in items}] + items
-        pdata = _parse(call("profiles", _SYSTEM, build_profile_prompt(told, superseded, current, foundation, depth),
-                            _PROFILE_SCHEMA, budget))
+        pdata = _parse(call("profiles", _SYSTEM, build_profile_prompt(told, superseded, current, foundation, depth, persona),
+                            _PROFILE_PERSONA_SCHEMA if persona else _PROFILE_SCHEMA, budget))
         wanted = {"user": "user_profile", "projects": "projects_profile"}
-        if depth > 1:
+        if depth > 1 and not persona:
             wanted.update({"self": "self_profile", "us": "relationship_profile"})
         # A profile is rewritten only when this pass learned something of its kind.  Every rewrite drifts a
         # little ("networking" came back as "inquiry"), so one with nothing new to say is left as it is.
@@ -1199,7 +1227,44 @@ class IdleReflector:
         quiet, need = time.time() - self.last_activity, float(rc["reflect_idle_seconds"])
         if quiet < need:
             return f"it has been quiet for {quiet / 60:.1f} of the {need / 60:.0f} minutes it waits for"
-        return ""
+        return self.her_turn(cfg)
+
+    # ---- alongside a persona service (persona.py)
+
+    @property
+    def home(self) -> Path:
+        return Path(self.engine.path).parent
+
+    def her_turn(self, cfg: Dict[str, Any]) -> str:
+        """Why memory's own idle work waits for her, or empty.  Her reflections come first at idle."""
+        from . import persona as _persona
+        try:
+            return _persona.her_turn(self.home, cfg)
+        except Exception:
+            return ""
+
+    def _should_stop(self, cfg: Dict[str, Any], began: float) -> Optional[Callable[[], bool]]:
+        """For work that gives way: true once someone has started talking since it began."""
+        from . import persona as _persona
+        if not _persona.gives_way(cfg):
+            return None
+        return lambda: self._stop.is_set() or self.last_activity > began
+
+    def accounts_if_due(self) -> Optional[List[dict]]:
+        """Store the accounts of conversations she has written (persona.py).  Only embeddings, no model."""
+        from . import persona as _persona
+        cfg = self.load_cfg()
+        if not _persona.on(cfg) or not _persona.waiting_accounts(self.home) or not self._busy.acquire(blocking=False):
+            return None
+        self._begin("storing her accounts")
+        try:
+            stored = _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)
+            if stored:
+                logger.info("holonomic: stored %d account(s) she wrote", len(stored))
+            return stored
+        finally:
+            self._busy.release()
+            self._end()
 
     def due(self, cfg: Dict[str, Any]) -> bool:
         return not self.wait(cfg)
@@ -1212,7 +1277,7 @@ class IdleReflector:
         cfg = cfg if cfg is not None else self.load_cfg()
         now = time.time()
         try:
-            sleep_why = _sleep.sleep_wait(self.engine, cfg, self.last_activity, now)
+            sleep_why = _sleep.sleep_wait(self.engine, cfg, self.last_activity, now) or self.her_turn(cfg)
             if not sleep_why and now < self._sleep_retry_at:
                 sleep_why = f"the last attempt failed; it will try again in {(self._sleep_retry_at - now) / 60:.0f} minutes"
             reflect_why = self.wait(cfg)
@@ -1249,8 +1314,20 @@ class IdleReflector:
     def _begin(self, what: str) -> None:
         self.doing, self.doing_since = what, time.time()
         self.note()
+        # The note is kept fresh while the work runs, so that a note which stops being written means the worker
+        # is gone.  Before, "doing" alone kept a worker counted as alive, and a Hermes closed in the middle of a
+        # sleep was shown as still sleeping until its note was a day old.
+        beat = self._beat = threading.Event()
+
+        def heartbeat() -> None:
+            while not beat.wait(self.poll_seconds):
+                self.note()
+        threading.Thread(target=heartbeat, name="holonomic-heartbeat", daemon=True).start()
 
     def _end(self) -> None:
+        beat = getattr(self, "_beat", None)
+        if beat is not None:
+            beat.set()
         self.doing = None
         self.note()
 
@@ -1260,7 +1337,9 @@ class IdleReflector:
             return None
         self._begin("reflecting")
         try:
-            report = reflect_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
+            from . import persona as _persona
+            report = reflect_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn(),
+                                  persona=_persona.on(cfg))
             self.last_error = ""
             logger.info("holonomic: reflection read %d memories, stored %d", report["read"], len(report["stored"]))
             return report
@@ -1279,14 +1358,20 @@ class IdleReflector:
         cfg = self.load_cfg()
         if time.time() < self._sleep_retry_at:
             return None
-        if not _sleep.sleep_due(self.engine, cfg, self.last_activity) or not self._busy.acquire(blocking=False):
+        if not _sleep.sleep_due(self.engine, cfg, self.last_activity) or self.her_turn(cfg) or not self._busy.acquire(blocking=False):
             return None
         self._begin("sleeping")
         try:
-            report = _sleep.sleep_once(self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn())
+            from . import persona as _persona
+            persona = _persona.on(cfg)
+            report = _sleep.sleep_once(
+                self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn(), persona=persona,
+                accounts=(lambda: _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)) if persona else None,
+                should_stop=self._should_stop(cfg, time.time()))
             self.last_sleep_error = "; ".join(report["errors"])
-            logger.info("holonomic: slept: %d conversation(s) summarised, dream %s",
-                        len(report["episodes"]), "yes" if (report.get("dream") or {}).get("id") else "no")
+            logger.info("holonomic: slept: %d conversation(s) summarised, dream %s%s",
+                        len(report["episodes"]), "yes" if (report.get("dream") or {}).get("id") else "no",
+                        f"; {report['interrupted']}" if report.get("interrupted") else "")
             return report
         except Exception as exc:
             # A sleep that fails outright is not tried again every half minute: it would run the reflection
@@ -1346,7 +1431,8 @@ class IdleReflector:
         raised stopped the ones after it from ever being tried, round after round, and said nothing."""
         if self.settling():
             return
-        for name, task in (("describing images", self.images_if_due), ("reflection", self.run_if_due), ("sleep", self.sleep_if_due)):
+        for name, task in (("her accounts", self.accounts_if_due), ("describing images", self.images_if_due),
+                           ("reflection", self.run_if_due), ("sleep", self.sleep_if_due)):
             try:
                 task()
                 self.stumbles.pop(name, None)

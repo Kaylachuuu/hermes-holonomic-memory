@@ -342,7 +342,7 @@ def _worker(engine, what: str) -> None:
                 f"({up:.0f} minutes); it ended without saying so, as a program does when it is closed abruptly")
 
     live = [st for st in states if not st.get("ended")
-            and (st["age"] <= 3 * float(st.get("poll_seconds", 30)) + 30 or st.get("doing"))]
+            and st["age"] <= 3 * float(st.get("poll_seconds", 30)) + 30]
     over = sorted((st for st in states if st not in live), key=lambda st: -float(st.get("ended") or st["at"]))
     if not live:
         print("  in the background: no Hermes is running with this memory right now. Unattended work only happens while Hermes is open.")
@@ -1435,9 +1435,9 @@ def _images_cmd(engine, cfg, args) -> None:
 
 def _redrawn(p) -> str:
     r = p["redrawn"]
-    after = "she could not judge the new attempts" if r["after"] is None else f"the best of the new attempts scored {r['after']}"
-    return (f"\n            the one she chose scored {r['before']} of 10, so it was drawn again holding less to the image: {after}; "
-            "compared side by side, " + ("she kept a new one" if r["kept"] else "she kept the earlier one" + (f": {r['why']}" if r.get("why") else "")))
+    after = "the vision model could not judge the new attempts" if r["after"] is None else f"the best of the new attempts scored {r['after']}"
+    return (f"\n            the one the vision model chose scored {r['before']} of 10, so it was drawn again holding less to the image: {after}; "
+            "compared side by side, " + ("it kept a new one" if r["kept"] else "it kept the earlier one" + (f": {r['why']}" if r.get("why") else "")))
 
 
 def _print_calls(report) -> None:
@@ -1467,7 +1467,19 @@ def _sleep(engine, cfg, args) -> None:
               f"fade {'on' if sc['fade_enabled'] else 'off'} (half-life {sc['fade_half_life_days']} days), "
               f"dream {'on' if sc['dream_enabled'] else 'off'}")
         print(f"  dream model: {sc['dream_model'] or cfg.get('reflect_model') or '(not set)'}")
-        print(f"  waiting: {pending(engine)} memories to reflect on, {len(unfinished_business(engine, cfg))} conversation(s) to summarise")
+        from . import persona as _persona
+        svc = _persona.service(cfg)
+        if svc:
+            print(f"  persona service: {svc['name']} {svc['version']}".rstrip() + ". Nothing is written in her voice: no notes or "
+                  "profiles of hers, no accounts of conversations (she writes her own), no waking thoughts on a dream")
+            print(f"  sleep gives way when someone starts talking: {'yes' if _persona.gives_way(cfg) else 'no'}")
+            print(f"  waiting: {pending(engine)} memories to reflect on, {len(_persona.waiting_accounts(get_hermes_home()))} "
+                  "account(s) she wrote, to store")
+            why = _persona.her_turn(get_hermes_home(), cfg)
+            if why:
+                print(f"  memory's own idle work waits: {why}")
+        else:
+            print(f"  waiting: {pending(engine)} memories to reflect on, {len(unfinished_business(engine, cfg))} conversation(s) to summarise")
         print(f"  last sleep: {_when(float(last)) if last else 'never'}")
         _worker(engine, "sleep")
         return
@@ -1475,9 +1487,13 @@ def _sleep(engine, cfg, args) -> None:
     if getattr(args, "links", None) is not None:
         cfg = dict(cfg, dream_links=max(0, int(args.links)))
     t0 = time.perf_counter()
+    from . import persona as _persona
+    persona = _persona.on(cfg)
     try:
         report = sleep_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
-                            foundation=read_foundation(get_hermes_home()), steps=steps)
+                            foundation=read_foundation(get_hermes_home()), steps=steps, persona=persona,
+                            accounts=(lambda: _persona.take_accounts(engine, get_hermes_home(), key_fn=extract_keys)) if persona else None)
+        report["persona"] = persona
     except ReflectionError as exc:
         print(f"Sleep failed: {exc}")
         return
@@ -1487,7 +1503,12 @@ def _sleep(engine, cfg, args) -> None:
         n = sum(len(v) for v in (r.get("proposed") or {}).values())
         print(f"  REFLECT   read {r['read']} memories, {n} item(s)" + ("" if args.dry_run else f", stored {len(r['stored'])}"))
     for e in report["episodes"]:
-        print(f"  EPISODE   ({e['memories']} memories, {_when(e['when'])}) {e['summary']}")
+        if e.get("by") == "her":
+            print(f"  EPISODE   (hers, #{e['id']}, covering {e['covers']} memories) {e['account']}")
+        else:
+            print(f"  EPISODE   ({e['memories']} memories, {_when(e['when'])}) {e['summary']}")
+    if report.get("interrupted"):
+        print(f"  STOPPED   {report['interrupted']}")
     if report["fade"]:
         f = report["fade"]
         print(f"  FADE      {f['eligible']} summarised memories x {f['factor']}" + ("" if args.dry_run else f", {f['changed']} lowered"))
@@ -1501,7 +1522,8 @@ def _sleep(engine, cfg, args) -> None:
               + (f"; {by_plates} of the older ones reached through the plates: "
                  f"{', '.join('#' + str(f['id']) for f in d['fragments'] if f.get('via') == 'plates')}" if by_plates else "") + ")")
         print(f"            {d['text']}")
-        print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
+        if d["thoughts"] or not report.get("persona"):
+            print(f"  ON WAKING {d['thoughts'] or '(nothing)'}")
         for c in d["connections"]:
             print(f"  CONNECTION {c['text']}   <- {', '.join('#' + str(s) for s in c['sources'])}")
         seen = sorted({f["image_id"] for f in d["fragments"] if f.get("image_id")})
@@ -1510,7 +1532,7 @@ def _sleep(engine, cfg, args) -> None:
         for p in d.get("pictures") or []:
             print(f"  PICTURE   {p['scene']}" + (f"   <- from image {', '.join('#' + str(i) for i in p['from'])}" if p.get("from") else "")
                   + (_redrawn(p) if p.get("redrawn") else "")
-                  + (f"\n            she chose attempt {p['chosen']} of {p['of']}" + (" drawn again" if (p.get("redrawn") or {}).get("kept") else "")
+                  + (f"\n            the vision model chose attempt {p['chosen']} of {p['of']}" + (" drawn again" if (p.get("redrawn") or {}).get("kept") else "")
                      + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
                   + (f"\n            enlarged to {p['enlarged'][0]}x{p['enlarged'][1]}" if p.get("enlarged") else "")
                   + (f"\n            {p['file']}" if p.get("file") else ""))
