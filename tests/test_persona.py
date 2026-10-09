@@ -308,3 +308,25 @@ def test_telling_and_offering_work_from_the_command_lines_package(tmp_path):
         holonomic.__version__ = saved
     assert json.loads(path.read_text())["memory"] == f"holonomic/{saved}"
     assert json.loads(offered.read_text())["memory"] == f"holonomic/{saved}"
+
+
+def test_before_compression_the_messages_are_left_for_her_as_they_were(tmp_path):
+    from holonomic import persona
+    p = make(tmp_path, session_id="s9")
+    home = tmp_path / "home"
+    msgs = [{"role": "system", "content": "You are Athena."},
+            {"role": "user", "content": [{"type": "text", "text": "Look at this."}, {"type": "image_url", "image_url": {"url": "data:x"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "name": "read_file", "content": "x" * 5000},
+            {"role": "assistant", "content": "A garden."}]
+    assert p.on_pre_compress(msgs) == ""
+    assert not (persona.folder(home) / persona.COMPRESSING).exists()             # no service, nothing told
+    with service("thymos/0.9.0 accounts=1 idle=1 compressed=1"):
+        p.on_pre_compress(msgs)
+    [path] = list((persona.folder(home) / persona.COMPRESSING).glob("*.json"))
+    item = json.loads(path.read_text())
+    assert item["session_id"] == "s9" and item["message_count"] == 4 and item["memory"].startswith("holonomic/")
+    got = item["messages"]
+    assert got[0] == {"role": "user", "content": "Look at this.\n[image_url]"}
+    assert got[1]["tool_calls"][0]["function"]["name"] == "read_file" and len(got[2]["content"]) == 2000
+    assert got[3]["content"] == "A garden."

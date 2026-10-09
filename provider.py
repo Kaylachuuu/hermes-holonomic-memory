@@ -1181,6 +1181,9 @@ class HolonomicMemoryProvider(MemoryProvider):
         # so they become eligible for recall again.
         if self._session_id:
             self._compressed_at[self._session_id] = time.time()
+            if self._writes_enabled and self._home is not None:
+                # Her chance to write about these messages while they are still as they were said.
+                _persona.tell_compressing(self._home, self._cfg, self._session_id, messages)
         return ""
 
     def on_memory_write(self, action: str, target: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:

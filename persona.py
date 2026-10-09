@@ -12,7 +12,9 @@ none, and nothing fills in for her.
 
 The same folder carries the rest of what passes between them (persona-provider.md 4.2 and 4.6).  After a sleep that
 made a dream, holonomic says so in `slept/`, with the dream's text; whatever she writes about it comes back through
-`dream-thoughts/` and is kept with the dream as hers.  Once, the notes another model wrote in her voice before the
+`dream-thoughts/` and is kept with the dream as hers.  Before Hermes compresses a conversation, holonomic leaves
+the messages about to be summarised in `compressing/`, so that she can write about them while they are still as
+they were said (holonomic is told about compression; a plugin is not).  Once, the notes another model wrote in her voice before the
 service ran are offered to her in `old-notes.json`, as dated text; holonomic leaves them as they are.
 
 Without a persona service nothing here changes anything.
@@ -40,6 +42,7 @@ IDLE = "idle.json"              # what she has waiting for idle time; holonomic'
 SLEPT = "slept"                 # holonomic says here that it slept and what it made; she may write about it
 DREAM_THOUGHTS = "dream-thoughts"   # what she wrote about a dream; holonomic keeps it with the dream as hers
 OLD_NOTES = "old-notes.json"    # the notes another model wrote in her voice, offered to her once
+COMPRESSING = "compressing"     # a conversation about to be compressed, as it was; she may write about it
 IDLE_FRESH_SECONDS = 600        # a file older than this was left by a Hermes that is gone, and is not waited for
 
 PERSONA_DEFAULTS: Dict[str, Any] = {
@@ -209,6 +212,61 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
         return path
     except OSError as exc:
         logger.warning("holonomic: could not tell the persona service that memory slept: %s", exc)
+        return None
+
+
+def _plain(content: Any) -> str:
+    """The text of a message, without pictures: a picture is only marked where it was."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") in (None, "text", "input_text", "output_text"):
+                parts.append(str(p.get("text") or ""))
+            elif isinstance(p, dict):
+                parts.append(f"[{p.get('type')}]")
+            else:
+                parts.append(str(p))
+        return "\n".join(x for x in parts if x)
+    return "" if content is None else str(content)
+
+
+def tell_compressing(home, cfg: Optional[Dict[str, Any]], session_id: str, messages: List[Dict[str, Any]],
+                     now: Optional[float] = None) -> Optional[Path]:
+    """Tell the persona service that Hermes is about to compress this conversation (persona-provider.md 4.2,
+    `PRE_COMPRESS`), with the messages as they are now.  After compression the older ones are a summary in her
+    context; she may write about them from this copy.  Text only: tool calls by name and arguments, and a long
+    tool result cut, since the service shows her no more of one than that."""
+    if not wants(cfg, "compressed") or not messages:
+        return None
+    now = time.time() if now is None else now
+    out = []
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant", "tool"):
+            continue
+        text = _plain(m.get("content"))
+        item: Dict[str, Any] = {"role": m["role"], "content": text[:2000] if m["role"] == "tool" else text[:40000]}
+        if m["role"] == "tool" and m.get("name"):
+            item["name"] = str(m["name"])
+        calls = []
+        for call in m.get("tool_calls") or []:
+            fn = (call.get("function") or {}) if isinstance(call, dict) else {}
+            calls.append({"function": {"name": str(fn.get("name") or "?"), "arguments": str(fn.get("arguments") or "")[:500]}})
+        if calls:
+            item["tool_calls"] = calls
+        out.append(item)
+    if not out:
+        return None
+    from .backup import plugin_version     # the command line's package has no __version__ (backup.py)
+    safe = "".join(c if c.isalnum() or c in "_.-" else "_" for c in session_id)[:80]
+    path = folder(home) / COMPRESSING / f"{int(now * 1000)}-{safe or 'session'}.json"
+    try:
+        _write(path, {"session_id": session_id, "compressed_at": now, "message_count": len(out), "messages": out,
+                      "memory": f"holonomic/{plugin_version()}"})
+        return path
+    except OSError as exc:
+        logger.warning("holonomic: could not tell the persona service about the compression: %s", exc)
         return None
 
 
