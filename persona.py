@@ -196,13 +196,13 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
     dreams = [d for d in (report.get("dreams") or []) if d.get("id")]
     if not dreams:
         return None
-    from . import __version__
+    from .backup import plugin_version     # the command line's package has no __version__ (backup.py)
     now = time.time() if now is None else now
     item = {"slept_at": now,
             "dreams": [{"id": d["id"], "text": d["text"], "pictures": len(d.get("pictures") or [])} for d in dreams],
             "her_accounts_stored": len(report.get("episodes") or []),
             "facts_learned": sum(len(r.get("stored") or []) for r in report.get("reflections") or []),
-            "memory": f"holonomic/{__version__}"}
+            "memory": f"holonomic/{plugin_version()}"}
     path = folder(home) / SLEPT / f"{int(now * 1000)}.json"
     try:
         _write(path, item)
@@ -279,12 +279,12 @@ def offer_old_notes(engine, home, cfg: Optional[Dict[str, Any]], now: Optional[f
         budget -= len(n["text"]) + 40
     shown.reverse()
     notes = found["notes"]
-    from . import __version__
+    from .backup import plugin_version     # the command line's package has no __version__ (backup.py)
     item = {"written_by": str((cfg or {}).get("reflect_model") or "the memory system's reflection model"),
             "count": len(notes), "shown": len(shown),
             "first_at": notes[0]["at"] if notes else None, "last_at": notes[-1]["at"] if notes else None,
             "notes": [{"at": n["at"], "kind": n["kind"], "text": n["text"]} for n in shown],
-            "profiles": found["profiles"], "memory": f"holonomic/{__version__}", "offered_at": now}
+            "profiles": found["profiles"], "memory": f"holonomic/{plugin_version()}", "offered_at": now}
     path = folder(home) / OLD_NOTES
     try:
         _write(path, item)

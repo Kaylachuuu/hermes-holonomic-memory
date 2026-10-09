@@ -291,3 +291,20 @@ def test_with_a_service_her_words_on_a_dream_are_shown_as_hers(tmp_path):
         block = p.system_prompt_block()
         assert "What you wrote about it afterwards, in your own words: I think I miss the garden." in block
         assert tool(p, action="dreams")["dreams"][0]["what_you_wrote_about_it"] == "I think I miss the garden."
+
+
+def test_telling_and_offering_work_from_the_command_lines_package(tmp_path):
+    """`hermes holonomic sleep now` runs these from a package Hermes makes, which has no __version__."""
+    import holonomic
+    from holonomic import persona
+    m = store(tmp_path)
+    m.remember("I like dry humour", kind="self_note", session="reflection", chain=False)
+    saved = holonomic.__dict__.pop("__version__")
+    try:
+        with service(SLEPT_SERVICE):
+            path = persona.tell_slept(tmp_path / "home", {}, {"dreams": [{"id": 1, "text": "A dream."}]}, now=NOW)
+            offered = persona.offer_old_notes(m, tmp_path / "home", {}, now=NOW)
+    finally:
+        holonomic.__version__ = saved
+    assert json.loads(path.read_text())["memory"] == f"holonomic/{saved}"
+    assert json.loads(offered.read_text())["memory"] == f"holonomic/{saved}"
