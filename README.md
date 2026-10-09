@@ -337,7 +337,8 @@ agent has been idle for a long stretch, or by hand, and has four steps, each of 
 
 1. **Reflect**: as above.
 2. **Consolidate**: for each conversation that has gone quiet, the agent writes a short first-person
-   account of it. The account is stored long-term, dated as the conversation, and linked to it.
+   account of it. The account is stored long-term, dated as the conversation, and linked to it. (With
+   thymos running, she writes her own instead; see "Alongside a persona service".)
 3. **Fade**: conversation that has been summarised halves in strength every `fade_half_life_days`.
    Below `fade_threshold` a memory is left out of everyday recall. Nothing is deleted. What the agent
    knows about the user, its notes and its accounts do not fade, and whatever is recalled is strengthened.
@@ -402,6 +403,41 @@ hermes holonomic recall "..." --deep
 | `dream_memories_per_extra` | `40` | One more dream for every this many memories since the last sleep |
 | `dream_min_words`, `dream_max_words` | `100`, `180` | Length of each dream |
 | `dream_reinforce` | `false` | Let a dream strengthen the old memories it touches |
+
+## Alongside a persona service (thymos)
+
+[Thymos](https://github.com/Kaylachuuu/hermes-thymos) gives her a record of herself that only she writes. When
+it runs in the same Hermes, holonomic stops writing in her voice, because another model writing "I" for her is
+the thing thymos exists to prevent. What changes:
+
+- **Reflection** still writes facts about the user and their projects, checks them, merges them and keeps the
+  user and projects profiles. It no longer writes self notes, relationship notes, the "who you have become"
+  profile or the relationship profile, and those two profiles leave the system prompt.
+- **Accounts of conversations are hers.** Holonomic writes none. She writes her own when a conversation goes
+  quiet or ends, in a reflection moment thymos opens at idle, and thymos leaves each one in
+  `plugin-data/thymos/accounts/`. Holonomic stores it as an episode, dated as the conversation and linked to
+  it, marked as hers, and moves the file to `stored/`. If she writes none, there is none, and the
+  conversation does not fade: it stays as it was said.
+- **Dreams** are still composed, and shown to her as what they are: the memory system's composition from her
+  memories, not something she wrote. She is no longer made to reread one and say what she made of it, and the
+  waking thoughts of older dreams are not shown as hers.
+- **What another model wrote before** (old self notes, relationship notes, accounts and dream connections) stays
+  in memory and can still be recalled, labelled as the memory system's model's words, not hers.
+- **Her work comes first at idle.** While thymos has a reflection or an account waiting or running, reflection
+  and sleep wait (`hermes holonomic sleep status` says so). Thymos says what it has waiting in
+  `plugin-data/thymos/idle.json`; a file not rewritten for ten minutes is ignored.
+- **Sleep gives way.** When someone starts talking, a sleep stops at the next step and is not counted, so the
+  next quiet stretch finishes it. A step already talking to a model finishes that call first. Stopped
+  among the dreams, with one dreamt, it counts as a sleep.
+
+Thymos says it is running through an environment variable it sets in Hermes' own process
+(`HERMES_PERSONA_SERVICE`), so an uninstalled thymos leaves nothing behind and holonomic goes back to what it
+did before. Without thymos nothing here changes anything.
+
+| Setting | Default | |
+|---|---|---|
+| `persona_service` | `auto` | `auto` follows thymos; `on` and `off` act as if it were, or were not, running |
+| `sleep_gives_way` | `auto` | Sleep stops when someone starts talking: `auto` with thymos, `on` always, `off` never |
 
 ## Images
 
@@ -518,7 +554,8 @@ Each picture is drawn several times. The vision model looks at each attempt on i
 it shows, what looks wrong and a score; then it reads its notes side by side and chooses which one is
 kept. The others are discarded. (Shown all the attempts in one message, the model this was tuned with
 reported seeing one picture, or two that were the same, and kept the first. One picture per look
-works with any vision model.) `sleep now` prints her notes on each attempt and how long the drawing took.
+works with any vision model.) `sleep now` prints the vision model's notes on each attempt and how long the drawing took. The notes and the
+choice are the vision model's, like the dream itself the memory system's work, and are labelled so.
 
 Before she looks, she lists what a picture of the moment has to show (the main things, their
 distinguishing details, what the dream did to them). Each attempt is then questioned about those
@@ -744,8 +781,8 @@ memory's terms may therefore lie on two plates; the write log records the plate 
 
 ## Seeing what happens in the background
 
-Unattended reflection, sleep and the describing of images are done by a worker inside Hermes, while Hermes is
-open. The commands run in a program of their own and cannot look inside Hermes, so the worker writes down,
+Unattended reflection, sleep, the describing of images and the storing of her own accounts (with thymos) are
+done by a worker inside Hermes, while Hermes is open. The commands run in a program of their own and cannot look inside Hermes, so the worker writes down,
 every half minute, what it is doing and why it is not doing something else.
 `hermes holonomic sleep status` and `reflect status` read it:
 
@@ -758,7 +795,8 @@ failed), because a clock that starts over with nobody at the keyboard is otherwi
 one program has the memory open, each has a worker and a clock of its own, and each is shown.
 
 It also says that it is sleeping now and for how long, or what the last sleep reported, or that no Hermes is running
-with this memory at all. A sleep that fails outright is recorded and tried again after ten minutes, not every
+with this memory at all. The worker writes its note every half minute while it works too, so a Hermes closed
+in the middle of a sleep shows as gone within a couple of minutes, not as still sleeping. A sleep that fails outright is recorded and tried again after ten minutes, not every
 half minute.
 
 ## The write log, and looking into the plates

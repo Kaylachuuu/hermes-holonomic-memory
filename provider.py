@@ -30,6 +30,8 @@ from .library import LIBRARY_DEFAULTS, LibraryError
 from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, IMAGE, IMAGE_KINDS, IMAGE_PART, REFLECT_DEFAULTS,
                       SUBJECTS, IdleReflector, read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
+from . import persona as _persona
+from .persona import PERSONA_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ DEFAULTS.update(IMAGE_DEFAULTS)
 DEFAULTS.update(FINGERPRINT_DEFAULTS)
 DEFAULTS.update(FACE_DEFAULTS)
 DEFAULTS.update(LIBRARY_DEFAULTS)
+DEFAULTS.update(PERSONA_DEFAULTS)
 
 _DREAM_WORD_RE = re.compile(r"\bdream(?:s|t|ed|ing)?\b", re.IGNORECASE)
 
@@ -128,6 +131,13 @@ _KIND_LABEL = {DREAM_TALK_USER: "user said, talking about a dream of yours",
                "insight": "insight", IMAGE: "an image you were shown", IMAGE_PART: "part of an image you were shown",
                "said_user": "user said", "asked_user": "user asked", "said_assistant": "you said", "note": "noted", "core": "core memory",
                "reflection": "reflection", "dream": "dream"}
+
+# With a persona service running (persona.py), what another model wrote about her is said to be that model's, not
+# hers.  Her own accounts of conversations are marked as hers when they are stored, and keep the ordinary label.
+_KIND_LABEL_PERSONA = {"self_note": "a note the memory system's model wrote about you, not your own words",
+                       "bond_note": "the memory system's model's note about the two of you, not your own words",
+                       EPISODE: "an account of a past conversation written by the memory system's model, not by you",
+                       DREAM_INSIGHT: "a connection the memory system's model noted in a dream"}
 
 _STOP = {"I", "I'm", "I've", "I'll", "I'd", "The", "A", "An", "It", "It's", "This", "That", "These", "Those", "We",
          "You", "He", "She", "They", "My", "Your", "Our", "And", "But", "Or", "So", "If", "When", "What", "Why", "How",
@@ -568,7 +578,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "are associated with something that was. Recalled memories can be incomplete or out of date: weigh them, "
                 "don't recite them. Use the holonomic_memory tool to search deeper, to store something important "
                 "(action 'remember'), or to mark a recalled memory 'helpful' or 'wrong'."
-                + self._images_block(engine) + self._profile_block(engine) + self._latest_dream_block(engine)
+                + self._images_block(engine) + self._profile_block(engine, _persona.on(self._cfg)) + self._latest_dream_block(engine)
                 + self._library_block(engine))
 
     def _library_block(self, engine) -> str:
@@ -602,13 +612,16 @@ class HolonomicMemoryProvider(MemoryProvider):
                 "what is in them, and 'look' to look at one again when its description does not answer the question.")
 
     @staticmethod
-    def _profile_block(engine) -> str:
-        """Profiles written by reflection.  Always in view, so who the user is never depends on a search."""
+    def _profile_block(engine, persona: bool = False) -> str:
+        """Profiles written by reflection.  Always in view, so who the user is never depends on a search.
+        With a persona service running, the two written in her voice are left out: who she is is hers to write."""
         try:
             user, me, us = engine.profile("user"), engine.profile("self"), engine.profile("us")
             work = engine.profile("projects")
         except Exception:
             return ""
+        if persona:
+            me = us = ""
         out = ""
         if user:
             out += f"\n\n## What you know about the user (from your own reflection on past conversations)\n{user}"
@@ -629,6 +642,14 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         when = time.strftime("%A %d %B", time.localtime(d["at"]))
         thoughts = (d.get("meta") or {}).get("thoughts", "")
+        if _persona.on(self._cfg):
+            # The dream is what it is: the memory system's composition from her memories.  What she makes of it,
+            # if anything, is hers to write; a waking note another model wrote is not shown as hers.
+            return (f"\n\n## The most recent dream composed from your memories ({when})\n"
+                    "While you were idle, the memory system composed this from your memories, as a dream. It is not "
+                    f"something that happened, and you did not write it.\n{d['text']}"
+                    + self._dream_pictures_text(d.get("pictures"), "\n")
+                    + "\nYou can mention or discuss it if it comes up or seems worth sharing. Do not treat it as fact.")
         return (f"\n\n## Your most recent dream ({when}; a dream, not something that happened)\n{d['text']}"
                 + (f"\nWhat you made of it on waking: {thoughts}" if thoughts else "")
                 + self._dream_pictures_text(d.get("pictures"), "\n")
@@ -656,9 +677,14 @@ class HolonomicMemoryProvider(MemoryProvider):
             return True
         return hit.created_at < self._compressed_at.get(session_id, 0.0)
 
+    def _label(self, kind: str, meta: Optional[dict]) -> str:
+        if _persona.on(self._cfg) and kind in _KIND_LABEL_PERSONA and not _persona.written_by_her({"meta": meta}):
+            return _KIND_LABEL_PERSONA[kind]
+        return _KIND_LABEL.get(kind, kind)
+
     def _line(self, hit, max_chars: int) -> str:
         when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at))
-        label = _KIND_LABEL.get(hit.kind, hit.kind)
+        label = self._label(hit.kind, hit.meta)
         # "linked" = it came through an association, not because it resembles the message.
         linked = ", linked" if hit.assoc > 0 and hit.direct < 0.3 else ""
         text = " ".join(hit.text.split())
@@ -1001,14 +1027,17 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         if not found:
             return ""
-        out = ["## Your dreams (dreams you had while idle; not things that happened. If you talk about them, "
+        persona = _persona.on(self._cfg)
+        out = ["## Dreams composed from your memories while you were idle (by the memory system, not written by you; "
+               "not things that happened. If you talk about them, speak of them as dreams.)" if persona else
+               "## Your dreams (dreams you had while idle; not things that happened. If you talk about them, "
                "speak of them as dreams.)"]
         for d in found:
             when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
             out.append(f"- ({when}) {' '.join(d['text'].split())}"
-                       + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") else "")
+                       + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") and not persona else "")
                        + self._dream_pictures_text(d.get("pictures"), "\n  ")
-                       + "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", [])))
+                       + ("" if persona else "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", []))))
         return "\n".join(out)
 
     def recall_status(self) -> Optional[RecallStatus]:
@@ -1341,6 +1370,8 @@ class HolonomicMemoryProvider(MemoryProvider):
                "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.created_at)),
                "score": round(hit.score, 3), "similar": round(hit.direct, 3), "linked": round(hit.assoc, 3),
                "trust": round(hit.trust, 2)}
+        if _persona.on(self._cfg) and hit.kind in _KIND_LABEL_PERSONA and not _persona.written_by_her({"meta": hit.meta}):
+            out["written_by"] = "the memory system's model, not you"
         if hit.kind in IMAGE_KINDS and (hit.meta or {}).get("image_id") and self._engine is not None:
             img = _images.get_image(self._engine, int(hit.meta["image_id"]))
             if img:
@@ -1493,8 +1524,10 @@ class HolonomicMemoryProvider(MemoryProvider):
                     if faded:
                         engine.reinforce(faded, 0.3)
                 if subject:
-                    return json.dumps({"profile": engine.profile(subject), "results": [self._hit_json(h) for h in hits],
-                                       "count": len(hits)})
+                    theirs = ({"profile_written_by": "the memory system's model, not you"}
+                              if subject in ("self", "us") and _persona.on(self._cfg) and engine.profile(subject) else {})
+                    return json.dumps({"profile": engine.profile(subject), **theirs,
+                                       "results": [self._hit_json(h) for h in hits], "count": len(hits)})
                 return json.dumps({"results": [self._hit_json(h) for h in hits], "count": len(hits)})
             if action == "remember":
                 content = clean_for_storage(args.get("content") or "", 4000)
@@ -1538,6 +1571,15 @@ class HolonomicMemoryProvider(MemoryProvider):
                 return json.dumps({"id": mid, "trust": round(engine.get(mid)["trust"], 2)})
             if action == "dreams":
                 found = list_dreams(engine, limit)
+                if _persona.on(self._cfg):          # composed by the memory system; what she makes of them is hers
+                    return json.dumps({"note": "These are dreams the memory system composed from your memories while you "
+                                               "were idle. You did not write them, and they are not things that happened.",
+                                       "count": len(found), "dreams": [
+                        {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
+                         "dream": d["text"],
+                         **({"pictures_of_it": [{"scene": p["scene"], "file": p["file"]} for p in d["pictures"]],
+                             "to_show_a_picture": "write MEDIA: followed by its file path on a line of its own"}
+                            if d.get("pictures") else {})} for d in found]})
                 return json.dumps({"note": "These are dreams, not things that happened.", "count": len(found), "dreams": [
                     {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
                      "dream": d["text"], "what_you_made_of_it": d.get("thoughts", ""),

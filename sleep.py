@@ -438,21 +438,38 @@ def gather_fragments(engine, cfg: Dict[str, Any], rng: random.Random, now: Optio
     return fragments
 
 
+class _Unwoken(Exception):
+    """The dream is written and nobody is asked to wake and reread it (`wake` off)."""
+
+
 def _image_of(engine, memory_id: int) -> Optional[int]:
     return ((engine.get(memory_id) or {}).get("meta") or {}).get("image_id")
 
 
 def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
           rng: Optional[random.Random] = None, now: Optional[float] = None, user_profile: str = "",
-          paint: Optional[Callable[..., bytes]] = None) -> None:
-    """The night's dreams.  report["dreams"] lists them; report["dream"] is the first."""
+          paint: Optional[Callable[..., bytes]] = None, wake: bool = True,
+          should_stop: Optional[Callable[[], bool]] = None) -> None:
+    """The night's dreams.  report["dreams"] lists them; report["dream"] is the first.
+
+    `wake`: whether she is then made to reread each dream and say what she made of it.  Off when a persona service
+    is running: what she makes of a dream is hers to write (persona.py), and the dream is kept as what it is, the
+    memory system's composition from her memories.  `should_stop` is asked before each dream and its pictures."""
     rng = rng or random.Random()
     now = time.time() if now is None else now
     report["dreams"] = []
     used: set = set()
     for n in range(dreams_tonight(engine, cfg, now)):
+        if should_stop and should_stop():
+            report["interrupted"] = "someone started talking; stopped between dreams"
+            break
         one = _one_dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now + n, user_profile=user_profile,
-                         exclude=used, label="" if n == 0 else f" {n + 1}")
+                         exclude=used, label="" if n == 0 else f" {n + 1}", wake=wake)
+        if one is not None and should_stop and should_stop():
+            one["pictures"] = []                         # the dream is kept; its pictures can be drawn later (dreams draw)
+            report["dreams"].append(one)
+            report["interrupted"] = "someone started talking; stopped before drawing the dream's pictures"
+            break
         if one is not None:
             one["pictures"] = _dream_pictures(engine, cfg, call, report, one, dry_run=dry_run, paint=paint,
                                               label="" if n == 0 else f" {n + 1}")
@@ -464,7 +481,8 @@ def dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[st
 
 
 def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Dict[str, Any], *, dry_run: bool,
-               rng: random.Random, now: float, user_profile: str, exclude: set, label: str) -> Optional[dict]:
+               rng: random.Random, now: float, user_profile: str, exclude: set, label: str,
+               wake: bool = True) -> Optional[dict]:
     sc = sleep_config(cfg)
     fragments = gather_fragments(engine, cfg, rng, now, exclude)
     if len(fragments) < 2:
@@ -494,24 +512,28 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
         text = plain_words(text)
         if len(text) < 60:
             raise ReflectionError("the model returned no dream")
+        if not wake:
+            raise _Unwoken()
         numbered = "\n".join(f"[{f['id']}] {f['age']} ({_voice(f['kind'])}): {' '.join(f['text'].split())}" for f in fragments)
         wake_prompt = (_WAKE.format(rules=_reflect._RULES) + (f"\n\nWHAT YOU KNOW ABOUT THE USER:\n{who}" if who else "")
                        + f"\n\nDREAM:\n{text}\n\nFRAGMENTS:\n{numbered}")
         woke = _parse(call("wake" + label, _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
+    except _Unwoken:
+        woke = {"thoughts": "", "connections": []}
     except ReflectionError as exc:
         report["errors"].append(f"dream{label}: {exc}")
         return None
     recent_ids = {f["id"] for f in fragments if f["age"] == "RECENT"}
     older_ids = {f["id"] for f in fragments if f["age"] == "OLDER"}
     thoughts = " ".join(str(woke.get("thoughts") or "").split())[:500]
-    if not is_complete(thoughts):                    # cut short: ask the waking step once more
+    if wake and not is_complete(thoughts):                    # cut short: ask the waking step once more
         try:
             again = _parse(call("wake (again: reply was cut short)", _reflect._SYSTEM, wake_prompt, _WAKE_SCHEMA, 500, 0.2))
             retry = " ".join(str(again.get("thoughts") or "").split())[:500]
             woke, thoughts = (again, retry) if is_complete(retry) else (woke, trim_to_sentence(thoughts))
         except ReflectionError:
             thoughts = trim_to_sentence(thoughts)
-    slip = claims_her_life(thoughts)
+    slip = claims_her_life(thoughts) if wake else ""
     if slip:                                         # the user's life called her own: ask once more, saying which words
         try:
             again = _parse(call("wake (again: it called the user's life its own)", _reflect._SYSTEM, wake_prompt
@@ -539,7 +561,8 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     # written on dream plates, which waking recall never reads.
     ids = engine.remember(text[:limit], kind=DREAM, realm=DREAM_REALM, session="dreams", chain=True, whole=True,
                           links=sorted(recent_ids | older_ids)[:6], salience=1.0, trust=0.5, created_at=now,
-                          meta={"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids), "opens": opens})
+                          meta=dict({"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids), "opens": opens},
+                                    **({} if wake else {"by": "memory system"})))
     result["id"] = ids[0] if ids else None
     for c in connections:
         engine.remember(c["text"], kind=DREAM_INSIGHT, realm=DREAM_REALM, session="dreams", chain=False,
@@ -935,18 +958,36 @@ def draw_whole(engine, cfg: Dict[str, Any], dream_ids: List[int], *, llm: Option
 def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]] = None, dry_run: bool = False,
                key_fn: Optional[Callable[[str], List[str]]] = None, foundation: str = "",
                steps: Optional[List[str]] = None, rng: Optional[random.Random] = None,
-               now: Optional[float] = None, paint: Optional[Callable[..., bytes]] = None) -> Dict[str, Any]:
-    """One sleep cycle.  `steps` limits it to some of: reflect, consolidate, fade, dream."""
+               now: Optional[float] = None, paint: Optional[Callable[..., bytes]] = None,
+               persona: bool = False, accounts: Optional[Callable[[], List[dict]]] = None,
+               should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    """One sleep cycle.  `steps` limits it to some of: reflect, consolidate, fade, dream.
+
+    `persona`: a persona service is running (persona.py).  Nothing is written in her voice: reflection writes no
+    notes or profiles of hers, no account of a conversation is written for her (`accounts`, if given, stores the
+    ones she wrote herself instead), and a dream is not followed by waking thoughts.
+
+    `should_stop` is asked between steps, between batches of reflection and between dreams.  When it says so the
+    cycle ends there and is not counted as a sleep, so the next one is not put off; every step can pick up where it
+    left off.  A step already talking to a model finishes that call first."""
     sc = sleep_config(cfg)
     wanted = set(steps or ["reflect", "consolidate", "fade", "dream"])
     report: Dict[str, Any] = {"dry_run": dry_run, "calls": [], "errors": [], "reflections": [], "episodes": [],
                               "fade": None, "dream": None}
+
+    def stop(before: str) -> bool:
+        if should_stop and should_stop():
+            report["interrupted"] = f"someone started talking; stopped before {before}"
+            return True
+        return False
+
     if "reflect" in wanted:
         for _ in range(4):                               # catch up on a backlog, a batch at a time
-            if _reflect.pending(engine) == 0:
+            if _reflect.pending(engine) == 0 or stop("a batch of reflection"):
                 break
             try:
-                r = _reflect.reflect_once(engine, cfg, llm=llm, dry_run=dry_run, key_fn=key_fn, foundation=foundation)
+                r = _reflect.reflect_once(engine, cfg, llm=llm, dry_run=dry_run, key_fn=key_fn, foundation=foundation,
+                                          persona=persona)
             except ReflectionError as exc:
                 report["errors"].append(f"reflect: {exc}")
                 break
@@ -960,12 +1001,20 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
             report["merged"] = [{"keep": m["keep"], "drop": m["drop"]} for m in merged["merged"]]
         except Exception as exc:
             report["errors"].append(f"merge: {exc}")
-    if "consolidate" in wanted and sc["consolidate_enabled"]:
+    if "consolidate" in wanted and persona:
+        # Her accounts are hers: she writes them, and holonomic only stores them.  A conversation she wrote none
+        # for gets none.
+        if accounts is not None and not dry_run and not report.get("interrupted"):
+            try:
+                report["episodes"] = [dict(a, by="her") for a in accounts()]
+            except Exception as exc:
+                report["errors"].append(f"storing her accounts: {exc}")
+    elif "consolidate" in wanted and sc["consolidate_enabled"] and not stop("writing accounts of conversations"):
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report)
         consolidate(engine, cfg, call, report, dry_run=dry_run, key_fn=key_fn, now=now)
-    if "fade" in wanted and sc["fade_enabled"]:
+    if "fade" in wanted and sc["fade_enabled"] and not report.get("interrupted") and not stop("fading"):
         fade(engine, cfg, report, dry_run=dry_run, now=now)
-    if "dream" in wanted and sc["dream_enabled"]:
+    if "dream" in wanted and sc["dream_enabled"] and not report.get("interrupted") and not stop("dreaming"):
         if not dry_run:
             try:                                         # pictures from before dreams had folders of their own
                 from . import images as _dream_files
@@ -974,8 +1023,11 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
                 report["errors"].append(f"sorting dream pictures: {exc}")
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report, dream=True)
         fresh = next((r["profiles"]["user"] for r in reversed(report["reflections"]) if (r.get("profiles") or {}).get("user")), "")
-        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh, paint=paint)
-    if not dry_run:
+        dream(engine, cfg, call, report, dry_run=dry_run, rng=rng, now=now, user_profile=fresh, paint=paint,
+              wake=not persona, should_stop=should_stop)
+    # Stopped before dreaming, the cycle is not counted, so the next quiet stretch finishes it.  Stopped among the
+    # dreams, with one dreamt, it is: another whole cycle would only dream the same night again.
+    if not dry_run and (not report.get("interrupted") or report.get("dreams")):
         engine.kv_set("sleep:last_run", str(time.time() if now is None else now))
     return report
 
