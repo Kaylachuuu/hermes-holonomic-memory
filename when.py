@@ -18,14 +18,25 @@ _N = r"(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|a couple(?: of)
 _UNIT = {"day": 1, "week": 7, "month": 30, "year": 365}
 
 
+def _part(hour: int) -> str:
+    return "morning" if 5 <= hour < 12 else "afternoon" if hour < 17 else "evening" if hour < 22 else "night"
+
+
 def age(ts: float, now: Optional[float] = None) -> str:
-    """How long ago, the way a person says it: "today", "yesterday", "3 days ago", "2 weeks ago"."""
+    """How long ago, the way a person says it: "this morning", "last night", "yesterday afternoon", "3 days ago".
+    For today and yesterday the part of the day is said too, since "yesterday" alone covers a working day and the
+    evening after it."""
     now = time.time() if now is None else now
     days = (_midnight(now) - _midnight(ts)).days
+    hour = datetime.fromtimestamp(ts).hour
     if days <= 0:
-        return "today"
+        if hour < 5:
+            return "last night" if datetime.fromtimestamp(now).hour < 12 else "early this morning"
+        return {"morning": "this morning", "afternoon": "this afternoon", "evening": "this evening",
+                "night": "tonight"}[_part(hour)]
     if days == 1:
-        return "yesterday"
+        return "last night" if hour >= 22 or (hour >= 17 and datetime.fromtimestamp(now).hour < 12) \
+            else f"yesterday {_part(hour)}"
     if days < 14:
         return f"{days} days ago"
     if days < 60:
@@ -55,10 +66,16 @@ def window(text: str, now: Optional[float] = None) -> Optional[Tuple[float, floa
     m = re.search(r"\b(this morning|earlier today|today|tonight|this afternoon|this evening)\b", t)
     if m:
         return start_of(0), now, m.group(1)
-    m = re.search(r"\b(last night|yesterday(?: morning| afternoon| evening)?)\b", t)
+    m = re.search(r"\b(last night|yesterday(?: (morning|afternoon|evening|night))?)\b", t)
     if m:
-        # "Last night" said in the morning is yesterday evening into the small hours of today.
-        return start_of(1), (today + timedelta(hours=6)).timestamp() if m.group(1) == "last night" else start_of(0), m.group(1)
+        y = today - timedelta(days=1)
+        if m.group(1) == "last night":
+            # Yesterday evening into the small hours of today.
+            return (y + timedelta(hours=17)).timestamp(), (today + timedelta(hours=6)).timestamp(), m.group(1)
+        hours = {"morning": (5, 12), "afternoon": (12, 17), "evening": (17, 24), "night": (20, 30)}.get(m.group(2) or "")
+        if hours:
+            return (y + timedelta(hours=hours[0])).timestamp(), (y + timedelta(hours=hours[1])).timestamp(), m.group(1)
+        return start_of(1), start_of(0), m.group(1)
     m = re.search(r"\b(the day before yesterday)\b", t)
     if m:
         return start_of(2), start_of(1), m.group(1)

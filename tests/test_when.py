@@ -18,8 +18,12 @@ def inside(text, ts):
 
 
 def test_ages():
-    assert when.age(day(2026, 10, 9, 1), NOW) == "today"
-    assert when.age(day(2026, 10, 8, 23), NOW) == "yesterday"
+    assert when.age(day(2026, 10, 9, 1), NOW) == "last night"
+    assert when.age(day(2026, 10, 9, 8), NOW) == "this morning"
+    assert when.age(day(2026, 10, 8, 23), NOW) == "last night"
+    assert when.age(day(2026, 10, 8, 19), NOW) == "last night"
+    assert when.age(day(2026, 10, 8, 14), NOW) == "yesterday afternoon"
+    assert when.age(day(2026, 10, 8, 19), datetime(2026, 10, 9, 15).timestamp()) == "yesterday evening"
     assert when.age(day(2026, 10, 6), NOW) == "3 days ago"
     assert when.age(day(2026, 9, 18), NOW) == "3 weeks ago"
     assert when.age(day(2026, 5, 1), NOW) == "5 months ago"
@@ -30,6 +34,8 @@ def test_windows():
     assert inside("our late coding session last night", day(2026, 10, 8, 23))
     assert inside("our late coding session last night", day(2026, 10, 9, 1))
     assert not inside("our late coding session last night", day(2026, 10, 6, 23))
+    assert not inside("our late coding session last night", day(2026, 10, 8, 14))     # yesterday afternoon
+    assert inside("yesterday afternoon", day(2026, 10, 8, 14)) and not inside("yesterday afternoon", day(2026, 10, 8, 20))
     assert inside("what did we talk about yesterday?", day(2026, 10, 8, 15))
     assert not inside("what did we talk about yesterday?", day(2026, 10, 9, 8))
     assert inside("that joke I told you last week", day(2026, 10, 1))
