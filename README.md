@@ -66,9 +66,16 @@ Each turn, relevant memories are injected like this:
 
 ```
 ## Holonomic Memory (recalled; may be incomplete or outdated)
-- [#12] (2026-10-03, user said) The snapshot was taking forty minutes because the disk is nearly full.
-- [#13] (2026-10-03, user said, linked) Unrelated, but the bakery on Elm Street started selling cardamom buns.
+- [#12] (2026-10-03, 6 days ago, user said) The snapshot was taking forty minutes because the disk is nearly full.
+- [#13] (2026-10-03, 6 days ago, user said, linked) Unrelated, but the bakery on Elm Street started selling cardamom buns.
 ```
+
+Each memory says how long ago it was as well as its date ("this morning", "last night", "yesterday afternoon",
+"3 days ago"), because a model reading a date next to "last night"
+does not do the sum. When the message names a time in the past ("last night", "yesterday", "last week",
+"three days ago", "a couple of weeks ago"), memories from then come first, found with a lower floor, since "that
+joke I told you last week" resembles the joke only loosely. The rest follow, each with its age. If nothing from
+that time comes up, the block says so. The `recall` action does the same, from the query or from `when`.
 
 It also gets one tool, `holonomic_memory`, with the actions `recall`, `remember`, `related`,
 `feedback`, `forget` and `stats`.

@@ -219,7 +219,7 @@ print("ok")
 
 def test_top_folder_only_holds_modules_that_are_safe_to_execute():
     """Hermes executes every top-level .py when it loads the plugin, before __init__.py."""
-    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "audit.py", "backup.py", "cli.py", "embed.py", "engine.py", "faces.py", "fingerprints.py", "images.py", "library.py", "notebook.py", "paint.py", "persona.py", "provider.py", "reflect.py", "sleep.py", "vsa.py"]
+    assert sorted(p.name for p in ROOT.glob("*.py")) == ["__init__.py", "audit.py", "backup.py", "cli.py", "embed.py", "engine.py", "faces.py", "fingerprints.py", "images.py", "library.py", "notebook.py", "paint.py", "persona.py", "provider.py", "reflect.py", "sleep.py", "vsa.py", "when.py"]
 
 
 def test_failed_first_open_releases_the_database_file(tmp_path):
@@ -365,3 +365,30 @@ def test_cli_show_and_forget(tmp_path):
     finally:
         embed.OllamaEmbedder = real
         sys.modules.pop("hermes_constants", None)
+
+
+def test_a_time_named_in_the_message_comes_first_and_every_memory_says_how_long_ago(tmp_path):
+    """"The joke I told you last week": a memory's date alone does not stop a model taking a three-day-old session
+    for last night, so each one says how long ago it was, and recall keeps to the time the message names."""
+    if not HAVE_HERMES: return
+    import time as _t
+    p = make(tmp_path)
+    eng = p._ensure_engine()
+    now = _t.time()
+    eng.remember("Kayla told a joke about a penguin who walks into a bar", kind="said_user", session="old",
+                 created_at=now - 9 * 86400)
+    eng.remember("Kayla told a joke about a programmer who walks into a bar", kind="said_user", session="old",
+                 created_at=now - 90 * 86400)
+    block = p.prefetch("Do you remember that joke I told you last week about the bar?", session_id="s2")
+    lines = [ln for ln in block.splitlines() if ln.startswith("- [#")]
+    assert "penguin" in lines[0] and "9 days ago" in lines[0]
+    assert any("programmer" in ln and "months ago" in ln for ln in lines[1:])
+    assert "Nothing in memory from" not in block
+    # Nothing from the time named: she is told so, and what is recalled says its age.
+    block = p.prefetch("I overslept after our late joke session about the bar last night", session_id="s2")
+    assert "Nothing in memory from last night" in block and "What is recalled here is from other times." in block
+    assert "9 days ago" in block
+    # Her tool takes the time from the query, or as `when`.
+    r = tool(p, action="recall", query="the joke about a bar", when="last week")
+    assert r["from_then"] == 1 and "penguin" in r["results"][0]["text"] and r["results"][0]["ago"] == "9 days ago"
+    p.shutdown()
