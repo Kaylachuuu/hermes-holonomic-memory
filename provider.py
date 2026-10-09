@@ -642,12 +642,14 @@ class HolonomicMemoryProvider(MemoryProvider):
             return ""
         when = time.strftime("%A %d %B", time.localtime(d["at"]))
         thoughts = (d.get("meta") or {}).get("thoughts", "")
+        mine = (d.get("meta") or {}).get("her_thoughts", "")
         if _persona.on(self._cfg):
             # The dream is what it is: the memory system's composition from her memories.  What she makes of it,
             # if anything, is hers to write; a waking note another model wrote is not shown as hers.
             return (f"\n\n## The most recent dream composed from your memories ({when})\n"
                     "While you were idle, the memory system composed this from your memories, as a dream. It is not "
                     f"something that happened, and you did not write it.\n{d['text']}"
+                    + (f"\nWhat you wrote about it afterwards, in your own words: {mine}" if mine else "")
                     + self._dream_pictures_text(d.get("pictures"), "\n")
                     + "\nYou can mention or discuss it if it comes up or seems worth sharing. Do not treat it as fact.")
         return (f"\n\n## Your most recent dream ({when}; a dream, not something that happened)\n{d['text']}"
@@ -1036,6 +1038,7 @@ class HolonomicMemoryProvider(MemoryProvider):
             when = time.strftime("%Y-%m-%d", time.localtime(d["created_at"]))
             out.append(f"- ({when}) {' '.join(d['text'].split())}"
                        + (f"\n  What you made of it: {d['thoughts']}" if d.get("thoughts") and not persona else "")
+                       + (f"\n  What you wrote about it afterwards: {d['her_thoughts']}" if d.get("her_thoughts") and persona else "")
                        + self._dream_pictures_text(d.get("pictures"), "\n  ")
                        + ("" if persona else "".join(f"\n  A connection you noticed: {c}" for c in d.get("connections", []))))
         return "\n".join(out)
@@ -1577,6 +1580,7 @@ class HolonomicMemoryProvider(MemoryProvider):
                                        "count": len(found), "dreams": [
                         {"id": d["id"], "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(d["created_at"])),
                          "dream": d["text"],
+                         **({"what_you_wrote_about_it": d["her_thoughts"]} if d.get("her_thoughts") else {}),
                          **({"pictures_of_it": [{"scene": p["scene"], "file": p["file"]} for p in d["pictures"]],
                              "to_show_a_picture": "write MEDIA: followed by its file path on a line of its own"}
                             if d.get("pictures") else {})} for d in found]})

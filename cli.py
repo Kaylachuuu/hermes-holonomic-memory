@@ -671,6 +671,8 @@ def holonomic_command(args) -> None:
                 print(f"\n[#{d['id']}] {_when(d['created_at'])}\n  {d['text']}")
                 if d.get("thoughts"):
                     print(f"  What she made of it: {d['thoughts']}")
+                if d.get("her_thoughts"):
+                    print(f"  What she wrote about it afterwards (her own words, through thymos): {d['her_thoughts']}")
                 for c in d.get("connections", []):
                     print(f"  Connection she noticed: {c}")
                 for p in d.get("pictures", []):
@@ -1494,6 +1496,8 @@ def _sleep(engine, cfg, args) -> None:
                             foundation=read_foundation(get_hermes_home()), steps=steps, persona=persona,
                             accounts=(lambda: _persona.take_accounts(engine, get_hermes_home(), key_fn=extract_keys)) if persona else None)
         report["persona"] = persona
+        if persona and _persona.tell_slept(get_hermes_home(), cfg, report):
+            report["told"] = True
     except ReflectionError as exc:
         print(f"Sleep failed: {exc}")
         return
@@ -1536,6 +1540,8 @@ def _sleep(engine, cfg, args) -> None:
                      + (f": {p['why']}" if p.get("why") else "") if p.get("of") else "")
                   + (f"\n            enlarged to {p['enlarged'][0]}x{p['enlarged'][1]}" if p.get("enlarged") else "")
                   + (f"\n            {p['file']}" if p.get("file") else ""))
+    if report.get("told"):
+        print("  TOLD      the persona service that memory slept; she may write about the dream at idle")
     for note in report.get("waited") or []:
         print(f"  WAITED    {note}")
     for err in report["errors"]:
