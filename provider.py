@@ -31,6 +31,7 @@ from .reflect import (DREAM_TALK_ASSISTANT, DREAM_TALK_KINDS, DREAM_TALK_USER, I
                       SUBJECTS, IdleReflector, read_foundation)
 from .sleep import DREAM, DREAM_INSIGHT, DREAM_REALM, EPISODE, SLEEP_DEFAULTS, dreams as list_dreams, latest_dream
 from . import persona as _persona
+from . import when as _when
 from .persona import PERSONA_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,9 @@ TOOL_SCHEMA = {
         "Long-term associative memory. Relevant memories are recalled automatically every turn; use this tool "
         "to dig deeper or to manage memories.\n"
         "ACTIONS:\n"
-        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those. If an "
+        "- recall: search memory for `query`. Returns memories similar to it and memories linked to those, each with "
+        "its date and how long ago it was. When the query names a time ('last week', 'yesterday', 'three days ago'), "
+        "or you give it as `when`, memories from then come first. If an "
         "ordinary recall does not find what you are looking for, set `deep` to true: that also searches memories "
         "that have faded with time and follows links further. Set "
         "`subject` to search only what you have concluded about the user as a person ('user'), about what "
@@ -110,6 +113,7 @@ TOOL_SCHEMA = {
             "section": {"type": "integer", "description": "A part of the image to look at closely (look)."},
             "deep": {"type": "boolean", "description": "Recall only: also search faded memories and follow links further."},
             "query": {"type": "string", "description": "What to search for (recall)."},
+            "when": {"type": "string", "description": "A time in the past, as said: 'last week', 'yesterday', '3 days ago' (recall)."},
             "subject": {"type": "string", "enum": ["user", "projects", "self", "us"],
                         "description": "Limit recall to your own conclusions about this subject."},
             "content": {"type": "string", "description": "What to store (remember)."},
@@ -685,7 +689,7 @@ class HolonomicMemoryProvider(MemoryProvider):
         return _KIND_LABEL.get(kind, kind)
 
     def _line(self, hit, max_chars: int) -> str:
-        when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at))
+        when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at)) + ", " + _when.age(hit.created_at)
         label = self._label(hit.kind, hit.meta)
         # "linked" = it came through an association, not because it resembles the message.
         linked = ", linked" if hit.assoc > 0 and hit.direct < 0.3 else ""
@@ -736,14 +740,22 @@ class HolonomicMemoryProvider(MemoryProvider):
             named = " ".join(f"{n['name']} {n['what']}".strip() for n in seen.values())
             words = named if is_trivial_prompt(words) else f"{words} {named}"
         k = int(self._cfg["recall_k"])
-        hits = []
+        hits, period, note = [], None, ""
         try:
             if words and not is_trivial_prompt(words):
-                hits = engine.recall(words[:2000], k=k * 3, min_score=float(self._cfg["min_score"]), **recall_options(self._cfg))
-                hits = select_for_injection([h for h in hits if self._visible(h, sid)], self._cfg)
+                period = _when.window(words)
+                hits = self._recall_in(engine, words[:2000], k, float(self._cfg["min_score"]), period,
+                                       lambda h: self._visible(h, sid))
         except Exception as exc:
             logger.warning("holonomic: recall failed: %s", exc)
             return ""
+        if period is not None:
+            found = sum(1 for h in hits if period[0] <= h.created_at < period[1])
+            trace.append(f"the message names a time: {period[2]!r} ({_when.span(period[0], period[1])}); "
+                         f"{found} recalled memory(ies) from then")
+            if not found:
+                note = (f"(Nothing in memory from {period[2]} ({_when.span(period[0], period[1])}) came up for this "
+                        "message." + (" What is recalled here is from other times.)" if hits else ")"))
         lines, used, shown = [], 0, []
         for hit, image_id, parts in _images.group_hits(hits):      # an image and its parts make one entry
             line = (self._image_line(engine, hit, image_id, parts, int(self._cfg["max_item_chars"])) if image_id
@@ -756,14 +768,29 @@ class HolonomicMemoryProvider(MemoryProvider):
         extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "",
                                            self._reference_block(engine, _images.strip_image_markers(query), sid, trace)) if b]
         if not lines:
-            return self._keep_context(engine, query, "\n\n".join(extra), trace)
+            return self._keep_context(engine, query, "\n\n".join(([note] if note else []) + extra), trace)
         try:                                             # what gets used stays strong; what is never recalled fades
             engine.reinforce(shown, 0.03)
         except Exception:
             pass
         self._last_count = len(lines)
         return self._keep_context(engine, query, "\n\n".join(
-            ["## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines)] + extra), trace)
+            ["## Holonomic Memory (recalled; may be incomplete or outdated)\n" + "\n".join(lines + ([note] if note else []))]
+            + extra), trace)
+
+    def _recall_in(self, engine, query: str, k: int, floor: float, period, visible, **options) -> list:
+        """Recall for the message.  When it names a time, memories from then come first, found with a lower floor
+        since "the joke I told you last week" resembles the joke only loosely; the rest follow, each with its age."""
+        opts = dict(recall_options(self._cfg), **options)
+        hits = select_for_injection([h for h in engine.recall(query, k=k * 3, min_score=floor, **opts) if visible(h)],
+                                    self._cfg)
+        if period is None:
+            return hits
+        start, end, _ = period
+        wide = engine.recall(query, k=k * 8, min_score=floor * 0.5, **opts)
+        then = [h for h in wide if start <= h.created_at < end and visible(h)][:k]
+        ids = {h.id for h in then}
+        return then + [h for h in hits if h.id not in ids]
 
     @staticmethod
     def _keep_context(engine, query: str, text: str, trace: Optional[List[str]] = None) -> str:
@@ -782,7 +809,7 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     def _image_line(self, engine, hit, image_id: int, parts: list, max_chars: int) -> str:
         """One entry for an image: where its file is, what it shows, and which parts of it matched."""
-        when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at))
+        when = time.strftime("%Y-%m-%d", time.localtime(hit.created_at)) + ", " + _when.age(hit.created_at)
         clip = lambda t: (lambda t: t if len(t) <= max_chars else t[:max_chars].rsplit(" ", 1)[0] + "…")(" ".join(t.split()))  # noqa: E731
         try:
             img = _images.get_image(engine, image_id)
@@ -1370,7 +1397,7 @@ class HolonomicMemoryProvider(MemoryProvider):
 
     def _hit_json(self, hit) -> Dict[str, Any]:
         out = {"id": hit.id, "text": hit.text, "kind": hit.kind,
-               "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.created_at)),
+               "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.created_at)), "ago": _when.age(hit.created_at),
                "score": round(hit.score, 3), "similar": round(hit.direct, 3), "linked": round(hit.assoc, 3),
                "trust": round(hit.trust, 2)}
         if _persona.on(self._cfg) and hit.kind in _KIND_LABEL_PERSONA and not _persona.written_by_her({"meta": hit.meta}):
@@ -1521,6 +1548,15 @@ class HolonomicMemoryProvider(MemoryProvider):
                     options.update(min_strength=0.0, reach=2)
                 hits = engine.recall(query, k=limit, min_score=0.0 if subject else (0.1 if args.get("deep") else 0.15),
                                      **options, **only)
+                period = _when.window(str(args.get("when") or "") or query)
+                timed: Dict[str, Any] = {}
+                if period is not None:
+                    # Memories from the time the query names come first, found with a lower floor.
+                    wide = engine.recall(query, k=limit * 4, min_score=0.05, **options, **only)
+                    then = [h for h in wide if period[0] <= h.created_at < period[1]][:limit]
+                    ids = {h.id for h in then}
+                    hits = (then + [h for h in hits if h.id not in ids])[:limit]
+                    timed = {"period": f"{period[2]} ({_when.span(period[0], period[1])})", "from_then": len(then)}
                 if args.get("deep"):
                     # Recovering a faded memory brings it back within everyday reach.
                     faded = [h.id for h in hits if h.strength < threshold]
@@ -1529,9 +1565,9 @@ class HolonomicMemoryProvider(MemoryProvider):
                 if subject:
                     theirs = ({"profile_written_by": "the memory system's model, not you"}
                               if subject in ("self", "us") and _persona.on(self._cfg) and engine.profile(subject) else {})
-                    return json.dumps({"profile": engine.profile(subject), **theirs,
+                    return json.dumps({"profile": engine.profile(subject), **theirs, **timed,
                                        "results": [self._hit_json(h) for h in hits], "count": len(hits)})
-                return json.dumps({"results": [self._hit_json(h) for h in hits], "count": len(hits)})
+                return json.dumps({**timed, "results": [self._hit_json(h) for h in hits], "count": len(hits)})
             if action == "remember":
                 content = clean_for_storage(args.get("content") or "", 4000)
                 if not content:
