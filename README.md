@@ -421,8 +421,16 @@ the thing thymos exists to prevent. What changes:
 - **Dreams** are still composed, and shown to her as what they are: the memory system's composition from her
   memories, not something she wrote. She is no longer made to reread one and say what she made of it, and the
   waking thoughts of older dreams are not shown as hers.
+- **After a sleep that made a dream, she is told** (thymos 0.4 or later). Holonomic leaves the dreams' text and
+  a few counts in `plugin-data/thymos/slept/`, and thymos offers them to her at idle. If she writes what she
+  makes of one, thymos leaves her words in `plugin-data/thymos/dream-thoughts/`, and holonomic keeps them with
+  the dream, as hers. They are shown with the dream from then on ("What you wrote about it afterwards"). The
+  dream itself stays the memory system's.
 - **What another model wrote before** (old self notes, relationship notes, accounts and dream connections) stays
-  in memory and can still be recalled, labelled as the memory system's model's words, not hers.
+  in memory and can still be recalled, labelled as the memory system's model's words, not hers. Once, the self
+  notes, relationship notes and the two profiles are offered to her (thymos 0.4 or later), in
+  `plugin-data/thymos/old-notes.json`, as dated text that model wrote. She keeps what she recognises in her own
+  words, in her own record. Holonomic changes nothing in them.
 - **Her work comes first at idle.** While thymos has a reflection or an account waiting or running, reflection
   and sleep wait (`hermes holonomic sleep status` says so). Thymos says what it has waiting in
   `plugin-data/thymos/idle.json`; a file not rewritten for ten minutes is ignored.

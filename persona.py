@@ -10,6 +10,11 @@ chose to store in `plugin-data/thymos/accounts/` as a small JSON file, and holon
 as the conversation and linked to it on the plates, then moves the file to `stored/`.  If she stores none, there is
 none, and nothing fills in for her.
 
+The same folder carries the rest of what passes between them (persona-provider.md 4.2 and 4.6).  After a sleep that
+made a dream, holonomic says so in `slept/`, with the dream's text; whatever she writes about it comes back through
+`dream-thoughts/` and is kept with the dream as hers.  Once, the notes another model wrote in her voice before the
+service ran are offered to her in `old-notes.json`, as dated text; holonomic leaves them as they are.
+
 Without a persona service nothing here changes anything.
 
 Only stdlib imports here: Hermes executes this file when it loads the plugin.
@@ -32,6 +37,9 @@ logger = logging.getLogger(__name__)
 ENV = "HERMES_PERSONA_SERVICE"
 ACCOUNTS = "accounts"           # her accounts of conversations; holonomic stores them
 IDLE = "idle.json"              # what she has waiting for idle time; holonomic's own work waits for it
+SLEPT = "slept"                 # holonomic says here that it slept and what it made; she may write about it
+DREAM_THOUGHTS = "dream-thoughts"   # what she wrote about a dream; holonomic keeps it with the dream as hers
+OLD_NOTES = "old-notes.json"    # the notes another model wrote in her voice, offered to her once
 IDLE_FRESH_SECONDS = 600        # a file older than this was left by a Hermes that is gone, and is not waited for
 
 PERSONA_DEFAULTS: Dict[str, Any] = {
@@ -162,3 +170,126 @@ def _file_away(path: Path, item: Dict[str, Any], memory_id: Optional[int], how: 
 
 def written_by_her(memory: Dict[str, Any]) -> bool:
     return ((memory.get("meta") or {}).get("author") == "self")
+
+
+def wants(cfg: Optional[Dict[str, Any]], name: str) -> bool:
+    """Whether the service running alongside says it takes part in `name` (e.g. "slept=1")."""
+    s = service(cfg)
+    return s is not None and s["features"].get(name) not in (None, "0")
+
+
+def _write(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now: Optional[float] = None) -> Optional[Path]:
+    """Tell the persona service that memory slept, and what it made (persona-provider.md 4.2, `MEMORY_SLEPT`).
+
+    Facts only: when, the dreams with their text (she has no way to look them up in the moment she is offered), how
+    many of her accounts were stored and how many facts were learned.  Nothing here says what any of it means.
+    Only a sleep that made a dream is told: without one there is nothing for her to write about."""
+    if not wants(cfg, "slept") or report.get("dry_run"):
+        return None
+    dreams = [d for d in (report.get("dreams") or []) if d.get("id")]
+    if not dreams:
+        return None
+    from . import __version__
+    now = time.time() if now is None else now
+    item = {"slept_at": now,
+            "dreams": [{"id": d["id"], "text": d["text"], "pictures": len(d.get("pictures") or [])} for d in dreams],
+            "her_accounts_stored": len(report.get("episodes") or []),
+            "facts_learned": sum(len(r.get("stored") or []) for r in report.get("reflections") or []),
+            "memory": f"holonomic/{__version__}"}
+    path = folder(home) / SLEPT / f"{int(now * 1000)}.json"
+    try:
+        _write(path, item)
+        return path
+    except OSError as exc:
+        logger.warning("holonomic: could not tell the persona service that memory slept: %s", exc)
+        return None
+
+
+def waiting_dream_thoughts(home) -> List[Path]:
+    try:
+        return sorted(p for p in (folder(home) / DREAM_THOUGHTS).glob("*.json") if p.is_file())
+    except OSError:
+        return []
+
+
+def take_dream_thoughts(engine, home, limit: int = 20) -> List[Dict[str, Any]]:
+    """Keep what she wrote about a dream with the dream, as hers.  The dream itself stays the memory system's."""
+    out: List[Dict[str, Any]] = []
+    for path in waiting_dream_thoughts(home)[:limit]:
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+            text = " ".join(str(item.get("thoughts") or "").split())
+            dream_id = int(item.get("dream_id") or 0)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("holonomic: her words on a dream could not be read (%s): %s", path.name, exc)
+            continue
+        found = engine.get(dream_id) if dream_id else None
+        if not text or not found:
+            _file_away(path, item, None, "empty" if not text else "no such dream")
+            continue
+        engine.update_meta(dream_id, {"her_thoughts": text[:4000], "her_thoughts_at": item.get("written_at") or time.time(),
+                                      "her_thoughts_entry": item.get("entry_hash", "")})
+        out.append({"dream": dream_id, "thoughts": text})
+        _file_away(path, item, dream_id, "stored")
+    return out
+
+
+# What another model wrote in her voice before the persona service ran: holonomic's reflection model's notes about
+# her and about the two of them, and the "who you have become" and relationship profiles.
+_OLD_KINDS = ("self_note", "bond_note")
+_OLD_OFFERED = "persona:old_notes_offered"
+OLD_NOTES_MAX_CHARS = 12000
+
+
+def old_notes(engine) -> Dict[str, Any]:
+    notes = []
+    for kind in _OLD_KINDS:
+        for r in engine.recent(500, kind=kind):
+            full = engine.get(r["id"]) or {}
+            if not written_by_her(full):
+                notes.append({"id": r["id"], "kind": kind, "at": r["created_at"], "text": " ".join(r["text"].split())})
+    notes.sort(key=lambda n: n["at"])
+    profiles = {k: engine.profile(k) for k in ("self", "us") if engine.profile(k)}
+    return {"notes": notes, "profiles": profiles}
+
+
+def offer_old_notes(engine, home, cfg: Optional[Dict[str, Any]], now: Optional[float] = None) -> Optional[Path]:
+    """Once: the notes another model wrote in her voice, as dated text, for her to keep in her own words or not
+    (persona-provider.md 4.6, `OLD_SELF_NOTES`).  Holonomic changes nothing in them and keeps them, labelled as
+    that model's.  With nothing to offer, it is marked as offered and nothing is written."""
+    if not wants(cfg, "old_notes") or engine.kv_get(_OLD_OFFERED):
+        return None
+    now = time.time() if now is None else now
+    found = old_notes(engine)
+    if not found["notes"] and not found["profiles"]:
+        engine.kv_set(_OLD_OFFERED, f"{now} nothing to offer")
+        return None
+    shown, budget = [], OLD_NOTES_MAX_CHARS - sum(len(t) for t in found["profiles"].values())
+    for n in reversed(found["notes"]):                  # newest kept when there are too many
+        if len(n["text"]) + 40 > budget:
+            break
+        shown.append(n)
+        budget -= len(n["text"]) + 40
+    shown.reverse()
+    notes = found["notes"]
+    from . import __version__
+    item = {"written_by": str((cfg or {}).get("reflect_model") or "the memory system's reflection model"),
+            "count": len(notes), "shown": len(shown),
+            "first_at": notes[0]["at"] if notes else None, "last_at": notes[-1]["at"] if notes else None,
+            "notes": [{"at": n["at"], "kind": n["kind"], "text": n["text"]} for n in shown],
+            "profiles": found["profiles"], "memory": f"holonomic/{__version__}", "offered_at": now}
+    path = folder(home) / OLD_NOTES
+    try:
+        _write(path, item)
+    except OSError as exc:
+        logger.warning("holonomic: could not offer her the old notes: %s", exc)
+        return None
+    engine.kv_set(_OLD_OFFERED, str(now))
+    return path

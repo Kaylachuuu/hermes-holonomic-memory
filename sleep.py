@@ -900,6 +900,7 @@ def dreams(engine, n: int = 5) -> List[dict]:
         full = engine.get(d["id"]) or {}
         insights = [h.text for h in engine.associates(d["id"], k=4, realms=(DREAM_REALM,), min_score=0.2) if h.kind == DREAM_INSIGHT]
         out.append(dict(d, thoughts=(full.get("meta") or {}).get("thoughts", ""), connections=insights,
+                        her_thoughts=(full.get("meta") or {}).get("her_thoughts", ""),
                         pictures=_pictures_of(engine, d["id"])))
     return out
 

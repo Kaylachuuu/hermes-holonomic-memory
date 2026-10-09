@@ -209,3 +209,85 @@ def test_with_a_service_other_models_words_are_not_shown_as_hers(tmp_path):
         assert "what_you_made_of_it" not in listed["dreams"][0] and "did not write them" in listed["note"]
         found = tool(p, action="recall", query="I suggested tomatoes", subject="self")
         assert any(h["id"] == note and h["written_by"].startswith("the memory system") for h in found["results"])
+
+
+SLEPT_SERVICE = "thymos/0.4.0 accounts=1 idle=1 slept=1 old_notes=1"
+
+
+def test_memory_tells_her_it_slept_only_after_a_dream_and_only_if_the_service_asks(tmp_path):
+    from holonomic import persona
+    home = tmp_path / "home"
+    report = {"dreams": [{"id": 7, "text": "A house of slow rooms.", "pictures": [{"file": "x"}]}],
+              "episodes": [{"id": 3}], "reflections": [{"stored": [1, 2]}, {"stored": [4]}]}
+    with service():                                                    # 0.3.0 does not ask
+        assert persona.tell_slept(home, {}, report, now=NOW) is None
+    with service(SLEPT_SERVICE):
+        assert persona.tell_slept(home, {}, dict(report, dreams=[]), now=NOW) is None      # nothing to write about
+        assert persona.tell_slept(home, {}, dict(report, dry_run=True), now=NOW) is None
+        path = persona.tell_slept(home, {}, report, now=NOW)
+    item = json.loads(path.read_text())
+    assert path.parent.name == "slept" and item["slept_at"] == NOW
+    assert item["dreams"] == [{"id": 7, "text": "A house of slow rooms.", "pictures": 1}]
+    assert item["her_accounts_stored"] == 1 and item["facts_learned"] == 3 and item["memory"].startswith("holonomic/")
+
+
+def test_her_words_on_a_dream_are_kept_with_it_as_hers(tmp_path):
+    from holonomic import persona
+    from holonomic.sleep import DREAM, DREAM_REALM, dreams
+    m = store(tmp_path)
+    home = tmp_path / "home"
+    did = m.remember("I was in a garden of code.", kind=DREAM, realm=DREAM_REALM, session="dreams", chain=False,
+                     meta={"thoughts": "", "by": "memory system"})[0]
+    folder = persona.folder(home) / persona.DREAM_THOUGHTS
+    folder.mkdir(parents=True)
+    (folder / "1-a.json").write_text(json.dumps({"dream_id": did, "thoughts": "It felt like tending something.",
+                                                 "entry_hash": "e1", "written_at": NOW}))
+    (folder / "2-b.json").write_text(json.dumps({"dream_id": 99999, "thoughts": "About a dream that is gone."}))
+    assert persona.take_dream_thoughts(m, home) == [{"dream": did, "thoughts": "It felt like tending something."}]
+    meta = m.get(did)["meta"]
+    assert meta["her_thoughts"] == "It felt like tending something." and meta["her_thoughts_entry"] == "e1"
+    assert meta["by"] == "memory system"                               # the dream is still the memory system's
+    assert dreams(m, 1)[0]["her_thoughts"] == "It felt like tending something."
+    assert not list(folder.glob("*.json"))
+    assert json.loads((folder / "stored" / "2-b.json").read_text())["holonomic"]["how"] == "no such dream"
+
+
+def test_the_notes_another_model_wrote_in_her_voice_are_offered_once(tmp_path):
+    from holonomic import persona
+    m = store(tmp_path)
+    home = tmp_path / "home"
+    with service(SLEPT_SERVICE):
+        assert persona.offer_old_notes(m, home, {}, now=NOW) is None   # nothing to offer, and marked so
+    assert m.kv_get("persona:old_notes_offered").endswith("nothing to offer")
+    m2 = store(tmp_path / "two")
+    first = m2.remember("I like dry humour", kind="self_note", session="reflection", chain=False, created_at=NOW - DAY)[0]
+    m2.remember("We build things together", kind="bond_note", session="reflection", chain=False, created_at=NOW)
+    m2.remember("I chose this myself", kind="self_note", session="reflection", chain=False, meta={"author": "self"})
+    m2.set_profile("self", "I am curious.")
+    with service():                                                    # a service that does not ask
+        assert persona.offer_old_notes(m2, home, {}) is None and m2.kv_get("persona:old_notes_offered") is None
+    with service(SLEPT_SERVICE):
+        path = persona.offer_old_notes(m2, home, {"reflect_model": "qwen3:8b"}, now=NOW)
+        assert persona.offer_old_notes(m2, home, {}, now=NOW) is None  # once
+    item = json.loads(path.read_text())
+    assert item["written_by"] == "qwen3:8b" and item["count"] == 2 and item["shown"] == 2
+    assert [n["text"] for n in item["notes"]] == ["I like dry humour", "We build things together"]
+    assert item["profiles"] == {"self": "I am curious."} and item["first_at"] == NOW - DAY
+    assert m2.get(first)["text"] == "I like dry humour"                # left as it is
+
+
+def test_with_a_service_her_words_on_a_dream_are_shown_as_hers(tmp_path):
+    if not HAVE_HERMES: return
+    from holonomic.sleep import sleep_once
+    p = make(tmp_path)
+    e = p._engine
+    talk(e, "s-new", time.time() - 3600, GARDEN)
+    with service(SLEPT_SERVICE):
+        sleep_once(e, p._cfg, llm=lambda system, user, step: {
+            "dream": json.dumps({"dream": "I am kneeling in the garden and the herbs are growing in rows of assembly, each leaf a line of code."})}[step],
+            steps=["dream"], rng=random.Random(2), persona=True)
+        did = int(e.kv_get("dream:latest"))
+        e.update_meta(did, {"her_thoughts": "I think I miss the garden."})
+        block = p.system_prompt_block()
+        assert "What you wrote about it afterwards, in your own words: I think I miss the garden." in block
+        assert tool(p, action="dreams")["dreams"][0]["what_you_wrote_about_it"] == "I think I miss the garden."

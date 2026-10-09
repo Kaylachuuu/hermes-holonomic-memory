@@ -1251,16 +1251,27 @@ class IdleReflector:
         return lambda: self._stop.is_set() or self.last_activity > began
 
     def accounts_if_due(self) -> Optional[List[dict]]:
-        """Store the accounts of conversations she has written (persona.py).  Only embeddings, no model."""
+        """Store what she has written for memory to keep (persona.py): her accounts of conversations, and her words
+        on a dream.  Once, offer her the notes another model wrote in her voice.  Only embeddings, no model."""
         from . import persona as _persona
         cfg = self.load_cfg()
-        if not _persona.on(cfg) or not _persona.waiting_accounts(self.home) or not self._busy.acquire(blocking=False):
+        if not _persona.on(cfg):
             return None
-        self._begin("storing her accounts")
+        waiting = _persona.waiting_accounts(self.home) or _persona.waiting_dream_thoughts(self.home)
+        if not waiting and (not _persona.wants(cfg, "old_notes") or self.engine.kv_get("persona:old_notes_offered")):
+            return None
+        if not self._busy.acquire(blocking=False):
+            return None
+        self._begin("storing what she wrote")
         try:
             stored = _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)
             if stored:
                 logger.info("holonomic: stored %d account(s) she wrote", len(stored))
+            thoughts = _persona.take_dream_thoughts(self.engine, self.home)
+            if thoughts:
+                logger.info("holonomic: kept her words on %d dream(s)", len(thoughts))
+            if _persona.offer_old_notes(self.engine, self.home, cfg):
+                logger.info("holonomic: offered her the notes another model wrote in her voice")
             return stored
         finally:
             self._busy.release()
@@ -1369,6 +1380,8 @@ class IdleReflector:
                 accounts=(lambda: _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)) if persona else None,
                 should_stop=self._should_stop(cfg, time.time()))
             self.last_sleep_error = "; ".join(report["errors"])
+            if persona:
+                _persona.tell_slept(self.home, cfg, report)
             logger.info("holonomic: slept: %d conversation(s) summarised, dream %s%s",
                         len(report["episodes"]), "yes" if (report.get("dream") or {}).get("id") else "no",
                         f"; {report['interrupted']}" if report.get("interrupted") else "")
@@ -1431,7 +1444,7 @@ class IdleReflector:
         raised stopped the ones after it from ever being tried, round after round, and said nothing."""
         if self.settling():
             return
-        for name, task in (("her accounts", self.accounts_if_due), ("describing images", self.images_if_due),
+        for name, task in (("what she wrote", self.accounts_if_due), ("describing images", self.images_if_due),
                            ("reflection", self.run_if_due), ("sleep", self.sleep_if_due)):
             try:
                 task()
