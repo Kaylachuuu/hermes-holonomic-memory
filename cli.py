@@ -671,6 +671,8 @@ def holonomic_command(args) -> None:
                 print(f"\n[#{d['id']}] {_when(d['created_at'])}\n  {d['text']}")
                 if d.get("thoughts"):
                     print(f"  What she made of it: {d['thoughts']}")
+                if d.get("her_thoughts"):
+                    print(f"  What she wrote about it afterwards (her own words, through thymos): {d['her_thoughts']}")
                 for c in d.get("connections", []):
                     print(f"  Connection she noticed: {c}")
                 for p in d.get("pictures", []):
