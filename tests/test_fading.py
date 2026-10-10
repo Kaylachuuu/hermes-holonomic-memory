@@ -156,3 +156,19 @@ def test_cli_unfade_reports_then_raises(tmp_path):
     with contextlib.redirect_stdout(out):
         cli._unfade(m, {"fade_enabled": False}, types.SimpleNamespace(apply=True, no_images=False))
     assert "Raised 5" in out.getvalue() and "Fading is still on" not in out.getvalue()
+    # and through the command itself, as `hermes holonomic unfade` reaches it
+    import argparse
+    parser = argparse.ArgumentParser()
+    cli.register_cli(parser)
+    parsed = parser.parse_args(["unfade"])
+    assert parsed.holonomic_action == "unfade" and parsed.apply is False
+    opened = cli._open
+    cli._open = lambda: (m, {})
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.holonomic_command(parsed)
+    finally:
+        cli._open = opened
+    assert "Usage:" not in out.getvalue() and "could have faded" in out.getvalue()
+

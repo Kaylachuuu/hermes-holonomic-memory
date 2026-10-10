@@ -521,7 +521,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore", "plates"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore", "plates", "unfade"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
