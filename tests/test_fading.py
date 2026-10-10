@@ -49,6 +49,10 @@ def test_with_a_service_that_takes_part_nothing_fades_until_she_agrees(tmp_path)
         (persona.folder(home)).mkdir(parents=True, exist_ok=True)
         (persona.folder(home) / persona.FADING).write_text(json.dumps({"fading": True}))
         assert persona.her_fading(home, {}) is True
+        (persona.folder(home) / persona.FADING).write_text(json.dumps({"fading": True, "fade_half_life_days": 5.0,
+                                                                       "fade_threshold": 0.35}))
+        assert persona.her_fading(home, {}) is True
+        assert persona.her_fading(home, {"fade_half_life_days": 2}) is False               # not what she agreed to
         r = sleep_once(m, {}, steps=["fade"], now=NOW, her_fading=persona.her_fading(home, {}))
         assert r["fade"]["changed"] == 5
         # Her agreement does not override the setting: off is off.
@@ -101,6 +105,7 @@ def test_chosen_a_dream_strengthens_nothing_and_says_what_it_reached(tmp_path):
     with service(FADING_SERVICE):
         item = json.loads(persona.tell_slept(home, {"dream_reinforce": "chosen"}, report, now=NOW).read_text())
     assert item["dreams"][0]["reached"][0]["id"] == d["reached"][0]["id"] and item["keep_closer_amount"] == 0.1
+    assert item["dreams"][0]["reached"][0]["age"] == "20 days ago"
     with service("thymos/0.4.0 accounts=1 idle=1 slept=1"):                              # a service that does not choose
         item = json.loads(persona.tell_slept(home, {"dream_reinforce": "chosen"}, report, now=NOW + 1).read_text())
     assert "reached" not in item["dreams"][0]

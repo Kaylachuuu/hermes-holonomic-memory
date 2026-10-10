@@ -211,7 +211,8 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
     item = {"slept_at": now,
             "dreams": [dict({"id": d["id"], "text": d["text"], "pictures": len(d.get("pictures") or [])},
                             **({"reached": [{"id": r["id"], "text": " ".join(str(r["text"]).split()), "created_at": r.get("created_at"),
-                                             "faded": bool(r.get("faded"))} for r in d.get("reached") or []]} if choosing else {}))
+                                             "age": _age(r.get("created_at"), now), "faded": bool(r.get("faded"))}
+                                            for r in d.get("reached") or []]} if choosing else {}))
                        for d in dreams],
             "her_accounts_stored": len(report.get("episodes") or []),
             "facts_learned": sum(len(r.get("stored") or []) for r in report.get("reflections") or []),
@@ -225,6 +226,14 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
     except OSError as exc:
         logger.warning("holonomic: could not tell the persona service that memory slept: %s", exc)
         return None
+
+
+def _age(ts: Any, now: float) -> str:
+    from .when import age                 # stdlib only, like this file
+    try:
+        return age(float(ts), now) if ts else ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def _plain(content: Any) -> str:
@@ -351,7 +360,15 @@ def her_fading(home, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
         decided = json.loads((folder(home) / FADING).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(decided, dict) and decided.get("fading") is True
+    if not isinstance(decided, dict) or decided.get("fading") is not True:
+        return False
+    # She agreed to fading as it was set then.  A shorter half-life or a higher threshold is not what she agreed to,
+    # and waits for her again.
+    now = memory_settings(cfg)
+    try:
+        return all(float(decided[k]) == float(now[k]) for k in ("fade_half_life_days", "fade_threshold") if k in decided)
+    except (TypeError, ValueError):
+        return False
 
 
 def memory_settings(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
