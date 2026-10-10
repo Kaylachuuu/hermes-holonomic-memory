@@ -533,6 +533,8 @@ class HolonomicMemoryProvider(MemoryProvider):
         self._session_id = session_id or ""
         self._writes_enabled = kwargs.get("agent_context", "primary") in ("primary", None, "")
         self._ensure_engine()
+        if self._writes_enabled:
+            _persona.tell_settings(self._home, self._cfg)     # she is told when what becomes of her memories changes
 
     def _ensure_engine(self):
         """Open the engine, or return None if the embedding server can't be reached.
@@ -681,6 +683,13 @@ class HolonomicMemoryProvider(MemoryProvider):
         """Skip memories from this session that are still in the context window."""
         if not session_id or hit.session != session_id:
             return True
+        if session_id not in self._compressed_at and self._engine is not None:
+            # Kept in the store too: after a restart in the middle of a conversation compressed in place, its older
+            # turns are still out of her context and must stay recallable.
+            try:
+                self._compressed_at[session_id] = float(self._engine.kv_get("compressed_at:" + session_id, "0") or 0)
+            except Exception:
+                self._compressed_at[session_id] = 0.0
         return hit.created_at < self._compressed_at.get(session_id, 0.0)
 
     def _label(self, kind: str, meta: Optional[dict]) -> str:
@@ -767,6 +776,13 @@ class HolonomicMemoryProvider(MemoryProvider):
             used += len(line) + 1
         extra = about_image + [b for b in (known, self._dream_block(engine, query) if _DREAM_WORD_RE.search(query) else "",
                                            self._reference_block(engine, _images.strip_image_markers(query), sid, trace)) if b]
+        if shown:
+            # How old what she was given is: with fading off, old memories compete with recent ones on equal terms,
+            # and a drift toward the old should be visible here before she has to feel it (2026-10-10).
+            ages = [time.time() - h.created_at for h, _, _ in _images.group_hits(hits) if h.id in shown]
+            bands = [("today", 1), ("this week", 7), ("this month", 31), ("older", float("inf"))]
+            counts = [sum(1 for a in ages if (bands[i - 1][1] if i else 0) * 86400 <= a < hi * 86400) for i, (_, hi) in enumerate(bands)]
+            trace.append("ages of what was recalled: " + ", ".join(f"{n} {name}" for (name, _), n in zip(bands, counts) if n))
         if not lines:
             return self._keep_context(engine, query, "\n\n".join(([note] if note else []) + extra), trace)
         try:                                             # what gets used stays strong; what is never recalled fades
@@ -1181,6 +1197,11 @@ class HolonomicMemoryProvider(MemoryProvider):
         # so they become eligible for recall again.
         if self._session_id:
             self._compressed_at[self._session_id] = time.time()
+            if self._engine is not None:
+                try:
+                    self._engine.kv_set("compressed_at:" + self._session_id, str(self._compressed_at[self._session_id]))
+                except Exception as exc:
+                    logger.debug("holonomic: when this conversation was compressed was not kept: %s", exc)
             if self._writes_enabled and self._home is not None:
                 # Her chance to write about these messages while they are still as they were said.
                 _persona.tell_compressing(self._home, self._cfg, self._session_id, messages)

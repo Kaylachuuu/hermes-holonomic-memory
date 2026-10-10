@@ -71,6 +71,10 @@ def test_turns_are_stored_and_recalled_in_a_later_session(tmp_path):
     assert "Lisbon" in p.prefetch("where did Mara move to, was it Lisbon?", session_id="s1")
     assert "Holonomic Memory" in p.system_prompt_block() and "4 memories" in p.system_prompt_block()
     p.shutdown()
+    # and still after a restart in the middle of that conversation: when it was compressed is kept in the store
+    p = make(tmp_path)
+    assert "Lisbon" in p.prefetch("where did Mara move to, was it Lisbon?", session_id="s1")
+    p.shutdown()
 
 
 def test_tool_actions(tmp_path):

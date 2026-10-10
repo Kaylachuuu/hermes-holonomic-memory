@@ -1267,7 +1267,7 @@ class IdleReflector:
             stored = _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)
             if stored:
                 logger.info("holonomic: stored %d account(s) she wrote", len(stored))
-            thoughts = _persona.take_dream_thoughts(self.engine, self.home)
+            thoughts = _persona.take_dream_thoughts(self.engine, self.home, cfg=cfg)
             if thoughts:
                 logger.info("holonomic: kept her words on %d dream(s)", len(thoughts))
             if _persona.offer_old_notes(self.engine, self.home, cfg):
@@ -1378,7 +1378,7 @@ class IdleReflector:
             report = _sleep.sleep_once(
                 self.engine, cfg, key_fn=self.key_fn, foundation=self.foundation_fn(), persona=persona,
                 accounts=(lambda: _persona.take_accounts(self.engine, self.home, key_fn=self.key_fn)) if persona else None,
-                should_stop=self._should_stop(cfg, time.time()))
+                should_stop=self._should_stop(cfg, time.time()), her_fading=_persona.her_fading(self.home, cfg))
             self.last_sleep_error = "; ".join(report["errors"])
             if persona:
                 _persona.tell_slept(self.home, cfg, report)

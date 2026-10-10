@@ -21,11 +21,12 @@ Only stdlib imports here: Hermes executes this file when it loads the plugin.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import random
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import reflect as _reflect
 from .reflect import (DERIVED_KINDS, DREAM_TALK_KINDS, IMAGE, IMAGE_KINDS, NO_DOUBLE_QUOTES, ReflectionError, _parse, _speaker,
@@ -66,9 +67,13 @@ SLEEP_DEFAULTS: Dict[str, Any] = {
     "dream_max_words": 180,
     "dream_days": 3,                  # how far back "recent" reaches
     "dream_in_prompt_days": 3,        # how long the latest dream stays in view
-    # Whether a dream strengthens the old memories it touches.  Off: dreams stay in their own realm
-    # and bring nothing faded back to the surface.
-    "dream_reinforce": False,
+    # Whether a dream strengthens the old memories it touches.
+    #   off     dreams stay in their own realm and bring nothing back to the surface
+    #   all     every older memory a dream reached gains a little strength
+    #   chosen  she is shown the older memories each dream reached and chooses which, if any, to keep closer
+    #           (needs a persona service that takes part, "dream_choice=1"; without one it is the same as off)
+    # false and true are read as off and all.
+    "dream_reinforce": "off",
     # Conversation that resembles a stored dream this closely is treated as talk about that dream.
     "dream_talk_similarity": 0.55,
     # What images do in dreams (needs image memory to have something to work with):
@@ -213,7 +218,19 @@ def sleep_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     out.update({k: cfg[k] for k in SLEEP_DEFAULTS if k in cfg})
     if out["dream_images"] not in DREAM_IMAGE_MODES:
         out["dream_images"] = "words"
+    out["dream_reinforce"] = reinforce_mode(out["dream_reinforce"])
     return out
+
+
+DREAM_REINFORCE_MODES = ("off", "all", "chosen")
+DREAM_CHOSEN_AMOUNT = 0.1           # what a memory she chose to keep closer gains, the same as `all` gives each one
+
+
+def reinforce_mode(value: Any) -> str:
+    word = str(value).strip().lower()
+    if value is True or word in ("all", "true", "on", "yes", "1"):
+        return "all"
+    return "chosen" if word == "chosen" else "off"
 
 
 def _model_caller(cfg: Dict[str, Any], report: Dict[str, Any], *, dream: bool = False) -> Callable[..., str]:
@@ -345,7 +362,8 @@ def fade(engine, cfg: Dict[str, Any], report: Dict[str, Any], *, dry_run: bool, 
     ids = []
     for s in engine.sessions(RAW_KINDS):
         done = int(engine.kv_get("episode:" + s["session"], "0") or 0)
-        ids += [m["id"] for m in engine.session_memories(s["session"], kinds=RAW_KINDS) if m["id"] <= done]
+        # All of it: the default limit of 200 left the rest of a long conversation unfaded.
+        ids += [m["id"] for m in engine.session_memories(s["session"], kinds=RAW_KINDS, limit=1000000) if m["id"] <= done]
     # What she saw in images fades the same way once it is at least one sleep old.  The files are untouched.
     try:
         from . import images as _images
@@ -358,6 +376,71 @@ def fade(engine, cfg: Dict[str, Any], report: Dict[str, Any], *, dry_run: bool, 
         return
     report["fade"]["changed"] = engine.fade(ids, factor)
     engine.kv_set("sleep:last_fade", str(now))
+
+
+# What each kind of memory the fade step touches is stored with (provider.py, images.py): the strength `unfade`
+# raises it back to.  Talk about a dream was stored as ordinary conversation and relabelled, so it starts the same.
+STORED_STRENGTH = {"said_user": 1.0, "dreamtalk_user": 1.0, "said_assistant": 0.8, "dreamtalk_assistant": 0.8,
+                   "asked_user": 0.5, IMAGE: 1.0, "image_part": 0.7}
+
+
+def fadeable_ids(engine, *, images: bool = True) -> Dict[str, List[int]]:
+    """Every memory the fade step could have lowered: sentences of conversation she has an account of, and what she
+    saw in images.  The same selection `fade` makes, without its "at least one sleep old" for images."""
+    said = []
+    for s in engine.sessions(RAW_KINDS):
+        done = int(engine.kv_get("episode:" + s["session"], "0") or 0)
+        said += [m["id"] for m in engine.session_memories(s["session"], kinds=RAW_KINDS, limit=1000000) if m["id"] <= done]
+    seen: List[int] = []
+    if images:
+        try:
+            from . import images as _images
+            seen = _images.memory_ids(engine)
+        except Exception:
+            seen = []
+    return {"said": said, "images": seen}
+
+
+def unfade(engine, cfg: Dict[str, Any], *, apply: bool, images: bool = True, now: Optional[float] = None) -> Dict[str, Any]:
+    """Put faded memories back to the strength they were stored with (`hermes holonomic unfade`).
+
+    How strong each one was before it faded is not kept anywhere, so every memory the fade step could have touched
+    is raised to what a new memory of its kind is stored with, and never lowered: one that recall or a dream has
+    strengthened past that keeps what it has.  The report says how far below that they were."""
+    sc = sleep_config(cfg)
+    now = time.time() if now is None else now
+    found = fadeable_ids(engine, images=images)
+    report: Dict[str, Any] = {"said": len(found["said"]), "images": len(found["images"]), "below": 0, "raised": 0,
+                              "under_threshold": 0, "threshold": float(sc["fade_threshold"]), "lowest": None,
+                              "median": None, "by_kind": {}}
+    targets: Dict[int, float] = {}
+    ratios: List[Tuple[float, dict]] = []
+    for mid in dict.fromkeys(found["said"] + found["images"]):
+        m = engine.get(mid)
+        if not m:
+            continue
+        target = STORED_STRENGTH.get(m["kind"])
+        kind = report["by_kind"].setdefault(m["kind"], {"eligible": 0, "below": 0})
+        kind["eligible"] += 1
+        if target is None or float(m["strength"]) >= target - 1e-6:
+            continue
+        kind["below"] += 1
+        targets[mid] = target
+        ratios.append((float(m["strength"]) / target, m))
+        if float(m["strength"]) < report["threshold"]:
+            report["under_threshold"] += 1
+    report["below"] = len(targets)
+    if ratios:
+        ratios.sort(key=lambda r: r[0])
+        low = ratios[0]
+        report["lowest"] = {"ratio": round(low[0], 3), "id": low[1]["id"], "kind": low[1]["kind"],
+                            "strength": round(float(low[1]["strength"]), 3), "created_at": low[1]["created_at"]}
+        report["median"] = round(ratios[len(ratios) // 2][0], 3)
+    if apply and targets:
+        report["raised"] = engine.raise_strength(targets)
+    if apply:
+        engine.kv_set("fade:restored", json.dumps({"at": now, "raised": report["raised"], "images": images}))
+    return report
 
 
 # ---------------------------------------------------------------------- dream
@@ -554,21 +637,25 @@ def _one_dream(engine, cfg: Dict[str, Any], call: Callable[..., str], report: Di
     result = {"text": text[:limit], "thoughts": thoughts, "connections": connections, "opens": opens,
               "fragments": [dict({"id": f["id"], "age": f["age"], "faded": f["strength"] < float(sc["fade_threshold"])},
                                  **({"image_id": f["image_id"]} if f.get("image_id") else {}),
-                                 **({"via": f["via"]} if f.get("via") else {})) for f in fragments]}
+                                 **({"via": f["via"]} if f.get("via") else {})) for f in fragments],
+              # The older memories it reached, as stored: what she is shown when she chooses (dream_reinforce chosen).
+              "reached": [{"id": f["id"], "text": f["text"], "kind": f["kind"], "created_at": (engine.get(f["id"]) or {}).get("created_at"),
+                           "faded": f["strength"] < float(sc["fade_threshold"])} for f in fragments if f["age"] == "OLDER"]}
     if dry_run:
         return result
     # Everything a dream produces is stored in the dream realm.  Its links to waking memories are
     # written on dream plates, which waking recall never reads.
     ids = engine.remember(text[:limit], kind=DREAM, realm=DREAM_REALM, session="dreams", chain=True, whole=True,
                           links=sorted(recent_ids | older_ids)[:6], salience=1.0, trust=0.5, created_at=now,
-                          meta=dict({"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids), "opens": opens},
+                          meta=dict({"thoughts": thoughts, "fragments": sorted(recent_ids | older_ids), "opens": opens,
+                                     "older": sorted(older_ids)},
                                     **({} if wake else {"by": "memory system"})))
     result["id"] = ids[0] if ids else None
     for c in connections:
         engine.remember(c["text"], kind=DREAM_INSIGHT, realm=DREAM_REALM, session="dreams", chain=False,
                         links=(ids[:1] + c["sources"]), trust=0.4, salience=1.0, created_at=now, meta={"sources": c["sources"]})
-    if sc["dream_reinforce"] and older_ids:
-        engine.reinforce(sorted(older_ids), 0.1)
+    if sc["dream_reinforce"] == "all" and older_ids:
+        engine.reinforce(sorted(older_ids), DREAM_CHOSEN_AMOUNT)
     if ids:
         engine.kv_set("dream:latest", str(ids[0]))
         engine.kv_set("dream:latest_at", str(now))
@@ -961,7 +1048,8 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
                steps: Optional[List[str]] = None, rng: Optional[random.Random] = None,
                now: Optional[float] = None, paint: Optional[Callable[..., bytes]] = None,
                persona: bool = False, accounts: Optional[Callable[[], List[dict]]] = None,
-               should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+               should_stop: Optional[Callable[[], bool]] = None,
+               her_fading: Optional[bool] = None) -> Dict[str, Any]:
     """One sleep cycle.  `steps` limits it to some of: reflect, consolidate, fade, dream.
 
     `persona`: a persona service is running (persona.py).  Nothing is written in her voice: reflection writes no
@@ -970,7 +1058,10 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
 
     `should_stop` is asked between steps, between batches of reflection and between dreams.  When it says so the
     cycle ends there and is not counted as a sleep, so the next one is not put off; every step can pick up where it
-    left off.  A step already talking to a model finishes that call first."""
+    left off.  A step already talking to a model finishes that call first.
+
+    `her_fading`: with a persona service that takes part in fading, whether she has agreed to it; nothing fades
+    unless the setting is on and she has.  None: the setting alone decides."""
     sc = sleep_config(cfg)
     wanted = set(steps or ["reflect", "consolidate", "fade", "dream"])
     report: Dict[str, Any] = {"dry_run": dry_run, "calls": [], "errors": [], "reflections": [], "episodes": [],
@@ -1013,7 +1104,10 @@ def sleep_once(engine, cfg: Dict[str, Any], *, llm: Optional[Callable[..., str]]
     elif "consolidate" in wanted and sc["consolidate_enabled"] and not stop("writing accounts of conversations"):
         call = _wrap_test_llm(llm) if llm else _model_caller(cfg, report)
         consolidate(engine, cfg, call, report, dry_run=dry_run, key_fn=key_fn, now=now)
-    if "fade" in wanted and sc["fade_enabled"] and not report.get("interrupted") and not stop("fading"):
+    if "fade" in wanted and sc["fade_enabled"] and her_fading is False:
+        # A persona service takes part in fading, and she has not agreed to it (persona.py `her_fading`).
+        report["fade"] = {"skipped": "she has not agreed to fading", "eligible": 0, "factor": 1.0, "changed": 0}
+    elif "fade" in wanted and sc["fade_enabled"] and not report.get("interrupted") and not stop("fading"):
         fade(engine, cfg, report, dry_run=dry_run, now=now)
     if "dream" in wanted and sc["dream_enabled"] and not report.get("interrupted") and not stop("dreaming"):
         if not dry_run:

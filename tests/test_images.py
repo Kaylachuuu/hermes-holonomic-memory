@@ -1858,7 +1858,7 @@ def test_a_photo_sent_as_a_file_is_recognised_before_she_answers(tmp_path):
         assert new["named"] == [{"name": "Sushi", "said": False, "alike": new["named"][0]["alike"]}] and new["named"][0]["alike"] > 0.9
         kept = (tmp_path / "home" / "holonomic" / "last_context.txt").read_text(encoding="utf-8")
         assert ("--- not given to her; for checking ---\nrecognised in the attached image: Sushi (seen)\n"
-                "a statement that she recognises it was given\nplugin version ") in kept
+                "a statement that she recognises it was given\nages of what was recalled: ") in kept and "\nplugin version " in kept
         assert "--- not given to her" not in block
         # another request for memory arriving while this image is still being looked at must not lose what was found in it
         second = tmp_path / "IMG_7734.HEIC"
