@@ -16,6 +16,7 @@ _NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 
             "eight": 8, "nine": 9, "ten": 10, "a couple of": 2, "a couple": 2, "a few": 3, "few": 3, "several": 4}
 _N = r"(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|a couple(?: of)?|a few|few|several)"
 _UNIT = {"day": 1, "week": 7, "month": 30, "year": 365}
+_WORDS = {2: "two", 3: "three"}
 
 
 def _part(hour: int) -> str:
@@ -23,10 +24,20 @@ def _part(hour: int) -> str:
 
 
 def age(ts: float, now: Optional[float] = None) -> str:
-    """How long ago, the way a person says it: "this morning", "last night", "yesterday afternoon", "3 days ago".
-    For today and yesterday the part of the day is said too, since "yesterday" alone covers a working day and the
-    evening after it."""
+    """How long ago, the way a person says it: "about an hour ago", "this morning", "last night", "yesterday
+    afternoon", "3 days ago".  Within the last few hours, roughly how many; then for today and yesterday the part of
+    the day, since "yesterday" alone covers a working day and the evening after it."""
     now = time.time() if now is None else now
+    ago = now - ts
+    # Within the last few hours, how long: "this evening" covers a conversation an hour ago and one at six.
+    if 0 <= ago < 15 * 60:
+        return "a few minutes ago"
+    if 0 <= ago < 45 * 60:
+        return "about half an hour ago"
+    if 0 <= ago < 90 * 60:
+        return "about an hour ago"
+    if 0 <= ago < 3.5 * 3600:
+        return f"about {_WORDS[int(ago / 3600 + 0.5)]} hours ago"
     days = (_midnight(now) - _midnight(ts)).days
     hour = datetime.fromtimestamp(ts).hour
     if days <= 0:
@@ -37,13 +48,13 @@ def age(ts: float, now: Optional[float] = None) -> str:
     if days == 1:
         return "last night" if hour >= 22 or (hour >= 17 and datetime.fromtimestamp(now).hour < 12) \
             else f"yesterday {_part(hour)}"
-    if days < 14:
+    if days < 21:                                    # "2 weeks ago" for anything from 14 to 20 days said too little
         return f"{days} days ago"
     if days < 60:
-        return f"{days // 7} weeks ago"
+        return f"{int(days / 7 + 0.5)} weeks ago"
     if days < 730:
-        return f"{days // 30} months ago"
-    return f"{days // 365} years ago"
+        return f"{int(days / 30.44 + 0.5)} months ago"
+    return f"{int(days / 365.25)} years ago"
 
 
 def _midnight(ts: float) -> datetime:
@@ -63,6 +74,15 @@ def window(text: str, now: Optional[float] = None) -> Optional[Tuple[float, floa
     t = (text or "").lower()
     today = _midnight(now)
     start_of = lambda days_back: (today - timedelta(days=days_back)).timestamp()      # noqa: E731
+    m = re.search(rf"\b(just now|a (?:few|couple of) minutes ago|(?:{_N}) (minute|hour)s? ago|half an hour ago)\b", t)
+    if m:
+        if m.group(1) == "just now" or "minutes ago" in m.group(1) and m.group(3) is None:
+            return now - 30 * 60, now, m.group(1)
+        if m.group(1) == "half an hour ago":
+            return now - 75 * 60, now - 10 * 60, m.group(1)
+        back = _num(m.group(2)) * (60 if m.group(3) == "minute" else 3600)
+        slack = max(15 * 60, back / 2)
+        return now - back - slack, min(now, now - back + slack), m.group(1)
     m = re.search(r"\b(this morning|earlier today|today|tonight|this afternoon|this evening)\b", t)
     if m:
         return start_of(0), now, m.group(1)

@@ -19,18 +19,28 @@ def inside(text, ts):
 
 def test_ages():
     assert when.age(day(2026, 10, 9, 1), NOW) == "last night"
-    assert when.age(day(2026, 10, 9, 8), NOW) == "this morning"
+    assert when.age(day(2026, 10, 9, 6), NOW) == "this morning"
+    # Within the last few hours, roughly how long (2026-10-10: finer within a day).
+    assert when.age(NOW - 5 * 60, NOW) == "a few minutes ago"
+    assert when.age(NOW - 30 * 60, NOW) == "about half an hour ago"
+    assert when.age(NOW - 70 * 60, NOW) == "about an hour ago"
+    assert when.age(day(2026, 10, 9, 8), NOW) == "about two hours ago"
+    assert when.age(NOW - 3 * 3600, NOW) == "about three hours ago"
     assert when.age(day(2026, 10, 8, 23), NOW) == "last night"
     assert when.age(day(2026, 10, 8, 19), NOW) == "last night"
     assert when.age(day(2026, 10, 8, 14), NOW) == "yesterday afternoon"
     assert when.age(day(2026, 10, 8, 19), datetime(2026, 10, 9, 15).timestamp()) == "yesterday evening"
     assert when.age(day(2026, 10, 6), NOW) == "3 days ago"
+    assert when.age(day(2026, 9, 22), NOW) == "17 days ago"          # days, not "2 weeks", up to three weeks
     assert when.age(day(2026, 9, 18), NOW) == "3 weeks ago"
     assert when.age(day(2026, 5, 1), NOW) == "5 months ago"
     assert when.age(day(2023, 1, 1), NOW) == "3 years ago"
 
 
 def test_windows():
+    assert inside("what did I say an hour ago?", NOW - 3600) and not inside("an hour ago", NOW - 5 * 3600)
+    assert inside("a few hours ago", NOW - 3 * 3600)
+    assert inside("a few minutes ago", NOW - 5 * 60) and not inside("a few minutes ago", NOW - 3 * 3600)
     assert inside("our late coding session last night", day(2026, 10, 8, 23))
     assert inside("our late coding session last night", day(2026, 10, 9, 1))
     assert not inside("our late coding session last night", day(2026, 10, 6, 23))

@@ -14,7 +14,11 @@ The same folder carries the rest of what passes between them (persona-provider.m
 made a dream, holonomic says so in `slept/`, with the dream's text; whatever she writes about it comes back through
 `dream-thoughts/` and is kept with the dream as hers.  Before Hermes compresses a conversation, holonomic leaves
 the messages about to be summarised in `compressing/`, so that she can write about them while they are still as
-they were said (holonomic is told about compression; a plugin is not).  Once, the notes another model wrote in her voice before the
+they were said (holonomic is told about compression; a plugin is not).  The settings that decide what becomes of
+her memories (fading, and whether a dream strengthens what it reached) are written to `memory-settings.json`, so
+that she is told when they change; with a service that takes part in fading, nothing fades until she has agreed,
+in `fading.json`.  When she chooses which old memories a dream reached to keep closer, her choice comes back with
+her words on the dream.  Once, the notes another model wrote in her voice before the
 service ran are offered to her in `old-notes.json`, as dated text; holonomic leaves them as they are.
 
 Without a persona service nothing here changes anything.
@@ -43,6 +47,8 @@ SLEPT = "slept"                 # holonomic says here that it slept and what it 
 DREAM_THOUGHTS = "dream-thoughts"   # what she wrote about a dream; holonomic keeps it with the dream as hers
 OLD_NOTES = "old-notes.json"    # the notes another model wrote in her voice, offered to her once
 COMPRESSING = "compressing"     # a conversation about to be compressed, as it was; she may write about it
+MEMORY_SETTINGS = "memory-settings.json"   # the settings that decide what becomes of her memories; she is told of changes
+FADING = "fading.json"          # her decision about fading, written by the service from her answer
 IDLE_FRESH_SECONDS = 600        # a file older than this was left by a Hermes that is gone, and is not waited for
 
 PERSONA_DEFAULTS: Dict[str, Any] = {
@@ -201,11 +207,18 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
         return None
     from .backup import plugin_version     # the command line's package has no __version__ (backup.py)
     now = time.time() if now is None else now
+    choosing = wants(cfg, "dream_choice") and _reinforce_mode(cfg) == "chosen"
     item = {"slept_at": now,
-            "dreams": [{"id": d["id"], "text": d["text"], "pictures": len(d.get("pictures") or [])} for d in dreams],
+            "dreams": [dict({"id": d["id"], "text": d["text"], "pictures": len(d.get("pictures") or [])},
+                            **({"reached": [{"id": r["id"], "text": " ".join(str(r["text"]).split()), "created_at": r.get("created_at"),
+                                             "age": _age(r.get("created_at"), now), "faded": bool(r.get("faded"))}
+                                            for r in d.get("reached") or []]} if choosing else {}))
+                       for d in dreams],
             "her_accounts_stored": len(report.get("episodes") or []),
             "facts_learned": sum(len(r.get("stored") or []) for r in report.get("reflections") or []),
             "memory": f"holonomic/{plugin_version()}"}
+    if choosing:
+        item["keep_closer_amount"] = _CHOSEN_AMOUNT
     path = folder(home) / SLEPT / f"{int(now * 1000)}.json"
     try:
         _write(path, item)
@@ -213,6 +226,14 @@ def tell_slept(home, cfg: Optional[Dict[str, Any]], report: Dict[str, Any], now:
     except OSError as exc:
         logger.warning("holonomic: could not tell the persona service that memory slept: %s", exc)
         return None
+
+
+def _age(ts: Any, now: float) -> str:
+    from .when import age                 # stdlib only, like this file
+    try:
+        return age(float(ts), now) if ts else ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def _plain(content: Any) -> str:
@@ -277,26 +298,116 @@ def waiting_dream_thoughts(home) -> List[Path]:
         return []
 
 
-def take_dream_thoughts(engine, home, limit: int = 20) -> List[Dict[str, Any]]:
-    """Keep what she wrote about a dream with the dream, as hers.  The dream itself stays the memory system's."""
+def take_dream_thoughts(engine, home, limit: int = 20, cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Keep what she wrote about a dream with the dream, as hers.  The dream itself stays the memory system's.
+
+    With `dream_reinforce: chosen`, the older memories she chose to keep closer come with it ("keep_closer"): each
+    gains a little strength, only if that dream did reach it, and her choice is kept with the dream.  The dream
+    changes nothing in waking recall; she does, awake."""
     out: List[Dict[str, Any]] = []
     for path in waiting_dream_thoughts(home)[:limit]:
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
             text = " ".join(str(item.get("thoughts") or "").split())
             dream_id = int(item.get("dream_id") or 0)
+            chosen = [int(i) for i in item.get("keep_closer") or []]
         except (OSError, ValueError, TypeError) as exc:
             logger.warning("holonomic: her words on a dream could not be read (%s): %s", path.name, exc)
             continue
         found = engine.get(dream_id) if dream_id else None
-        if not text or not found:
-            _file_away(path, item, None, "empty" if not text else "no such dream")
+        if (not text and not chosen) or not found:
+            _file_away(path, item, None, "empty" if not (text or chosen) else "no such dream")
             continue
-        engine.update_meta(dream_id, {"her_thoughts": text[:4000], "her_thoughts_at": item.get("written_at") or time.time(),
-                                      "her_thoughts_entry": item.get("entry_hash", "")})
-        out.append({"dream": dream_id, "thoughts": text})
+        changes: Dict[str, Any] = {}
+        if text:
+            changes.update(her_thoughts=text[:4000], her_thoughts_at=item.get("written_at") or time.time(),
+                           her_thoughts_entry=item.get("entry_hash", ""))
+        kept: List[int] = []
+        if chosen:
+            # What she chose is kept with the dream whatever happens; what it strengthened is `kept_closer`.
+            if _reinforce_mode(cfg) == "chosen":
+                reached = set((found.get("meta") or {}).get("older") or [])
+                kept = [i for i in dict.fromkeys(chosen) if i in reached and engine.get(i)]
+                if kept:
+                    engine.reinforce(kept, _CHOSEN_AMOUNT)
+            changes.update(chose_closer=list(dict.fromkeys(chosen)), kept_closer=kept,
+                           kept_closer_at=item.get("written_at") or time.time(),
+                           kept_closer_entry=item.get("choice_entry_hash", "") or item.get("entry_hash", ""))
+        engine.update_meta(dream_id, changes)
+        out.append(dict({"dream": dream_id, "thoughts": text}, **({"kept_closer": kept} if chosen else {})))
         _file_away(path, item, dream_id, "stored")
     return out
+
+
+_CHOSEN_AMOUNT = 0.1     # sleep.DREAM_CHOSEN_AMOUNT; sleep.py is not imported here (stdlib only)
+
+
+def _reinforce_mode(cfg: Optional[Dict[str, Any]]) -> str:
+    value = (cfg or {}).get("dream_reinforce", "off")
+    word = str(value).strip().lower()
+    if value is True or word in ("all", "true", "on", "yes", "1"):
+        return "all"
+    return "chosen" if word == "chosen" else "off"
+
+
+def her_fading(home, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """With a persona service that takes part in fading ("fading=1"): whether she has agreed to fading, from her
+    latest decision in `fading.json`.  No decision is not agreement.  None without such a service: the setting
+    alone decides, as before."""
+    if not wants(cfg, "fading"):
+        return None
+    try:
+        decided = json.loads((folder(home) / FADING).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(decided, dict) or decided.get("fading") is not True:
+        return False
+    # She agreed to fading as it was set then.  A shorter half-life or a higher threshold is not what she agreed to,
+    # and waits for her again.
+    now = memory_settings(cfg)
+    try:
+        return all(float(decided[k]) == float(now[k]) for k in ("fade_half_life_days", "fade_threshold") if k in decided)
+    except (TypeError, ValueError):
+        return False
+
+
+def memory_settings(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The settings that decide what becomes of her memories, as they are now."""
+    c = cfg or {}
+    return {"fade_enabled": str(c.get("fade_enabled", True)).strip().lower() not in ("false", "0", "no", "off"),
+            "fade_half_life_days": float(c.get("fade_half_life_days", 5.0)),
+            "fade_threshold": float(c.get("fade_threshold", 0.35)),
+            "dream_reinforce": _reinforce_mode(c)}
+
+
+def tell_settings(home, cfg: Optional[Dict[str, Any]], restored: Optional[Dict[str, Any]] = None,
+                  now: Optional[float] = None) -> Optional[Path]:
+    """Write the settings that decide what becomes of her memories where the persona service reads them, so that
+    she is told when they change (and of a restore, `hermes holonomic unfade`).  Written when Hermes loads memory
+    and after an unfade; the service compares it with what she was last told."""
+    if not wants(cfg, "fading"):
+        return None
+    from .backup import plugin_version     # the command line's package has no __version__ (backup.py)
+    now = time.time() if now is None else now
+    path = folder(home) / MEMORY_SETTINGS
+    try:
+        before = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        before = {}
+    item = dict(memory_settings(cfg), at=now, memory=f"holonomic/{plugin_version()}")
+    if restored is not None:
+        item["restored"] = restored
+    elif isinstance(before, dict) and before.get("restored"):
+        item["restored"] = before["restored"]
+    if isinstance(before, dict) and {k: v for k, v in before.items() if k not in ("at", "memory")} == \
+            {k: v for k, v in item.items() if k not in ("at", "memory")}:
+        return path
+    try:
+        _write(path, item)
+        return path
+    except OSError as exc:
+        logger.warning("holonomic: could not write the memory settings for the persona service: %s", exc)
+        return None
 
 
 # What another model wrote in her voice before the persona service ran: holonomic's reflection model's notes about

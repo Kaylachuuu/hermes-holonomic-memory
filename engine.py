@@ -1172,6 +1172,20 @@ class HolonomicMemory:
         return changed
 
     @_locked
+    def raise_strength(self, targets: dict[int, float]) -> int:
+        """Raise each memory to its target strength.  A memory already at or above it keeps what it has: this
+        only ever raises (`hermes holonomic unfade`)."""
+        changed = 0
+        for mid, target in targets.items():
+            row = self._row.get(int(mid))
+            if row is None or float(target) <= float(self._strength.a[row]):
+                continue
+            self._strength.a[row] = float(target)
+            self._db.execute("UPDATE memories SET strength = ? WHERE id = ?", (float(target), int(mid)))
+            changed += 1
+        return changed
+
+    @_locked
     def sessions(self, kinds: tuple[str, ...] | list[str], *, realm: str = "waking") -> list[dict]:
         """One row per conversation: its id, first and last memory, size and time span."""
         marks = ",".join("?" * len(kinds))

@@ -38,6 +38,7 @@
     hermes holonomic faces image ID off|on        do not look for faces in one image (a street full of strangers)
     hermes holonomic faces show ID | name ID NAME [--face N] [--me] | not ID NAME | people | often | dream NAME yes|no | forget NAME | scan
     hermes holonomic context                      what memory gave her for the most recent message
+    hermes holonomic unfade [--apply] [--no-images]   put faded memories back to the strength they were stored with
     hermes holonomic tidy [--apply]               find stored messages that are Hermes' notes about attachments, and remove them
     hermes holonomic profile [--history]
     hermes holonomic profile --set user "Kayla is ..."      (who: user, self or us)
@@ -520,7 +521,7 @@ def holonomic_command(args) -> None:
     except Exception:
         pass
     action = getattr(args, "holonomic_action", None)
-    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore", "plates"):
+    if action not in ("stats", "list", "recall", "reflect", "profile", "show", "forget", "sleep", "dreams", "dreamtalk", "relabel", "images", "tidy", "context", "faces", "library", "backup", "restore", "plates", "unfade"):
         print('Usage: hermes holonomic stats | list [-n N] | recall "query" [-k N] [--deep] | show ID... | forget ID... [--yes] | '
               'reflect status|on|off|now | sleep status|on|off|now | dreams | images | profile [--history]')
         return
@@ -565,6 +566,8 @@ def holonomic_command(args) -> None:
                 print((engine.path / "last_context.txt").read_text(encoding="utf-8").rstrip())
             except OSError:
                 print("Nothing yet: this shows what memory gave her for the most recent message, once there has been one.")
+        elif action == "unfade":
+            _unfade(engine, cfg, args)
         elif action == "tidy":
             from .images import strip_image_markers
             from .sleep import RAW_KINDS
@@ -1455,6 +1458,38 @@ def _print_calls(report) -> None:
             print(f"      her reasoning: {c['thinking'][:1200]}{'...' if len(c['thinking']) > 1200 else ''}")
 
 
+def _unfade(engine, cfg, args) -> None:
+    """Put faded memories back to the strength they were stored with."""
+    from hermes_constants import get_hermes_home
+    from . import persona as _persona
+    from .sleep import sleep_config, unfade
+    from .when import age
+    r = unfade(engine, cfg, apply=args.apply, images=not args.no_images)
+    print(f"  {r['said'] + r['images']} memories could have faded: {r['said']} sentences of conversation she has an "
+          f"account of" + (f", and {r['images']} descriptions of what she saw in images" if not args.no_images else ""
+                           " (images left out)") + ".")
+    for kind, n in sorted(r["by_kind"].items()):
+        print(f"    {kind:<20} {n['eligible']:>6}, {n['below']} of them below the strength they were stored with")
+    if not r["below"]:
+        print("  None is below the strength it was stored with. Nothing to put back.")
+    else:
+        low = r["lowest"]
+        print(f"  {r['below']} are below the strength they were stored with. The lowest is at {low['ratio']:.2f} of it "
+              f"(#{low['id']}, {low['kind']}, from {age(low['created_at'])}); half of them are at {r['median']:.2f} of it or more.")
+        print(f"  {r['under_threshold']} are below {r['threshold']}, where everyday recall leaves a memory out.")
+        if args.apply:
+            print(f"  Raised {r['raised']} to the strength they were stored with. Nothing was lowered.")
+        else:
+            print("  Nothing was changed. Run it again with --apply to raise them. Nothing is ever lowered.")
+    if args.apply:
+        _persona.tell_settings(get_hermes_home(), cfg, restored={"at": time.time(), "raised": r["raised"],
+                                                                  "images": not args.no_images})
+    sc = sleep_config(cfg)
+    her = _persona.her_fading(get_hermes_home(), cfg)
+    if sc["fade_enabled"] and her is not False:
+        print("  Fading is still on, so the next sleep will start lowering them again. To stop it: fade_enabled: false.")
+
+
 def _sleep(engine, cfg, args) -> None:
     from hermes_constants import get_hermes_home
     from .provider import extract_keys
@@ -1471,6 +1506,16 @@ def _sleep(engine, cfg, args) -> None:
         print(f"  dream model: {sc['dream_model'] or cfg.get('reflect_model') or '(not set)'}")
         from . import persona as _persona
         svc = _persona.service(cfg)
+        her = _persona.her_fading(get_hermes_home(), cfg)
+        if sc["fade_enabled"] and her is False:
+            print("  fading: on in the settings, but nothing fades: she has not agreed to it (hermes persona ask-fading)")
+        elif her is not None:
+            print(f"  fading: decided with her ({'she agreed to it' if her else 'she has not agreed to it'})")
+        mode = sc["dream_reinforce"]
+        print("  a dream strengthens what it reached: " + {
+            "off": "no", "all": "yes, every older memory it reached",
+            "chosen": ("she chooses which, after each dream" if _persona.wants(cfg, "dream_choice") else
+                       "set to 'chosen', but no persona service takes part, so nothing is strengthened")}[mode])
         if svc:
             print(f"  persona service: {svc['name']} {svc['version']}".rstrip() + ". Nothing is written in her voice: no notes or "
                   "profiles of hers, no accounts of conversations (she writes her own), no waking thoughts on a dream")
@@ -1494,7 +1539,8 @@ def _sleep(engine, cfg, args) -> None:
     try:
         report = sleep_once(engine, cfg, dry_run=args.dry_run, key_fn=extract_keys,
                             foundation=read_foundation(get_hermes_home()), steps=steps, persona=persona,
-                            accounts=(lambda: _persona.take_accounts(engine, get_hermes_home(), key_fn=extract_keys)) if persona else None)
+                            accounts=(lambda: _persona.take_accounts(engine, get_hermes_home(), key_fn=extract_keys)) if persona else None,
+                            her_fading=_persona.her_fading(get_hermes_home(), cfg))
         report["persona"] = persona
         if persona and _persona.tell_slept(get_hermes_home(), cfg, report):
             report["told"] = True
@@ -1515,7 +1561,10 @@ def _sleep(engine, cfg, args) -> None:
         print(f"  STOPPED   {report['interrupted']}")
     if report["fade"]:
         f = report["fade"]
-        print(f"  FADE      {f['eligible']} summarised memories x {f['factor']}" + ("" if args.dry_run else f", {f['changed']} lowered"))
+        if f.get("skipped"):
+            print(f"  FADE      skipped: {f['skipped']}")
+        else:
+            print(f"  FADE      {f['eligible']} summarised memories x {f['factor']}" + ("" if args.dry_run else f", {f['changed']} lowered"))
     d = report["dream"]
     if d and d.get("skipped"):
         print(f"  DREAM     skipped: {d['skipped']}")
@@ -1769,6 +1818,9 @@ def register_cli(subparser) -> None:
     plt = subs.add_parser("plates", help="Check the write log against the plates, and measure what the plates do at recall (changes nothing)")
     plt.add_argument("plates_action", nargs="?", choices=["status", "check"], default="status")
     plt.add_argument("-n", type=int, default=300, help="With 'check': how many memories to use as cues (default 300)")
+    uf = subs.add_parser("unfade", help="Put faded memories back to the strength they were stored with (only ever raises)")
+    uf.add_argument("--apply", action="store_true", help="Raise them (without this, it only reports)")
+    uf.add_argument("--no-images", action="store_true", help="Leave what she saw in images as it is")
     td = subs.add_parser("tidy", help="Find stored messages that are Hermes' notes about attachments, and remove them")
     td.add_argument("--apply", action="store_true", help="Remove what is found (without this, it is only listed)")
     td.add_argument("--width", type=int, default=110, help="Characters of text to show")
