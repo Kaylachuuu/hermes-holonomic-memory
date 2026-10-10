@@ -438,6 +438,11 @@ the thing thymos exists to prevent. What changes:
   notes, relationship notes and the two profiles are offered to her (thymos 0.4 or later), in
   `plugin-data/thymos/old-notes.json`, as dated text that model wrote. She keeps what she recognises in her own
   words, in her own record. Holonomic changes nothing in them.
+- **Before Hermes compresses a conversation, she is told** (thymos 0.9 or later). Holonomic is told before the
+  older messages are summarised; a plugin is not. It leaves the messages as they are in
+  `plugin-data/thymos/compressing/` (text only, a long tool result cut), and thymos offers them to her at the next
+  idle point. If she writes an account of them, holonomic stores it as her memory of that part of the conversation,
+  the same way as any other account.
 - **Her work comes first at idle.** While thymos has a reflection or an account waiting or running, reflection
   and sleep wait (`hermes holonomic sleep status` says so). Thymos says what it has waiting in
   `plugin-data/thymos/idle.json`; a file not rewritten for ten minutes is ignored.
